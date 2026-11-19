@@ -24,7 +24,7 @@ type FAPILoginHTTP struct {
 func (h FAPILoginHTTP) Authorize(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	if h.Private == nil || !(LoginHTTP{Origin: h.Origin}).validOrigin() || h.Issuer != h.Origin+"/oauth/"+h.Private.PAR.ProjectID || r.Method != http.MethodGet || r.Host != strings.TrimPrefix(h.Origin, "https://") || r.URL.Path != "/oauth/"+h.Private.PAR.ProjectID+"/authorize" {
+	if h.Private == nil || !(LoginHTTP{Origin: h.Origin}).validOrigin() || h.Issuer != h.Private.Assertions.Issuer || (h.Issuer != h.Origin+"/oauth/"+h.Private.PAR.ProjectID && h.Issuer != h.Origin+"/fapi/"+h.Private.PAR.ProjectID) || r.Method != http.MethodGet || r.Host != strings.TrimPrefix(h.Origin, "https://") || h.Origin+r.URL.Path != h.Issuer+"/authorize" {
 		http.NotFound(w, r)
 		return
 	}
@@ -34,6 +34,10 @@ func (h FAPILoginHTTP) Authorize(w http.ResponseWriter, r *http.Request) {
 	if len(r.URL.RawQuery) > 8192 || len(values["client_id"]) != 1 || len(values["request_uri"]) != 1 {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
+	}
+	handleParam := "mapi_oauth"
+	if h.Issuer == h.Origin+"/fapi/"+h.Private.PAR.ProjectID {
+		handleParam = "mapi_fapi"
 	}
 	requestURI := values.Get("request_uri")
 	if !strings.HasPrefix(requestURI, parPrefix) || !validLoginSecret(strings.TrimPrefix(requestURI, parPrefix)) {
@@ -72,7 +76,7 @@ func (h FAPILoginHTTP) Authorize(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid request", http.StatusBadRequest)
 			return
 		}
-		http.Redirect(w, r, h.Origin+"/login?mapi_oauth="+url.QueryEscape(reloadHandle), http.StatusSeeOther)
+		http.Redirect(w, r, h.Origin+"/login?"+handleParam+"="+url.QueryEscape(reloadHandle), http.StatusSeeOther)
 		return
 	}
 	var handle, binding string
@@ -97,7 +101,7 @@ func (h FAPILoginHTTP) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: loginBindingName(handle), Value: binding, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(h.Login.LoginTTL.Seconds())})
 	http.SetCookie(w, &http.Cookie{Name: reloadName, Value: handle, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(h.Private.PAR.TTL.Seconds())})
-	http.Redirect(w, r, h.Origin+"/login?mapi_oauth="+url.QueryEscape(handle), http.StatusSeeOther)
+	http.Redirect(w, r, h.Origin+"/login?"+handleParam+"="+url.QueryEscape(handle), http.StatusSeeOther)
 }
 
 func (h FAPILoginHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {

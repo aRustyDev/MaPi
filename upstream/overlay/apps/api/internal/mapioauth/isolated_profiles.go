@@ -21,6 +21,9 @@ type IsolatedProfiles struct {
 	FAPI    *PrivateFAPI
 	Private *PrivatePAR
 	Clients IsolatedProfileClients
+	// FAPIScopes advertises only scopes configured for the private test deployment.
+	// The caller must provision corresponding client policies.
+	FAPIScopes []string
 }
 type IsolatedProfileClients struct {
 	Store     Store
@@ -148,7 +151,7 @@ func ComposeIsolatedProfiles(c Config) (*IsolatedProfiles, error) {
 	fapi.Tokens.Registry.Admit = clients.admit("fapi")
 	fapi.Exchange.Mint = fapi.Tokens.Mint
 	fapi.Revocation.Issuer = fapi.Tokens
-	return &IsolatedProfiles{Bearer: bearer, FAPI: fapi, Private: private, Clients: clients}, nil
+	return &IsolatedProfiles{Bearer: bearer, FAPI: fapi, Private: private, Clients: clients, FAPIScopes: []string{"openid", "offline_access"}}, nil
 }
 func (p *IsolatedProfiles) InitializeSchema(ctx context.Context) error {
 	if p == nil || p.Bearer == nil || p.Private == nil || p.Clients.Store.Transaction == nil {
@@ -178,5 +181,5 @@ func (p *IsolatedProfiles) FAPIDiscovery(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "pushed_authorization_request_endpoint": issuer + "/par", "jwks_uri": issuer + "/jwks", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token"}, "subject_types_supported": []string{"public"}, "id_token_signing_alg_values_supported": []string{"ES256"}, "token_endpoint_auth_methods_supported": []string{"private_key_jwt"}, "token_endpoint_auth_signing_alg_values_supported": []string{"PS256", "ES256", "EdDSA"}, "code_challenge_methods_supported": []string{"S256"}, "require_pushed_authorization_requests": true, "dpop_signing_alg_values_supported": []string{"PS256", "ES256", "EdDSA"}, "authorization_response_iss_parameter_supported": true})
+	_ = json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "pushed_authorization_request_endpoint": issuer + "/par", "jwks_uri": issuer + "/jwks", "scopes_supported": p.FAPIScopes, "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token"}, "subject_types_supported": []string{"public"}, "id_token_signing_alg_values_supported": []string{"ES256"}, "token_endpoint_auth_methods_supported": []string{"private_key_jwt"}, "token_endpoint_auth_signing_alg_values_supported": []string{"PS256", "ES256", "EdDSA"}, "code_challenge_methods_supported": []string{"S256"}, "require_pushed_authorization_requests": true, "dpop_signing_alg_values_supported": []string{"PS256", "ES256", "EdDSA"}, "authorization_response_iss_parameter_supported": true})
 }

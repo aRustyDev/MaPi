@@ -22,12 +22,16 @@ func (h FAPIConsentHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "strict-origin")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if !(LoginHTTP{Origin: h.Origin}).validOrigin() || h.Issuer != h.Origin+"/oauth/"+h.Login.ProjectID || r.URL.Path != "/oauth/continue" || r.Host != strings.TrimPrefix(h.Origin, "https://") {
+	continuation := "/oauth/continue"
+	if h.Issuer == h.Origin+"/fapi/"+h.Login.ProjectID {
+		continuation = "/fapi/continue"
+	}
+	if !(LoginHTTP{Origin: h.Origin}).validOrigin() || (h.Issuer != h.Origin+"/oauth/"+h.Login.ProjectID && h.Issuer != h.Origin+"/fapi/"+h.Login.ProjectID) || r.URL.Path != continuation || r.Host != strings.TrimPrefix(h.Origin, "https://") {
 		http.NotFound(w, r)
 		return
 	}
 	if r.Method == http.MethodGet {
-		h.show(w, r)
+		h.show(w, r, continuation)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -98,7 +102,7 @@ func (h FAPIConsentHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, u.String(), http.StatusSeeOther)
 }
 
-func (h FAPIConsentHTTP) show(w http.ResponseWriter, r *http.Request) {
+func (h FAPIConsentHTTP) show(w http.ResponseWriter, r *http.Request, continuation string) {
 	if len(r.URL.Query()) != 1 || len(r.URL.Query()["request"]) != 1 {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
@@ -123,5 +127,5 @@ func (h FAPIConsentHTTP) show(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self' "+target.Scheme+"://"+target.Host+"; base-uri 'none'; frame-ancestors 'none'")
 	esc := template.HTMLEscapeString
-	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Authorize application</title><h1>Authorize application</h1><p>Application: ` + esc(details.ClientID) + `</p><p>Requested access: ` + esc(details.Scope) + `</p><form method="post" action="/oauth/continue"><input type="hidden" name="request" value="` + esc(handle) + `"><input type="hidden" name="csrf" value="` + esc(api.CSRFToken(session)) + `"><button type="submit" name="decision" value="allow">Continue</button><button type="submit" name="decision" value="deny">Deny</button></form></html>`))
+	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Authorize application</title><h1>Authorize application</h1><p>Application: ` + esc(details.ClientID) + `</p><p>Requested access: ` + esc(details.Scope) + `</p><form method="post" action="` + esc(continuation) + `"><input type="hidden" name="request" value="` + esc(handle) + `"><input type="hidden" name="csrf" value="` + esc(api.CSRFToken(session)) + `"><button type="submit" name="decision" value="allow">Continue</button><button type="submit" name="decision" value="deny">Deny</button></form></html>`))
 }

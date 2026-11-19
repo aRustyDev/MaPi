@@ -1,9 +1,10 @@
 // The value is inserted into an HTML attribute and is also an upstream
 // project identifier. Refuse anything outside the upstream identifier syntax.
-export function renderLogin(projectId, oauthHandle = "") {
+export function renderLogin(projectId, oauthHandle = "", profile = "oauth") {
   if (!/^proj_[A-Za-z0-9_-]+$/.test(projectId)) throw new Error("Invalid project ID");
   if (oauthHandle && !/^[A-Za-z0-9_-]{43}$/.test(oauthHandle)) throw new Error("Invalid OAuth request handle");
-  const destination = oauthHandle ? `/oauth/continue?request=${oauthHandle}` : "/app";
+  if (!["oauth", "fapi"].includes(profile)) throw new Error("Invalid login profile");
+  const destination = oauthHandle ? `/${profile}/continue?request=${oauthHandle}` : "/app";
   return new Response(`<!doctype html>
 <html lang="en">
 <head>
