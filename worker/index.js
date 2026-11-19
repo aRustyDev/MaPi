@@ -9,6 +9,13 @@ const decoder = new TextDecoder();
 const rejected = Symbol("Go rejected the SQLite transaction");
 const NO_STORE = { "cache-control": "no-store" };
 
+function sessionTTLVariables(env) {
+  for (const name of ["MAPI_SESSION_DEFAULT_TTL", "MAPI_SESSION_MAX_TTL"]) {
+    if (env[name] !== undefined && typeof env[name] !== "string") throw new Error("Invalid session duration configuration");
+  }
+  return { sessionDefaultTTL: env.MAPI_SESSION_DEFAULT_TTL, sessionMaxTTL: env.MAPI_SESSION_MAX_TTL };
+}
+
 function isAuthRoute(method, pathname) {
   const path = pathname.replace(/^\/api\/v1(?=\/)/, "");
   if (method === "GET") return path === "/sessions/me";
@@ -40,49 +47,57 @@ export class NextgenProject extends DurableObject {
       this.ctx.storage.sql.exec("INSERT INTO mapi_fixture VALUES (1)");
     });
     let output;
-    this.#reactor = instantiateReactor(wasm, (memory) => {
-      this.#memory = memory;
-      return {
-        sql: (ptr, size) => {
-          const query = JSON.parse(decoder.decode(new Uint8Array(memory(), ptr, size)));
-          let result;
-          try {
-            if (this.#failAudit && /\bINSERT INTO events\b/i.test(query.statement)) {
-              this.#failAudit = false;
-              throw new Error("Injected mutation audit write failure");
+    try {
+      this.#reactor = instantiateReactor(wasm, (memory) => {
+        this.#memory = memory;
+        return {
+          sql: (ptr, size) => {
+            const query = JSON.parse(decoder.decode(new Uint8Array(memory(), ptr, size)));
+            let result;
+            try {
+              if (this.#failAudit && /\bINSERT INTO events\b/i.test(query.statement)) {
+                this.#failAudit = false;
+                throw new Error("Injected mutation audit write failure");
+              }
+              result = execute(this.ctx.storage, query);
+            } catch (error) {
+              if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
+              result = { error: sqliteError(error) };
             }
-            result = execute(this.ctx.storage, query);
-          } catch (error) {
-            if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
-            result = { error: sqliteError(error) };
-          }
-          output = encoder.encode(JSON.stringify(result));
-          return output.length;
-        },
-        result: (ptr, size) => {
-          new Uint8Array(memory(), ptr, size).set(output);
-          output.fill(0);
-          output = undefined;
-        },
-        transaction: () => {
-          try {
-            this.ctx.storage.transactionSync(() => {
-              if (this.#reactor.mapi_transaction_body() !== 0) throw rejected;
-            });
-            return 0;
-          } catch (error) {
-            if (error === rejected) return 1;
-            if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite commit:", String(error));
-            return 2;
-          }
-        },
-      };
-    }, (bytes) => {
-      if (this.#wasmDiagnostic.length < 2048) this.#wasmDiagnostic += decoder.decode(bytes);
-    });
-    const key = JSON.parse(decoder.decode(Uint8Array.fromBase64(this.env.MAPI_MASTER_KEY)));
-    if (this.#call("mapi_init", { ...key, projectId: fixture.projectId }) !== true) {
-      throw new Error("Go reactor initialization failed");
+            output = encoder.encode(JSON.stringify(result));
+            return output.length;
+          },
+          result: (ptr, size) => {
+            new Uint8Array(memory(), ptr, size).set(output);
+            output.fill(0);
+            output = undefined;
+          },
+          transaction: () => {
+            try {
+              this.ctx.storage.transactionSync(() => {
+                if (this.#reactor.mapi_transaction_body() !== 0) throw rejected;
+              });
+              return 0;
+            } catch (error) {
+              if (error === rejected) return 1;
+              if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite commit:", String(error));
+              return 2;
+            }
+          },
+        };
+      }, (bytes) => {
+        if (this.#wasmDiagnostic.length < 2048) this.#wasmDiagnostic += decoder.decode(bytes);
+      });
+      let key;
+      try { key = JSON.parse(decoder.decode(Uint8Array.fromBase64(this.env.MAPI_MASTER_KEY))); }
+      catch { throw new Error("Invalid master key configuration"); }
+      if (this.#call("mapi_init", { ...key, projectId: fixture.projectId, ...sessionTTLVariables(this.env) }) !== true) {
+        throw new Error("Go reactor initialization failed");
+      }
+    } catch (error) {
+      this.#reactor = undefined;
+      this.#memory = undefined;
+      throw error;
     }
   }
 

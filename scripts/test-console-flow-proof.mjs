@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {generateKeyPairSync,randomBytes,randomUUID} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {mkdtemp,rm,writeFile} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
@@ -13,8 +13,9 @@ const dir=await mkdtemp(resolve(tmpdir(),'mapi-console-flow-'));let server,brows
 try{
  const p=await port(),inspector=await port(),origin=`http://127.0.0.1:${p}`,other=`http://localhost:${p}`,operator=randomBytes(32).toString('base64url');
  const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048,privateKeyEncoding:{type:'pkcs8',format:'pem'},publicKeyEncoding:{type:'spki',format:'pem'}});
- const vars=resolve(dir,'vars');await writeFile(vars,`MAPI_APP_ORIGIN=${origin}\nMAPI_OPERATOR_TOKEN=${operator}\nMAPI_MASTER_KEY=${Buffer.from(JSON.stringify({id:'master-test',pem:privateKey})).toString('base64')}\nMAPI_LOCAL_TEST=1\n`,{mode:0o600});
- server=spawn(process.execPath,[resolve('node_modules/wrangler/bin/wrangler.js'),'dev','--local','--config','scripts/console-flow-proof.wrangler.jsonc','--env-file',vars,'--ip','127.0.0.1','--port',String(p),'--inspector-port',String(inspector),'--persist-to',resolve(dir,'state')],{stdio:['ignore','ignore','pipe'],env:{...process.env,WRANGLER_LOG_PATH:resolve(dir,'wrangler.log'),WRANGLER_SEND_METRICS:'false'}});server.stderr.on('data',c=>logs=(logs+c).slice(-8000));
+ const sessionVars=process.env.MAPI_TEST_SESSION_CONFIG==='1'?'MAPI_SESSION_DEFAULT_TTL=2h\nMAPI_SESSION_MAX_TTL=4h\n':'';
+ const vars=resolve(dir,'vars'), baseVars=`MAPI_APP_ORIGIN=${origin}\nMAPI_OPERATOR_TOKEN=${operator}\nMAPI_MASTER_KEY=${Buffer.from(JSON.stringify({id:'master-test',pem:privateKey})).toString('base64')}\nMAPI_LOCAL_TEST=1\n`;await writeFile(vars,baseVars+sessionVars,{mode:0o600});
+ const launch=(config='scripts/console-flow-proof.wrangler.jsonc')=>{server=spawn(process.execPath,[resolve('node_modules/wrangler/bin/wrangler.js'),'dev','--local','--config',config,'--env-file',vars,'--ip','127.0.0.1','--port',String(p),'--inspector-port',String(inspector),'--persist-to',resolve(dir,'state')],{stdio:['ignore','ignore','pipe'],env:{...process.env,WRANGLER_LOG_PATH:resolve(dir,'wrangler.log'),WRANGLER_SEND_METRICS:'false'}});server.stderr.on('data',c=>logs=(logs+c).slice(-8000));};launch();
  const send=(base,path,{method='GET',headers={},body}={})=>fetch(base+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),redirect:'manual'});
  for(let n=0;;n++){if(server.exitCode!==null||n===100)throw Error('workerd not ready');try{await send(origin,'/console/runtime.json');break}catch{await setTimeout(200)}}
  assert.equal((await send(origin,'/console/runtime.json')).status,503);assert.equal((await send(other,'/console/runtime.json')).status,503);
@@ -60,7 +61,7 @@ try{
  const exchangeBody=exchangeResult.request().postDataJSON();assert.ok(typeof exchangeBody.handoff_token==='string');const replay=await send(origin,`/api/v1/sessions/exchange?project_id=${encodeURIComponent(project)}`,{method:'POST',headers:{origin,'content-type':'application/json'},body:exchangeBody});assert.ok(replay.status>=400&&replay.status<500,'handoff replay must fail');
  const cookie=(await page.context().cookies()).find(c=>c.name==='zitadel_session');assert.ok(cookie?.httpOnly,'real HttpOnly session cookie');
  const sessionPath=`/api/v1/sessions/me?project_id=${encodeURIComponent(project)}`;const cookieHeader=`${cookie.name}=${cookie.value}`;
- const me=await send(origin,sessionPath,{headers:{cookie:cookieHeader}});assert.equal(me.status,200);assert.equal(me.headers.get('cache-control'),'no-store');assert.ok((await me.json()).user_id);
+ const me=await send(origin,sessionPath,{headers:{cookie:cookieHeader}});assert.equal(me.status,200);assert.equal(me.headers.get('cache-control'),'no-store');const meData=await me.json();assert.ok(meData.user_id);if(process.env.MAPI_TEST_SESSION_CONFIG==='1'){const remaining=Date.parse(meData.expires_at)-Date.now();assert.ok(remaining>7190000&&remaining<=7200000,'configured app session default');}
  assert.equal((await send(origin,sessionPath,{headers:{cookie:cookieHeader,origin:other}})).status,403);
  assert.equal((await send(origin,`/api/v1/sessions/me?project_id=${foreignProject}`,{headers:{cookie:cookieHeader}})).status,403);
  assert.equal((await send(other,`/api/v1/sessions/me?project_id=${foreignProject}`,{headers:{cookie:cookieHeader}})).status,401);
@@ -73,6 +74,35 @@ try{
  assert.equal((await send(origin,sessionPath,{method:'DELETE',headers:{cookie:cookieHeader,origin,'x-zitadel-csrf':'invalid'}})).status,403);
  const logout=await send(origin,sessionPath,{method:'DELETE',headers:{cookie:cookieHeader,origin,'x-zitadel-csrf':csrf}});assert.equal(logout.status,204);const clearing=logout.headers.get('set-cookie')??'';assert.match(clearing,/zitadel_session=/);assert.match(clearing,/max-age=0/i);
  assert.equal((await send(origin,sessionPath,{headers:{cookie:cookieHeader}})).status,401,'revoked cookie remained valid');
+ if(process.env.MAPI_TEST_SESSION_CONFIG==='1'){
+  const withoutMaster=baseVars.replace(/^MAPI_MASTER_KEY=.*\n/m,'');
+  const failures=[
+   ['invalid TTL',baseVars+'MAPI_SESSION_DEFAULT_TTL=5h\nMAPI_SESSION_MAX_TTL=4h\n',true],
+   ['malformed key',withoutMaster+'MAPI_MASTER_KEY=invalid\nMAPI_SESSION_DEFAULT_TTL=2h\nMAPI_SESSION_MAX_TTL=4h\n',true],
+   ['missing key',withoutMaster+'MAPI_SESSION_DEFAULT_TTL=2h\nMAPI_SESSION_MAX_TTL=4h\n',true],
+   ['malformed default key',withoutMaster+'MAPI_MASTER_KEY=invalid\n',false],
+   ['missing default key',withoutMaster,false],
+   ['null TTL binding',baseVars+'MAPI_SESSION_MAX_TTL=4h\n',true,{MAPI_SESSION_DEFAULT_TTL:null}],
+   ['number TTL binding',baseVars+'MAPI_SESSION_DEFAULT_TTL=2h\n',true,{MAPI_SESSION_MAX_TTL:123}],
+   ['boolean TTL binding',baseVars+'MAPI_SESSION_MAX_TTL=4h\n',true,{MAPI_SESSION_DEFAULT_TTL:true}],
+   ['object TTL binding',baseVars+'MAPI_SESSION_DEFAULT_TTL=2h\n',true,{MAPI_SESSION_MAX_TTL:{}}],
+   ['array TTL binding',baseVars+'MAPI_SESSION_MAX_TTL=4h\n',true,{MAPI_SESSION_DEFAULT_TTL:[]}],
+  ];
+  for(const [label,configuration,rejectOfficial,bindings] of failures){
+   const stopped=once(server,'exit');server.kill('SIGTERM');await stopped;
+   let configPath='scripts/console-flow-proof.wrangler.jsonc';
+   if(bindings){const config=JSON.parse(await readFile(configPath,'utf8'));config.main=resolve('scripts/console-flow-proof-worker.mjs');config.assets.directory=resolve('worker/generated/console-assets');config.vars=bindings;configPath=resolve(dir,'invalid-bindings.json');await writeFile(configPath,JSON.stringify(config));}
+   await writeFile(vars,configuration+'MAPI_OFFICIAL_LOGIN=1\n',{mode:0o600});launch(configPath);
+   let status;for(let n=0;n<100;n++){if(server.exitCode!==null)throw Error('workerd exited during invalid-config restart');try{status=await send(origin,'/_mapi/admin/status',{headers:{authorization:`Bearer ${operator}`}});break}catch{await setTimeout(200)}}
+   assert.ok(status,'invalid-config restart not ready');
+   for(let n=0;n<3;n++){
+    if(n)status=await send(origin,'/_mapi/admin/status',{headers:{authorization:`Bearer ${operator}`}});
+    assert.equal(status.status,200);const state=await status.json();assert.equal(state.ready,false,`${label} reported ready`);assert.equal(state.configurationReady,false,`${label} accepted on retry`);
+    assert.equal((await send(origin,'/console/runtime.json')).status,503,`${label} served Console runtime`);
+    if(rejectOfficial)assert.equal((await send(origin,'/login')).status,503,`${label} served official login`);
+   }
+  }
+ }
  assert.deepEqual(errors,[]);assert.equal(external.length,0,'browser contacted an external origin');
  console.log('Real local Console: official password flow, session exchange, CSRF logout, replay rejection and project/origin fencing passed.');
 }catch(e){if(logs)console.error(logs);throw e;}finally{await browser?.close();if(server&&server.exitCode===null&&server.signalCode===null){const done=once(server,'exit');server.kill('SIGTERM');await done;}await rm(dir,{recursive:true,force:true});}

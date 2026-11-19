@@ -91,6 +91,8 @@ The project registry associates each exact browser origin with one Durable Objec
 
 Open `http://localhost:8787/login`. The user must be created before sign-in. The operator CLI also accepts a password on standard input for automation. Keep `.dev.vars.app` private.
 
+The optional `MAPI_SESSION_DEFAULT_TTL` and `MAPI_SESSION_MAX_TTL` Worker variables configure session lifetimes using Go duration strings, for example `2h` and `4h`. When omitted, the pinned Nextgen defaults remain 24 hours and 720 hours. See [session lifetime behavior and validation](docs/session-lifetime-proof.md) for rollout and testing details.
+
 ### Isolated Cloudflare staging
 
 The configuration targets the Woven account and its [staging application](https://mapi-nextgen-app-staging.woven-4d9.workers.dev/login). The following creates a new key and operator token once for a fresh installation. Back up `.mapi/app-staging-secrets.json` securely, including its master key and key ID. Reuse the file for subsequent deployments of the migrated application.

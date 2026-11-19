@@ -2,7 +2,7 @@
 
 The authoritative upstream pin is [v0.7.0 at b0b74cd4a198428ea9b82910c217259ffc62b65c](https://github.com/zitadel/nextgen/tree/b0b74cd4a198428ea9b82910c217259ffc62b65c). Generate this file with `node scripts/parity-inventory.mjs > docs/parity-inventory.md`. Run `node scripts/parity-inventory.mjs --check` to detect drift.
 
-The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; the account build mounts seven, with separate test builds adding user creation and deletion. Other test builds mount four passkey, five self-service read, five team, and four invitation operations. Some routes appear in more than one build. Mounts alone do not establish public ingress or parity.
+The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; the account build mounts seven, with separate test builds adding user creation and deletion. Other test builds mount four passkey, five self-service read, five team, four invitation, and three session operations. Some routes appear in more than one build. Mounts alone do not establish public ingress or parity.
 
 The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.
 
@@ -53,10 +53,10 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | Projects | `removeProjectOrigin` | `POST /projects/{project_id}/origins/remove` | not mounted | none | native-versus-Worker test needed |
 | Previews | `listProjectPreviews` | `GET /projects/{project_id}/previews` | not mounted | none | native-versus-Worker test needed |
 | Previews | `removeProjectPreview` | `POST /projects/{project_id}/previews/remove` | not mounted | none | native-versus-Worker test needed |
-| Sessions | `createSession` | `POST /sessions` | not mounted | none | native-versus-Worker test needed |
-| Sessions | `querySessions` | `POST /sessions/query` | not mounted | none | native-versus-Worker test needed |
+| Sessions | `createSession` | `POST /sessions` | experimental session build only | experimental native/workerd session creation, operator permissions and pagination checks; foreign-credential status differs | partial behavior only |
+| Sessions | `querySessions` | `POST /sessions/query` | experimental session build only | experimental native/workerd session creation, operator permissions and pagination checks; foreign-credential status differs | partial behavior only |
 | Sessions | `exchangeHandoff` | `POST /sessions/exchange` | mounted | native/Worker parity harness, application journey | partial behavior only |
-| Sessions | `getSession` | `GET /sessions/{session_id}` | not mounted | none | native-versus-Worker test needed |
+| Sessions | `getSession` | `GET /sessions/{session_id}` | experimental session build only | experimental native/workerd session creation, operator permissions and pagination checks; foreign-credential status differs | partial behavior only |
 | Sessions | `revokeSession` | `DELETE /sessions/{session_id}` | mounted | native/Worker parity harness | partial behavior only |
 | Sessions | `getMySession` | `GET /sessions/me` | mounted | native/Worker parity harness, application journey | partial behavior only |
 | Sessions | `revokeMySession` | `DELETE /sessions/me` | mounted | application journey | partial behavior only |

@@ -37,9 +37,52 @@ var runtimeTokens service.TokenService
 var runtimeHashers *crypto.HasherFactory
 
 type configuration struct {
-	KeyID     string `json:"id"`
-	PEM       string `json:"pem"`
-	ProjectID string `json:"projectId"`
+	KeyID             string          `json:"id"`
+	PEM               string          `json:"pem"`
+	ProjectID         string          `json:"projectId"`
+	SessionDefaultTTL durationSetting `json:"sessionDefaultTTL"`
+	SessionMaxTTL     durationSetting `json:"sessionMaxTTL"`
+}
+
+// A pointer to string treats JSON null as omitted. Explicit null must fail
+// closed even if a future host bypasses the Worker's binding-type checks.
+type durationSetting struct {
+	Present bool
+	Value   string
+}
+
+func (s *durationSetting) UnmarshalJSON(value []byte) error {
+	if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return errors.New("invalid session duration configuration")
+	}
+	if err := json.Unmarshal(value, &s.Value); err != nil {
+		return errors.New("invalid session duration configuration")
+	}
+	s.Present = true
+	return nil
+}
+
+// sessionConfig keeps the native defaults and validation while allowing the
+// Worker deployment to opt in to the native server's duration settings.
+func (c configuration) sessionConfig() (service.SessionConfig, error) {
+	config := service.SessionConfig{DefaultTTL: domain.SessionDefaultTTL, MaxTTL: 720 * time.Hour}
+	for _, value := range []struct {
+		setting durationSetting
+		target  *time.Duration
+	}{{c.SessionDefaultTTL, &config.DefaultTTL}, {c.SessionMaxTTL, &config.MaxTTL}} {
+		if !value.setting.Present {
+			continue
+		}
+		duration, err := time.ParseDuration(value.setting.Value)
+		if err != nil {
+			return service.SessionConfig{}, errors.New("invalid session duration configuration")
+		}
+		*value.target = duration
+	}
+	if err := config.Validate(); err != nil {
+		return service.SessionConfig{}, err
+	}
+	return config, nil
 }
 
 type request struct {
@@ -111,6 +154,10 @@ func initialize() uint64 {
 	if err := json.Unmarshal(input, &config); err != nil {
 		return failure(err)
 	}
+	sessionConfig, err := config.sessionConfig()
+	if err != nil {
+		return failure(err)
+	}
 	key, err := crypto.ParseRSAKey(config.PEM)
 	if err != nil {
 		return failure(errors.New("invalid prototype master key"))
@@ -142,8 +189,7 @@ func initialize() uint64 {
 	attempts := service.NewAuthAttemptService(pool,
 		service.SessionStatementsResolver{Pool: pool}, service.UserStatementsLookup{Pool: pool},
 		service.NewProjectHasherResolver(pool, hashers), hasher)
-	sessions := service.NewSessionService(pool, refs,
-		service.SessionConfig{DefaultTTL: domain.SessionDefaultTTL, MaxTTL: 720 * time.Hour})
+	sessions := service.NewSessionService(pool, refs, sessionConfig)
 	releases := service.NewReleaseService(pool, nil, nil, nil, nil, nil, domain.BuiltinSchemaBases{})
 	flows, projects, err := newFlowStack(pool, keys, hashers, attempts)
 	if err != nil {

@@ -15,6 +15,13 @@ const decoder = new TextDecoder();
 const rejected = Symbol("transaction rejected");
 const noStore = { "cache-control": "no-store" };
 
+function sessionTTLVariables(env) {
+  for (const name of ["MAPI_SESSION_DEFAULT_TTL", "MAPI_SESSION_MAX_TTL"]) {
+    if (env[name] !== undefined && typeof env[name] !== "string") throw new Error("Invalid session duration configuration");
+  }
+  return { sessionDefaultTTL: env.MAPI_SESSION_DEFAULT_TTL, sessionMaxTTL: env.MAPI_SESSION_MAX_TTL };
+}
+
 function page(body, status = 200) {
   return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MaPi</title><body>${body}</body></html>`, {
     status, headers: { ...noStore, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" },
@@ -79,49 +86,57 @@ export class NextgenApplication extends DurableObject {
   #initialize() {
     if (this.#reactor) return;
     let output;
-    this.#reactor = instantiateReactor(wasm, (memory) => {
-      this.#memory = memory;
-      return {
-        sql: (ptr, size) => {
-          const query = JSON.parse(decoder.decode(new Uint8Array(memory(), ptr, size)));
-          let result;
-          try {
-            if (this.#failAudit > 0 && /\bINSERT INTO events\b/i.test(query.statement)) {
-              this.#failAudit--;
-              if (this.#failAudit === 0) throw new Error("Injected mutation audit write failure");
+    try {
+      this.#reactor = instantiateReactor(wasm, (memory) => {
+        this.#memory = memory;
+        return {
+          sql: (ptr, size) => {
+            const query = JSON.parse(decoder.decode(new Uint8Array(memory(), ptr, size)));
+            let result;
+            try {
+              if (this.#failAudit > 0 && /\bINSERT INTO events\b/i.test(query.statement)) {
+                this.#failAudit--;
+                if (this.#failAudit === 0) throw new Error("Injected mutation audit write failure");
+              }
+              result = execute(this.ctx.storage, query);
+            } catch (error) {
+              if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
+              result = { error: sqliteError(error) };
             }
-            result = execute(this.ctx.storage, query);
-          } catch (error) {
-            if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
-            result = { error: sqliteError(error) };
-          }
-          output = encoder.encode(JSON.stringify(result));
-          return output.length;
-        },
-        result: (ptr, size) => {
-          new Uint8Array(memory(), ptr, size).set(output);
-          output.fill(0);
-          output = undefined;
-        },
-        transaction: () => {
-          try {
-            this.ctx.storage.transactionSync(() => {
-              if (this.#reactor.mapi_transaction_body() !== 0) throw rejected;
-            });
-            return 0;
-          } catch (error) {
-            if (error === rejected) return 1;
-            if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite commit:", String(error));
-            return 2;
-          }
-        },
-      };
-    }, (bytes) => {
-      if (this.#wasmDiagnostic.length < 2048) this.#wasmDiagnostic += decoder.decode(bytes);
-    });
-    const key = JSON.parse(decoder.decode(Uint8Array.fromBase64(this.env.MAPI_MASTER_KEY)));
-    if (this.#call("mapi_init", { ...key, projectId: this.projectId() }) !== true) {
-      throw new Error("Go reactor initialization failed");
+            output = encoder.encode(JSON.stringify(result));
+            return output.length;
+          },
+          result: (ptr, size) => {
+            new Uint8Array(memory(), ptr, size).set(output);
+            output.fill(0);
+            output = undefined;
+          },
+          transaction: () => {
+            try {
+              this.ctx.storage.transactionSync(() => {
+                if (this.#reactor.mapi_transaction_body() !== 0) throw rejected;
+              });
+              return 0;
+            } catch (error) {
+              if (error === rejected) return 1;
+              if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite commit:", String(error));
+              return 2;
+            }
+          },
+        };
+      }, (bytes) => {
+        if (this.#wasmDiagnostic.length < 2048) this.#wasmDiagnostic += decoder.decode(bytes);
+      });
+      let key;
+      try { key = JSON.parse(decoder.decode(Uint8Array.fromBase64(this.env.MAPI_MASTER_KEY))); }
+      catch { throw new Error("Invalid master key configuration"); }
+      if (this.#call("mapi_init", { ...key, projectId: this.projectId(), ...sessionTTLVariables(this.env) }) !== true) {
+        throw new Error("Go reactor initialization failed");
+      }
+    } catch (error) {
+      this.#reactor = undefined;
+      this.#memory = undefined;
+      throw error;
     }
   }
 
@@ -170,10 +185,16 @@ export class NextgenApplication extends DurableObject {
 
   // Check registry routing and recovery state in the same synchronous owner
   // turn as the operation, so no state change can interleave after admission.
+  #configurationReady(verifyRuntime = false) {
+    if (!verifyRuntime && this.env.MAPI_SESSION_DEFAULT_TTL === undefined && this.env.MAPI_SESSION_MAX_TTL === undefined) return true;
+    try { this.#initialize(); return true; } catch { return false; }
+  }
+
   #admitRoute(route) {
     return Boolean(route?.projectId && route.origin && this.env.MAPI_MAINTENANCE !== "1" &&
       this.projectId() === route.projectId && this.projectOrigin() === route.origin &&
-      this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch === (this.env.MAPI_RECOVERY_EPOCH ?? "0"));
+      this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch === (this.env.MAPI_RECOVERY_EPOCH ?? "0") &&
+      this.#configurationReady());
   }
 
   admitLogin(route) {
@@ -372,10 +393,16 @@ export class NextgenApplication extends DurableObject {
     return this.#upstream("DELETE", `/sessions/me?project_id=${project}`, undefined, headers);
   }
 
-  status() {
+  status(verifyRuntime = false) {
+    const projectId = this.projectId();
+    // Preserve the existing lazy startup for deployments with default TTLs.
+    // An explicitly configured TTL must be validated by the Go reactor before
+    // an object can report ready, including before provisioning and after restart.
+    const configurationReady = this.#configurationReady(verifyRuntime);
     return {
       schemaVersion: this.ctx.storage.sql.exec("SELECT version FROM mapi_schema_version").one().version,
-      ready: Boolean(this.projectId()),
+      ready: Boolean(projectId) && configurationReady,
+      configurationReady,
       wasmMemoryBytes: this.#memory?.().byteLength ?? 0,
       maintenance: this.env.MAPI_MAINTENANCE === "1",
       recoveryReady: this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch === (this.env.MAPI_RECOVERY_EPOCH ?? "0"),
@@ -494,7 +521,7 @@ export default {
         return new Response(null, { status: 404, headers: { "cache-control": "no-store" } });
       }
       if (url.pathname.endsWith("/status") && request.method === "GET") {
-        return Response.json(await object.status(), { headers: { "cache-control": "no-store" } });
+        return Response.json(await object.status(true), { headers: { "cache-control": "no-store" } });
       }
       if (url.pathname.endsWith("/bookmark") && request.method === "GET") {
         return Response.json({ bookmark: await object.bookmark() }, { headers: noStore });
@@ -570,7 +597,7 @@ export default {
     }
     if (route.state !== "active") return new Response(null, { status: 503, headers: noStore });
     const appStatus = await object.status();
-    if (env.MAPI_MAINTENANCE === "1" || appStatus.maintenance || !appStatus.recoveryReady) return new Response(null, { status: 503, headers: noStore });
+    if (env.MAPI_MAINTENANCE === "1" || appStatus.maintenance || !appStatus.recoveryReady || !appStatus.ready) return new Response(null, { status: 503, headers: noStore });
     if (url.pathname === "/login" && request.method === "GET") {
       return page('<h1>Sign in</h1><form method="post" action="/login"><label>Email <input name="email" type="email" autocomplete="username" required></label><br><label>Password <input name="password" type="password" autocomplete="current-password" required></label><br><button>Sign in</button></form>');
     }

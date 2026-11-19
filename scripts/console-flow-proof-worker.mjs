@@ -7,7 +7,7 @@ const noStore={'cache-control':'no-store'};
 export default {async fetch(request,env,ctx) {
  const url=new URL(request.url);
  if(env.MAPI_LOCAL_TEST!=='1'||!['localhost','127.0.0.1','[::1]'].includes(url.hostname))return new Response(null,{status:404,headers:noStore});
- if(url.pathname==='/console/runtime.json'||url.pathname==='/_mapi/admin/projects'||url.pathname==='/_mapi/admin/users')return runtime.fetch(request,env,ctx);
+ if(url.pathname==='/console/runtime.json'||url.pathname==='/login'||url.pathname==='/_mapi/admin/status'||url.pathname==='/_mapi/admin/projects'||url.pathname==='/_mapi/admin/users')return runtime.fetch(request,env,ctx);
  if(url.pathname==='/ui/console'||url.pathname.startsWith('/ui/console/'))return assets.fetch(request,env,ctx);
  if(url.pathname.startsWith('/api/v1/flows')||url.pathname==='/api/v1/sessions/exchange') {
   const route=await env.PROJECT_REGISTRY.getByName('projects').resolve(url.origin);
