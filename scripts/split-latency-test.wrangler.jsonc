@@ -1,0 +1,9 @@
+{
+  "name": "mapi-split-latency-test",
+  "main": "split-latency-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "services": [{ "binding": "ARGON_VERIFIER", "service": "mapi-argon-spike-verifier" }],
+  "durable_objects": { "bindings": [{ "name": "BENCHMARK", "class_name": "SplitLatencyTest" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SplitLatencyTest"] }]
+}

@@ -2,7 +2,7 @@
 
 The authoritative upstream pin is [v0.7.0 at b0b74cd4a198428ea9b82910c217259ffc62b65c](https://github.com/zitadel/nextgen/tree/b0b74cd4a198428ea9b82910c217259ffc62b65c). Generate this file with `node scripts/parity-inventory.mjs > docs/parity-inventory.md`. Run `node scripts/parity-inventory.mjs --check` to detect drift.
 
-The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; the account build mounts seven, with separate test builds adding user creation and deletion. Other test builds mount four passkey, five self-service read, five team, four invitation, and three session operations. Some routes appear in more than one build. Mounts alone do not establish public ingress or parity.
+The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; the account build mounts seven, with separate test builds adding user creation and deletion. Other test builds mount four passkey, five self-service read, five team, four invitation, three session, and three branding operations. Some routes appear in more than one build. Mounts alone do not establish public ingress or parity.
 
 The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.
 
@@ -73,9 +73,9 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | Teams | `deactivateTeam` | `DELETE /teams/{team_id}` | experimental team build only | experimental native/workerd team authorization and mutation-audit checks; cross-object grants unproven | partial behavior only |
 | Teams | `updateTeam` | `PATCH /teams/{team_id}` | experimental team build only | experimental native/workerd team authorization and mutation-audit checks; cross-object grants unproven | partial behavior only |
 | Search | `search` | `POST /search` | not mounted | none | native-versus-Worker test needed |
-| Branding | `publishBranding` | `POST /branding` | not mounted | none | native-versus-Worker test needed |
-| Branding | `listBranding` | `GET /branding` | not mounted | none | native-versus-Worker test needed |
-| Branding | `getBranding` | `GET /branding/{branding_id}` | not mounted | none | native-versus-Worker test needed |
+| Branding | `publishBranding` | `POST /branding` | experimental branding build only | experimental native/workerd branding authorization, pagination, audit rollback and redaction checks; foreign-credential status differs | partial behavior only |
+| Branding | `listBranding` | `GET /branding` | experimental branding build only | experimental native/workerd branding authorization, pagination, audit rollback and redaction checks; foreign-credential status differs | partial behavior only |
+| Branding | `getBranding` | `GET /branding/{branding_id}` | experimental branding build only | experimental native/workerd branding authorization, pagination, audit rollback and redaction checks; foreign-credential status differs | partial behavior only |
 | OAuth Settings | `getOAuthSettings` | `GET /oauth_settings/{oauth_settings_id}` | not mounted | none | native-versus-Worker test needed |
 | Identity Providers | `publishIdp` | `POST /idps` | not mounted | none | native-versus-Worker test needed |
 | Identity Providers | `queryIdps` | `POST /idps/query` | not mounted | none | native-versus-Worker test needed |
