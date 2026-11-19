@@ -29,6 +29,9 @@ const parity = new Set(["createAuthAttempt", "createAuthAttemptChallenge", "veri
 const browser = new Set(["createAuthAttempt", "createAuthAttemptChallenge", "verifyAuthAttemptChallenge", "createAuthAttemptHandoff", "exchangeHandoff", "getMySession", "getMySessionCsrfToken", "revokeMySession"]);
 const experimentalFlow = new Set(["createFlow", "getFlowStep", "submitFlowStep"]);
 const experimentalManagement = new Set(["getUser", "queryUsers", "listEvents", "getEvent"]);
+const experimentalTeams = new Set(["createTeam", "queryTeams", "getTeam", "updateTeam", "deactivateTeam"]);
+const teamsSource = await readFile("upstream/overlay/apps/api/internal/api/generated/mapi_teams_wasip1.go", "utf8");
+for (const operation of experimentalTeams) { const handler = operation[0].toUpperCase() + operation.slice(1); if (!teamsSource.includes(`s.handle${handler}Request(`)) throw new Error(`Experimental team mount missing: ${operation}`); }
 const experimentalSelf = new Set(["getMyUserSchema", "listMyTeams", "listMyIdentityLinks", "listUserTeams", "listUserIdentityLinks"]);
 const selfSource = await readFile("upstream/overlay/apps/api/internal/api/generated/mapi_self_wasip1.go", "utf8");
 for (const operation of experimentalSelf) { const handler = operation[0].toUpperCase() + operation.slice(1); if (!selfSource.includes(`s.handle${handler}Request(`)) throw new Error(`Experimental self-service mount missing: ${operation}`); }
@@ -47,7 +50,7 @@ for (const id of [...parity, ...browser]) if (!operations.some((operation) => op
 const lines = [
   "# Nextgen parity inventory", "",
   `The authoritative upstream pin is [v0.7.0 at ${commit}](https://github.com/zitadel/nextgen/tree/${commit}). Generate this file with \`node scripts/parity-inventory.mjs > docs/parity-inventory.md\`. Run \`node scripts/parity-inventory.mjs --check\` to detect drift.`, "",
-  `The pinned OpenAPI document declares **${operations.length} operations**. The Go adapter mounts **${mounts.length}**. Optional management and events builds each mount two operations; a separate account build mounts seven, including one also present in management; a separate passkey build mounts four and a self-service read build mounts five. Mounts alone do not establish public ingress or parity.`, "",
+  `The pinned OpenAPI document declares **${operations.length} operations**. The Go adapter mounts **${mounts.length}**. Optional management and events builds each mount two operations; a separate account build mounts seven, including one also present in management; a separate passkey build mounts four and a self-service read build mounts five and a team-management build mounts five. Mounts alone do not establish public ingress or parity.`, "",
   "The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.", "",
   "## OpenAPI operations", "",
   "| Area | Operation | Route | Go adapter | Existing evidence | Remaining parity gap |",
@@ -63,7 +66,8 @@ for (const op of operations) {
   if (experimentalAccount.has(op.id)) evidence.push("experimental native/workerd account and authorization comparisons; foreign-credential status differs");
   if (experimentalPasskey.has(op.id)) evidence.push("experimental native/workerd virtual authenticator checks; foreign-credential status differs");
   if (experimentalSelf.has(op.id)) evidence.push("experimental native/workerd paginated self-service authorization checks; foreign-credential status differs");
-  const adapter = mounted ? (experimentalFlow.has(op.id) ? "experimental MVP build only" : ["getLive", "getReady"].includes(op.id) ? "adapter only, no public ingress" : "mounted") : ["listEvents", "getEvent"].includes(op.id) ? "experimental events build only" : experimentalSelf.has(op.id) ? "experimental self-service build only" : experimentalPasskey.has(op.id) ? "experimental passkey build only" : experimentalAccount.has(op.id) && experimentalManagement.has(op.id) ? "experimental management and account builds" : experimentalAccount.has(op.id) ? "experimental account build only" : experimentalManagement.has(op.id) ? "experimental management build only" : "not mounted";
+  if (experimentalTeams.has(op.id)) evidence.push("experimental native/workerd team authorization and mutation-audit checks; cross-object grants unproven");
+  const adapter = mounted ? (experimentalFlow.has(op.id) ? "experimental MVP build only" : ["getLive", "getReady"].includes(op.id) ? "adapter only, no public ingress" : "mounted") : ["listEvents", "getEvent"].includes(op.id) ? "experimental events build only" : experimentalTeams.has(op.id) ? "experimental team build only" : experimentalSelf.has(op.id) ? "experimental self-service build only" : experimentalPasskey.has(op.id) ? "experimental passkey build only" : experimentalAccount.has(op.id) && experimentalManagement.has(op.id) ? "experimental management and account builds" : experimentalAccount.has(op.id) ? "experimental account build only" : experimentalManagement.has(op.id) ? "experimental management build only" : "not mounted";
   lines.push(`| ${op.tag} | \`${op.id}\` | \`${op.method} ${op.path}\` | ${adapter} | ${evidence.join(", ") || "none"} | ${evidence.length ? "partial behavior only" : "native-versus-Worker test needed"} |`);
 }
 lines.push("", "## Other native HTTP and runtime surfaces", "",

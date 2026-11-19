@@ -2,7 +2,7 @@
 
 The authoritative upstream pin is [v0.7.0 at b0b74cd4a198428ea9b82910c217259ffc62b65c](https://github.com/zitadel/nextgen/tree/b0b74cd4a198428ea9b82910c217259ffc62b65c). Generate this file with `node scripts/parity-inventory.mjs > docs/parity-inventory.md`. Run `node scripts/parity-inventory.mjs --check` to detect drift.
 
-The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; a separate account build mounts seven, including one also present in management; a separate passkey build mounts four and a self-service read build mounts five. Mounts alone do not establish public ingress or parity.
+The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; a separate account build mounts seven, including one also present in management; a separate passkey build mounts four and a self-service read build mounts five and a team-management build mounts five. Mounts alone do not establish public ingress or parity.
 
 The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.
 
@@ -67,11 +67,11 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | Flow Definitions | `publishFlowDefinition` | `POST /flow_definitions` | not mounted | none | native-versus-Worker test needed |
 | Flow Definitions | `listFlowDefinitions` | `GET /flow_definitions` | not mounted | none | native-versus-Worker test needed |
 | Flow Definitions | `getFlowDefinition` | `GET /flow_definitions/{flow_definition_id}` | not mounted | none | native-versus-Worker test needed |
-| Teams | `createTeam` | `POST /teams` | not mounted | none | native-versus-Worker test needed |
-| Teams | `queryTeams` | `POST /teams/query` | not mounted | none | native-versus-Worker test needed |
-| Teams | `getTeam` | `GET /teams/{team_id}` | not mounted | none | native-versus-Worker test needed |
-| Teams | `deactivateTeam` | `DELETE /teams/{team_id}` | not mounted | none | native-versus-Worker test needed |
-| Teams | `updateTeam` | `PATCH /teams/{team_id}` | not mounted | none | native-versus-Worker test needed |
+| Teams | `createTeam` | `POST /teams` | experimental team build only | experimental native/workerd team authorization and mutation-audit checks; cross-object grants unproven | partial behavior only |
+| Teams | `queryTeams` | `POST /teams/query` | experimental team build only | experimental native/workerd team authorization and mutation-audit checks; cross-object grants unproven | partial behavior only |
+| Teams | `getTeam` | `GET /teams/{team_id}` | experimental team build only | experimental native/workerd team authorization and mutation-audit checks; cross-object grants unproven | partial behavior only |
+| Teams | `deactivateTeam` | `DELETE /teams/{team_id}` | experimental team build only | experimental native/workerd team authorization and mutation-audit checks; cross-object grants unproven | partial behavior only |
+| Teams | `updateTeam` | `PATCH /teams/{team_id}` | experimental team build only | experimental native/workerd team authorization and mutation-audit checks; cross-object grants unproven | partial behavior only |
 | Search | `search` | `POST /search` | not mounted | none | native-versus-Worker test needed |
 | Branding | `publishBranding` | `POST /branding` | not mounted | none | native-versus-Worker test needed |
 | Branding | `listBranding` | `GET /branding` | not mounted | none | native-versus-Worker test needed |
