@@ -1,0 +1,1 @@
+{"name":"mapi-idp-bridge-private-local","main":"idp-bridge-worker.mjs","compatibility_date":"2026-11-18","durable_objects":{"bindings":[{"name":"IDP_BRIDGE","class_name":"IDPBridgeTest"}]},"migrations":[{"tag":"v1","new_sqlite_classes":["IDPBridgeTest"]}]}
