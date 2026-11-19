@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "account_id": "4d90c2d31b480584f8f878d2f62848ab",
+  "name": "mapi-nextgen-oidc-isolated-staging",
+  "main": "worker/app.js",
+  "alias": { "./wasm-module.js": "./worker/oidc-wasm-module.js" },
+  "compatibility_date": "2026-11-19",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": { "directory": "./worker/assets", "binding": "ASSETS", "run_worker_first": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" },
+      { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "ProjectRegistry"] }],
+  "observability": { "enabled": true },
+  "vars": {
+    "MAPI_OFFICIAL_LOGIN": "1",
+    "MAPI_OIDC_EXPERIMENTAL": "1",
+    "MAPI_APP_ORIGIN": "https://mapi-nextgen-oidc-isolated-staging.woven-4d9.workers.dev"
+  }
+}

@@ -1,0 +1,317 @@
+{
+  "suiteImage": "sha256:605026d2b54d17e64b55b3aa3911b394e3b6fff30d26c7ba7e9d50688cbe776a",
+  "plan": "oidcc-basic-certification-test-plan",
+  "variant": {
+    "server_metadata": "static",
+    "client_registration": "static_client"
+  },
+  "configuredModules": 35,
+  "attempted": 35,
+  "outcomes": [
+    {
+      "module": "oidcc-server",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-response-type-missing",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "browserStatus": 200,
+      "failureConditions": []
+    },
+    {
+      "module": "oidcc-userinfo-get",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-userinfo-post-header",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-userinfo-post-body",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-ensure-request-without-nonce-succeeds-for-code-flow",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-scope-profile",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-scope-email",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-scope-address",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-scope-phone",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-scope-all",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-alternate-happy-flow",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-display-page",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-display-popup",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-prompt-login",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-prompt-none-not-logged-in",
+      "status": "FINISHED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckErrorFromAuthorizationEndpointIsOneThatRequiredAUserInterface"
+      ]
+    },
+    {
+      "module": "oidcc-prompt-none-logged-in",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-max-age-1",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-max-age-10000",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-ensure-request-with-unknown-parameter-succeeds",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-id-token-hint",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-login-hint",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-ui-locales",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-claims-locales",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-ensure-request-with-acr-values-succeeds",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-codereuse",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-codereuse-30seconds",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-ensure-registered-redirect-uri",
+      "status": "WAITING",
+      "result": null,
+      "browserStatus": 400,
+      "failureConditions": []
+    },
+    {
+      "module": "oidcc-ensure-post-request-succeeds",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-server-client-secret-post",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-unsigned-request-object-supported-correctly-or-rejected-as-unsupported",
+      "status": "FINISHED",
+      "result": "SKIPPED",
+      "browserStatus": 200,
+      "failureConditions": []
+    },
+    {
+      "module": "oidcc-claims-essential",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-ensure-request-object-with-redirect-uri",
+      "status": "WAITING",
+      "result": null,
+      "browserStatus": 400,
+      "failureConditions": []
+    },
+    {
+      "module": "oidcc-refresh-token",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "browserStatus": 200,
+      "failureConditions": [
+        "CheckIfAuthorizationEndpointError"
+      ]
+    },
+    {
+      "module": "oidcc-ensure-request-with-valid-pkce-succeeds",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "browserStatus": 200,
+      "failureConditions": []
+    }
+  ]
+}

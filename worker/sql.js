@@ -33,7 +33,10 @@ export function execute(storage, { statement, args, query }) {
   if (!query) {
     const cursor = storage.sql.exec(sql, ...values);
     cursor.toArray();
-    return { changes: cursor.rowsWritten };
+    // rowsWritten is a billing counter that also includes index writes.
+    // database/sql requires SQLite's logical affected-row count instead.
+    const changes = storage.sql.exec("SELECT changes() AS count").one().count;
+    return { changes };
   }
 
   const returning = /\bRETURNING\s+([a-z_]\w*(?:\s*,\s*[a-z_]\w*)*)\s*;?\s*$/i.exec(sql);
@@ -44,7 +47,11 @@ export function execute(storage, { statement, args, query }) {
     prepared = sql.slice(0, returning.index) + "RETURNING " + columns.map(columnPair).join(", ");
   } else {
     if (!/^\s*(?:SELECT|WITH)\b/i.test(sql)) throw new Error("Unsupported row-producing SQLite statement");
-    columns = storage.sql.exec(sql, ...values).columnNames;
+    const cursor = storage.sql.exec(sql, ...values);
+    columns = cursor.columnNames;
+    // Drain the metadata query before re-executing it through the type-safe
+    // wrapper; an open cursor can retain a SQLite lock across later DDL.
+    for (const _row of cursor.raw()) { /* Exhaust the cursor without retaining rows. */ }
     const aliases = columns.map((_column, index) => "column_" + index);
     prepared = "WITH mapi_rows(" + aliases.join(", ") + ") AS (" + sql.trim().replace(/;$/, "") +
       ") SELECT " + aliases.map(columnPair).join(", ") + " FROM mapi_rows";

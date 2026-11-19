@@ -3,6 +3,7 @@ import { execute } from "../worker/sql.js";
 
 let seen;
 const storage = { sql: { exec(sql, ...values) {
+  if (sql === "SELECT changes() AS count") return { one: () => ({ count: 1 }) };
   seen = { sql, values };
   return { rowsWritten: 1, toArray: () => [] };
 } } };

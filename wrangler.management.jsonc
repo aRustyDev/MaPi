@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mapi-nextgen-management-local",
+  "main": "worker/management-app.js",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": { "MAPI_MANAGEMENT_ENABLED": "0" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" },
+      { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["NextgenApplication"] },
+    { "tag": "v2", "new_sqlite_classes": ["ProjectRegistry"] }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "mapi-client-assertion-test",
+  "main": "client-assertion-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "ASSERTION_TEST", "class_name": "ClientAssertionTest" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClientAssertionTest"] }]
+}

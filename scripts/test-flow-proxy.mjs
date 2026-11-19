@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { handleFlowProxy } from "../worker/flow-proxy.js";
+import { renderLogin } from "../worker/login-ui.js";
 
 const origin = "https://project.example";
 const projectId = "proj_test";
@@ -32,4 +33,7 @@ assert.equal((await proxy("/__nextgen/sessions/exchange?project_id=proj_test&pro
 assert.equal((await proxy("/__nextgen/users", { method: "POST", headers: { origin }, body: "{}" })).status, 404);
 assert.equal((await proxy("/__nextgen/flows", { method: "POST", headers: { origin }, body: "x".repeat(65_537) })).status, 413);
 assert.equal(calls, before);
+const handle = "a".repeat(43);
+assert.ok((await renderLogin(projectId, handle).text()).includes(`/oauth/continue?request=${handle}`));
+assert.throws(() => renderLogin(projectId, 'x" onload=bad'));
 console.log("Flow proxy tests passed.");

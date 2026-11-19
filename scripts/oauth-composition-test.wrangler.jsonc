@@ -1,0 +1,8 @@
+{
+  "name": "mapi-oauth-composition-test",
+  "main": "oauth-composition-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "OAUTH_TEST", "class_name": "OAuthCompositionTest" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OAuthCompositionTest"] }]
+}

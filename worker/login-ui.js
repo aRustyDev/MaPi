@@ -1,7 +1,9 @@
 // The value is inserted into an HTML attribute and is also an upstream
 // project identifier. Refuse anything outside the upstream identifier syntax.
-export function renderLogin(projectId) {
+export function renderLogin(projectId, oauthHandle = "") {
   if (!/^proj_[A-Za-z0-9_-]+$/.test(projectId)) throw new Error("Invalid project ID");
+  if (oauthHandle && !/^[A-Za-z0-9_-]{43}$/.test(oauthHandle)) throw new Error("Invalid OAuth request handle");
+  const destination = oauthHandle ? `/oauth/continue?request=${oauthHandle}` : "/app";
   return new Response(`<!doctype html>
 <html lang="en">
 <head>
@@ -11,7 +13,7 @@ export function renderLogin(projectId) {
   <script type="module" src="/zitadel-login.mjs"></script>
 </head>
 <body>
-  <zitadel-login project-id="${projectId}" proxy-path="/__nextgen" purpose="login" variant="page" post-sign-in-url="/app"></zitadel-login>
+  <zitadel-login project-id="${projectId}" proxy-path="/__nextgen" purpose="login" variant="page" post-sign-in-url="${destination}"></zitadel-login>
 </body>
 </html>`, {
     headers: {

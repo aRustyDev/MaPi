@@ -1,0 +1,10 @@
+{
+  "name": "mapi-events-combined-size-test",
+  "main": "events-combined-size-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "durable_objects": { "bindings": [
+    { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" },
+    { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "ProjectRegistry"] }]
+}

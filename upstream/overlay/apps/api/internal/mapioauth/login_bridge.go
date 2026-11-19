@@ -46,6 +46,46 @@ type CompletedLogin struct {
 	Code, RedirectURI, State string
 }
 
+// RedirectURI verifies a pending request, binding and live session without
+// consuming it. It is used only to constrain the confirmation page's CSP to
+// the exact registered RP origin. Completion repeats all checks under its own
+// write transaction, so a client/session change after this read cannot grant a code.
+func (b LoginBridge) RedirectURI(ctx context.Context, handle, binding, sessionCookie string) (string, error) {
+	if !b.valid() || !validLoginSecret(handle) || !validLoginSecret(binding) || sessionCookie == "" || len(sessionCookie) > 8192 {
+		return "", ErrInvalidLogin
+	}
+	handleHash, browserHash := sha256.Sum256([]byte(handle)), sha256.Sum256([]byte(binding))
+	var redirect string
+	err := b.Store.Transaction(func() error {
+		var savedHash []byte
+		var project, clientID, scope string
+		var expires int64
+		err := b.Store.DB.QueryRowContext(ctx, `SELECT browser_hash,project_id,client_id,redirect_uri,scope,expires_at
+			FROM mapi_oauth_logins WHERE handle_hash=?`, handleHash[:]).Scan(&savedHash, &project, &clientID, &redirect, &scope, &expires)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrInvalidLogin
+		}
+		if err != nil {
+			return err
+		}
+		if project != b.ProjectID || len(savedHash) != len(browserHash) || subtle.ConstantTimeCompare(savedHash, browserHash[:]) != 1 || !b.Store.Now().Before(time.UnixMilli(expires)) {
+			return ErrInvalidLogin
+		}
+		if err := b.CheckClient(ctx, project, clientID, redirect, scope); err != nil {
+			return err
+		}
+		identity, err := b.Session(ctx, project, sessionCookie)
+		if err != nil || identity.ProjectID != project || identity.UserID == "" || identity.SessionID == "" {
+			return ErrInvalidLogin
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return redirect, nil
+}
+
 func (b LoginBridge) valid() bool {
 	return b.Store.DB != nil && b.Store.Transaction != nil && b.Store.Now != nil && b.ProjectID != "" && b.CheckClient != nil && b.Session != nil && b.Audit != nil && b.LoginTTL > 0 && b.LoginTTL <= 10*time.Minute && b.CodeTTL > 0 && b.CodeTTL <= 5*time.Minute
 }

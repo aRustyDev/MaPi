@@ -28,11 +28,17 @@ if (new Set(mounts.map(({ operationId }) => operationId)).size !== mounts.length
 const parity = new Set(["createAuthAttempt", "createAuthAttemptChallenge", "verifyAuthAttemptChallenge", "createAuthAttemptHandoff", "exchangeHandoff", "getMySession", "revokeSession"]);
 const browser = new Set(["createAuthAttempt", "createAuthAttemptChallenge", "verifyAuthAttemptChallenge", "createAuthAttemptHandoff", "exchangeHandoff", "getMySession", "getMySessionCsrfToken", "revokeMySession"]);
 const experimentalFlow = new Set(["createFlow", "getFlowStep", "submitFlowStep"]);
+const experimentalManagement = new Set(["getUser", "queryUsers", "listEvents", "getEvent"]);
+const managementSource = (await Promise.all(["mapi_management_wasip1.go", "mapi_events_wasip1.go"].map(name => readFile(`upstream/overlay/apps/api/internal/api/generated/${name}`, "utf8")))).join("\n");
+for (const operation of experimentalManagement) {
+  const handler = operation[0].toUpperCase() + operation.slice(1);
+  if (!managementSource.includes(`s.handle${handler}Request(`)) throw new Error(`Experimental management mount missing: ${operation}`);
+}
 for (const id of [...parity, ...browser]) if (!operations.some((operation) => operation.id === id)) throw new Error(`Coverage references unknown operation: ${id}`);
 const lines = [
   "# Nextgen parity inventory", "",
   `The authoritative upstream pin is [v0.7.0 at ${commit}](https://github.com/zitadel/nextgen/tree/${commit}). Generate this file with \`node scripts/parity-inventory.mjs > docs/parity-inventory.md\`. Run \`node scripts/parity-inventory.mjs --check\` to detect drift.`, "",
-  `The pinned OpenAPI document declares **${operations.length} operations**. The Go adapter mounts **${mounts.length}**. Mounts alone do not establish public ingress or parity.`, "",
+  `The pinned OpenAPI document declares **${operations.length} operations**. The Go adapter mounts **${mounts.length}**. The optional management and events builds each mount two additional operations. Mounts alone do not establish public ingress or parity.`, "",
   "The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.", "",
   "## OpenAPI operations", "",
   "| Area | Operation | Route | Go adapter | Existing evidence | Remaining parity gap |",
@@ -44,7 +50,8 @@ for (const op of operations) {
   if (parity.has(op.id)) evidence.push("native/Worker parity harness");
   if (browser.has(op.id)) evidence.push("application journey");
   if (["getLive", "getReady"].includes(op.id)) evidence.push("native/workerd adapter GET parity");
-  const adapter = mounted ? (experimentalFlow.has(op.id) ? "experimental MVP build only" : ["getLive", "getReady"].includes(op.id) ? "adapter only, no public ingress" : "mounted") : "not mounted";
+  if (experimentalManagement.has(op.id)) evidence.push(["listEvents", "getEvent"].includes(op.id) ? "experimental native/workerd authorization and pagination checks" : "experimental native/workerd authorization checks");
+  const adapter = mounted ? (experimentalFlow.has(op.id) ? "experimental MVP build only" : ["getLive", "getReady"].includes(op.id) ? "adapter only, no public ingress" : "mounted") : ["listEvents", "getEvent"].includes(op.id) ? "experimental events build only" : experimentalManagement.has(op.id) ? "experimental management build only" : "not mounted";
   lines.push(`| ${op.tag} | \`${op.id}\` | \`${op.method} ${op.path}\` | ${adapter} | ${evidence.join(", ") || "none"} | ${evidence.length ? "partial behavior only" : "native-versus-Worker test needed"} |`);
 }
 lines.push("", "## Other native HTTP and runtime surfaces", "",

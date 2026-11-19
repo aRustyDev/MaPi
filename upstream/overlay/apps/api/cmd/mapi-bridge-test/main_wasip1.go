@@ -34,6 +34,30 @@ func check() error {
 	if _, err := db.ExecContext(ctx, "DELETE FROM bridge_checks"); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS bridge_affected (a TEXT, b TEXT, PRIMARY KEY (a, b))"); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM bridge_affected"); err != nil {
+		return err
+	}
+	for _, step := range []struct {
+		statement string
+		want      int64
+	}{
+		{"INSERT INTO bridge_affected VALUES ('a', 'b')", 1},
+		{"UPDATE bridge_affected SET b = 'c' WHERE a = 'a'", 1},
+		{"UPDATE bridge_affected SET b = 'd' WHERE a = 'missing'", 0},
+		{"DELETE FROM bridge_affected WHERE a = 'a'", 1},
+	} {
+		result, err := db.ExecContext(ctx, step.statement)
+		if err != nil {
+			return err
+		}
+		got, err := result.RowsAffected()
+		if err != nil || got != step.want {
+			return fmt.Errorf("affected rows for %q: got %d, want %d: %v", step.statement, got, step.want, err)
+		}
+	}
 
 	abort := errors.New("nested rollback")
 	err := cloudflarewasm.Transaction(func() error {

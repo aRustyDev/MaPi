@@ -1,0 +1,10 @@
+{
+  "name": "mapi-dpop-spike",
+  "main": "dpop-spike-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": {
+    "bindings": [{ "name": "DPOP_TEST", "class_name": "DPoPTest" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DPoPTest"] }]
+}

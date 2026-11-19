@@ -1,0 +1,9 @@
+{
+  "name": "mapi-oauth-browser-test",
+  "main": "oauth-browser-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "assets": { "directory": "../worker/assets", "binding": "ASSETS", "run_worker_first": true },
+  "durable_objects": { "bindings": [{ "name": "OAUTH_BROWSER_TEST", "class_name": "OAuthBrowserTest" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OAuthBrowserTest"] }]
+}

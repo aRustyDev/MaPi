@@ -45,6 +45,7 @@ try {
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.ok, true, result.error);
+  assert.equal(result.changes, 1, "SQLite logical affected rows must not include index writes");
   console.log("Go/Wasm SQLite bridge passed nested commit/rollback, panic rollback, int64, and parameter-limit checks in workerd.");
 } finally {
   if (server.exitCode === null && server.signalCode === null) {

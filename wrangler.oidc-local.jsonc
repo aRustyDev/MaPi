@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mapi-nextgen-oidc-local",
+  "main": "worker/app.js",
+  "alias": { "./wasm-module.js": "./worker/oidc-wasm-module.js" },
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": { "directory": "./worker/assets", "binding": "ASSETS", "run_worker_first": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" },
+      { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "ProjectRegistry"] }],
+  "vars": { "MAPI_OFFICIAL_LOGIN": "1", "MAPI_OIDC_EXPERIMENTAL": "1" }
+}

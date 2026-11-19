@@ -42,6 +42,7 @@ type tokenClaims struct {
 	AuthTime        *jwt.NumericDate `json:"auth_time,omitempty"`
 	AccessTokenHash string           `json:"at_hash,omitempty"`
 	ClientID        string           `json:"client_id,omitempty"`
+	ClientEpoch     int64            `json:"mapi_client_epoch,omitempty"`
 }
 
 func (i TokenIssuer) validateConfig() error {
@@ -65,7 +66,7 @@ func (i TokenIssuer) session(ctx context.Context, project, user, id string) (*do
 	}
 	var last time.Time
 	for _, factor := range s.Factors {
-		if factor == nil {
+		if factor == nil || !factor.Type().IsCredential() {
 			continue
 		}
 		v := factor.GetLastVerifiedAt()
@@ -112,7 +113,11 @@ func (i TokenIssuer) mint(ctx context.Context, project, client, user, sessionID,
 	if err != nil {
 		return nil, err
 	}
-	accessClaims := tokenClaims{Claims: jwt.Claims{Issuer: i.Issuer, Subject: user, Audience: jwt.Audience{client}, IssuedAt: jwt.NewNumericDate(now), Expiry: jwt.NewNumericDate(expiry), ID: id}, SessionID: sessionID, Scope: scope, ClientID: client}
+	epoch, err := i.Store.clientEpoch(ctx, project, client)
+	if err != nil {
+		return nil, err
+	}
+	accessClaims := tokenClaims{Claims: jwt.Claims{Issuer: i.Issuer, Subject: user, Audience: jwt.Audience{client}, IssuedAt: jwt.NewNumericDate(now), Expiry: jwt.NewNumericDate(expiry), ID: id}, SessionID: sessionID, Scope: scope, ClientID: client, ClientEpoch: epoch}
 	access, err := jwt.Signed(signer).Claims(accessClaims).Serialize()
 	if err != nil {
 		return nil, err
@@ -163,45 +168,125 @@ func (i TokenIssuer) MintRefreshTokens(ctx context.Context, g RefreshGrant) (*oi
 	return i.mint(ctx, g.ProjectID, g.ClientID, g.UserID, g.SessionID, g.Scope, "", false)
 }
 
-// ValidateAccess checks JWT signature, project issuer, exact audience, token
-// type, expiry, and live upstream session. Do not use generic offline JWT
-// validation where immediate session-revocation semantics are required.
-func (i TokenIssuer) ValidateAccess(ctx context.Context, token, audience string) error {
-	if err := i.validateConfig(); err != nil {
-		return err
+// AccessIdentity is returned only after signature, scope, revocation and live
+// session checks. It contains no bearer credentials.
+type AccessIdentity struct{ Subject, ClientID, SessionID, Scope string }
+
+var ErrInvalidAccess = errors.New("invalid access token")
+
+// CreateSchema belongs in the project object's versioned migration.
+func (i TokenIssuer) CreateSchema(ctx context.Context) error {
+	if i.Store.DB == nil {
+		return errors.New("token store not configured")
 	}
-	if audience == "" {
-		return errors.New("missing audience")
-	}
-	parsed, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.RS256})
+	_, err := i.Store.DB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS mapi_oauth_revoked_access (
+  project_id TEXT NOT NULL, token_hash BLOB NOT NULL, expires_at INTEGER NOT NULL,
+  PRIMARY KEY(project_id, token_hash))`)
 	if err != nil {
 		return err
 	}
-	if len(parsed.Headers) != 1 || parsed.Headers[0].KeyID == "" || parsed.Headers[0].ExtraHeaders["typ"] != "at+jwt" {
-		return errors.New("invalid access token header")
+	_, err = i.Store.DB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS mapi_oauth_revoked_access_expiry ON mapi_oauth_revoked_access(project_id, expires_at)`)
+	return err
+}
+
+// signedAccess validates the signature and static claims. It does not check
+// the live session or revocation, allowing revocation even after session expiry.
+func (i TokenIssuer) signedAccess(ctx context.Context, token, audience string) (tokenClaims, error) {
+	var claims tokenClaims
+	if err := i.validateConfig(); err != nil {
+		return claims, err
+	}
+	if len(token) > 16384 {
+		return claims, ErrInvalidAccess
+	}
+	parsed, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.RS256})
+	if err != nil || len(parsed.Headers) != 1 || parsed.Headers[0].KeyID == "" || parsed.Headers[0].ExtraHeaders["typ"] != "at+jwt" {
+		return claims, ErrInvalidAccess
 	}
 	keys, err := i.Keys.PublicKeys(ctx)
 	if err != nil {
-		return err
+		return claims, err
 	}
 	matching := keys.Key(parsed.Headers[0].KeyID)
 	if len(matching) != 1 {
-		return errors.New("unknown signing key")
+		return claims, ErrInvalidAccess
 	}
-	var claims tokenClaims
 	if err = parsed.Claims(matching[0].Key, &claims); err != nil {
-		return err
+		return claims, ErrInvalidAccess
+	}
+	if audience == "" {
+		audience = claims.ClientID
 	}
 	now := i.Store.Now()
-	if claims.Expiry == nil || claims.IssuedAt == nil || claims.Subject == "" || claims.ID == "" || claims.ClientID != audience || len(claims.Audience) != 1 || claims.Audience[0] != audience {
-		return errors.New("invalid token claims")
+	if audience == "" || claims.Expiry == nil || claims.IssuedAt == nil || claims.Subject == "" || claims.ID == "" || claims.SessionID == "" || claims.ClientID != audience || len(claims.Audience) != 1 || claims.Audience[0] != audience || !strings.Contains(" "+claims.Scope+" ", " openid ") {
+		return claims, ErrInvalidAccess
 	}
-	if err = claims.ValidateWithLeeway(jwt.Expected{Issuer: i.Issuer, AnyAudience: jwt.Audience{audience}, Time: now}, 0); err != nil {
-		return err
+	if err = claims.ValidateWithLeeway(jwt.Expected{Issuer: i.Issuer, AnyAudience: jwt.Audience{audience}, Time: now}, 0); err != nil || !claims.Expiry.Time().After(now) || claims.IssuedAt.Time().After(now) {
+		return claims, ErrInvalidAccess
 	}
-	if !claims.Expiry.Time().After(now) || claims.IssuedAt.Time().After(now) {
-		return errors.New("invalid token time")
+	return claims, nil
+}
+
+// Access validates signature, exact audience, revocation, expiry and the live
+// upstream session. Empty audience derives it from the authenticated JWT.
+func (i TokenIssuer) Access(ctx context.Context, token, audience string) (AccessIdentity, error) {
+	claims, err := i.signedAccess(ctx, token, audience)
+	if err != nil {
+		return AccessIdentity{}, err
 	}
-	_, _, err = i.session(ctx, i.Keys.ProjectID, claims.Subject, claims.SessionID)
+	hash := sha256.Sum256([]byte(token))
+	var count int
+	if err := i.Store.DB.QueryRowContext(ctx, `SELECT count(*) FROM mapi_oauth_revoked_access WHERE project_id=? AND token_hash=?`, i.Keys.ProjectID, hash[:]).Scan(&count); err != nil {
+		return AccessIdentity{}, err
+	}
+	if count != 0 {
+		return AccessIdentity{}, ErrInvalidAccess
+	}
+	epoch, err := i.Store.clientEpoch(ctx, i.Keys.ProjectID, claims.ClientID)
+	if err != nil {
+		return AccessIdentity{}, err
+	}
+	if epoch != claims.ClientEpoch {
+		return AccessIdentity{}, ErrInvalidAccess
+	}
+	if _, _, err = i.session(ctx, i.Keys.ProjectID, claims.Subject, claims.SessionID); err != nil {
+		return AccessIdentity{}, ErrInvalidAccess
+	}
+	return AccessIdentity{Subject: claims.Subject, ClientID: claims.ClientID, SessionID: claims.SessionID, Scope: claims.Scope}, nil
+}
+
+func (i TokenIssuer) ValidateAccess(ctx context.Context, token, audience string) error {
+	_, err := i.Access(ctx, token, audience)
 	return err
+}
+
+// RevokeAccess verifies project and client bindings and records only a token
+// hash, in the same transaction as client authentication and the audit event.
+// Unknown, expired and already revoked tokens are intentionally idempotent.
+func (i TokenIssuer) RevokeAccess(ctx context.Context, token, clientID string, authenticate func(context.Context) error, audit func(context.Context, AccessIdentity) error) error {
+	if i.Store.Transaction == nil || authenticate == nil || audit == nil || clientID == "" {
+		return errors.New("access revocation not configured")
+	}
+	return i.Store.Transaction(func() error {
+		if err := authenticate(ctx); err != nil {
+			return err
+		}
+		claims, err := i.signedAccess(ctx, token, clientID)
+		if errors.Is(err, ErrInvalidAccess) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		hash := sha256.Sum256([]byte(token))
+		result, err := i.Store.DB.ExecContext(ctx, `INSERT OR IGNORE INTO mapi_oauth_revoked_access(project_id,token_hash,expires_at) VALUES(?,?,?)`, i.Keys.ProjectID, hash[:], claims.Expiry.Time().Unix())
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil || count == 0 {
+			return err
+		}
+		return audit(ctx, AccessIdentity{Subject: claims.Subject, ClientID: claims.ClientID, SessionID: claims.SessionID, Scope: claims.Scope})
+	})
 }

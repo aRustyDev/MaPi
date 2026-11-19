@@ -6,6 +6,7 @@ import { execute, sqliteError } from "./sql.js";
 import { canonicalOrigin, ProjectRegistry } from "./registry.js";
 import { renderLogin } from "./login-ui.js";
 import { handleFlowProxy } from "./flow-proxy.js";
+import { handleOAuthIngress, isOAuthRoute } from "./oauth-ingress.js";
 
 export { ProjectRegistry };
 
@@ -178,6 +179,26 @@ export class NextgenApplication extends DurableObject {
     return this.#call("mapi_request", request);
   }
 
+  oauthRequest(request) {
+    if (this.env.MAPI_OIDC_EXPERIMENTAL !== "1") throw new Error("Experimental issuer is disabled");
+    this.#initialize();
+    return this.#call("mapi_oauth_request", { projectId: this.projectId(), origin: this.projectOrigin(), request });
+  }
+
+  oauthAdmin(action, options = {}) {
+    if (this.env.MAPI_OIDC_EXPERIMENTAL !== "1") throw new Error("Experimental issuer is disabled");
+    if (!["initialize", "register", "rotate", "register_logout", "rotate_client_secret", "revoke_client_secrets"].includes(action)) throw new Error("Unsupported issuer action");
+    this.#initialize();
+    return this.#call("mapi_oauth_admin", { projectId: this.projectId(), origin: this.projectOrigin(), action, ...options });
+  }
+
+  flowRelease(action, options = {}) {
+    if (this.env.MAPI_OIDC_EXPERIMENTAL !== "1") throw new Error("Experimental flow release is disabled");
+    if (!["status", "publish", "rollback"].includes(action)) throw new Error("Unsupported flow release action");
+    this.#initialize();
+    return this.#call("mapi_flow_release", { projectId: this.projectId(), origin: this.projectOrigin(), action, ...options });
+  }
+
   projectId() {
     return this.ctx.storage.sql.exec("SELECT project_id FROM mapi_project").toArray()[0]?.project_id ?? "";
   }
@@ -284,16 +305,19 @@ export class NextgenApplication extends DurableObject {
     return this.#upstream("POST", `/sessions/exchange?project_id=${encodeURIComponent(projectId)}`, { handoff_token: handoff }, { authorization: "Bearer " + token });
   }
 
-  allowLogin(ip) {
+  allowLogin(ip, scope = "password") {
+    if (!["password", "oauth"].includes(scope)) throw new Error("Invalid throttle scope");
     const window = Math.floor(Date.now() / 60000);
     const allowed = this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       sql.exec("DELETE FROM mapi_login_limits WHERE window < ?", window);
-      for (const [key, max] of [["global", 120], ["ip:" + ip, 60]]) {
+      const globalKey = "global:" + scope, ipKey = "ip:" + scope + ":" + ip;
+      const [globalMax, ipMax] = scope === "password" ? [120, 60] : [360, 180];
+      for (const [key, max] of [[globalKey, globalMax], [ipKey, ipMax]]) {
         const row = sql.exec("SELECT count FROM mapi_login_limits WHERE key = ? AND window = ?", key, window).toArray()[0];
         if ((row?.count ?? 0) >= max) return false;
       }
-      for (const key of ["global", "ip:" + ip]) {
+      for (const key of [globalKey, ipKey]) {
         sql.exec("INSERT INTO mapi_login_limits VALUES (?, ?, 1) ON CONFLICT(key) DO UPDATE SET count = count + 1, window = excluded.window", key, window);
       }
       return true;
@@ -334,6 +358,7 @@ export class NextgenApplication extends DurableObject {
       schemaVersion: this.ctx.storage.sql.exec("SELECT version FROM mapi_schema_version").one().version,
       ready: Boolean(this.projectId()),
       wasmMemoryBytes: this.#memory?.().byteLength ?? 0,
+      maintenance: this.env.MAPI_MAINTENANCE === "1",
       recoveryReady: this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch === (this.env.MAPI_RECOVERY_EPOCH ?? "0"),
     };
   }
@@ -376,6 +401,40 @@ export default {
     if (route.state === "pending" && route.object_name === "application") {
       const projectId = await object.identity();
       if (projectId) route = await registry.activate(route.origin, route.object_name, projectId);
+    }
+    if (route.state === "active" && route.project_id !== await object.identity()) return new Response(null, { status: 503, headers: noStore });
+    if (url.pathname.startsWith("/_mapi/admin/oidc/")) {
+      const actions = new Map([["/_mapi/admin/oidc/init", "initialize"], ["/_mapi/admin/oidc/clients", "register"], ["/_mapi/admin/oidc/rotate", "rotate"], ["/_mapi/admin/oidc/logout-uri", "register_logout"], ["/_mapi/admin/oidc/client-secret/rotate", "rotate_client_secret"], ["/_mapi/admin/oidc/client-secret/revoke", "revoke_client_secrets"], ["/_mapi/admin/oidc/flow/status", "flow_status"], ["/_mapi/admin/oidc/flow/publish", "flow_publish"], ["/_mapi/admin/oidc/flow/rollback", "flow_rollback"]]);
+      const action = actions.get(url.pathname);
+      if (env.MAPI_OIDC_EXPERIMENTAL !== "1" || !action || request.method !== "POST" || !env.MAPI_OPERATOR_TOKEN || !sameKey(request.headers.get("authorization"), `Bearer ${env.MAPI_OPERATOR_TOKEN}`)) return new Response(null, { status: 404, headers: noStore });
+      const status = await object.status();
+      if (route.state !== "active" || env.MAPI_MAINTENANCE === "1" || status.maintenance || !status.recoveryReady || url.origin !== route.origin) return new Response(null, { status: 503, headers: noStore });
+      let body;
+      try { body = JSON.parse(await readLimited(request, 65536) || "{}"); } catch { return new Response(null, { status: 400, headers: noStore }); }
+      if (!body || typeof body !== "object" || Array.isArray(body)) return new Response(null, { status: 400, headers: noStore });
+      const options = {};
+      if (action === "register") {
+        if (!body.document || typeof body.document !== "object" || Array.isArray(body.document)) return new Response(null, { status: 400, headers: noStore });
+        options.document = body.document;
+      }
+      if (action === "register_logout") {
+        if (typeof body.clientId !== "string" || typeof body.logoutUri !== "string" || !body.clientId || !body.logoutUri) return new Response(null, { status: 400, headers: noStore });
+        options.clientId = body.clientId; options.logoutUri = body.logoutUri;
+      }
+      if (["rotate_client_secret", "revoke_client_secrets"].includes(action)) {
+        if (typeof body.clientId !== "string" || !body.clientId) return new Response(null, { status: 400, headers: noStore });
+        options.clientId = body.clientId;
+      }
+      if (action === "flow_publish") {
+        if (!body.document || typeof body.document !== "object" || Array.isArray(body.document) || typeof body.expectedDeploymentId !== "string" || !body.expectedDeploymentId) return new Response(null, { status: 400, headers: noStore });
+        options.document = body.document; options.expectedDeploymentId = body.expectedDeploymentId;
+      }
+      if (action === "flow_rollback") {
+        if (typeof body.targetDeploymentId !== "string" || !body.targetDeploymentId || typeof body.expectedDeploymentId !== "string" || !body.expectedDeploymentId) return new Response(null, { status: 400, headers: noStore });
+        options.targetDeploymentId = body.targetDeploymentId; options.expectedDeploymentId = body.expectedDeploymentId;
+      }
+      try { return Response.json(await (action.startsWith("flow_") ? object.flowRelease(action.slice(5), options) : object.oauthAdmin(action, options)), { headers: noStore }); }
+      catch { return new Response(null, { status: 400, headers: noStore }); }
     }
     if (["/livez", "/readyz", "/api/v1/livez", "/api/v1/readyz", "/api/v1/openapi.json"].includes(url.pathname)) {
       const headers = {};
@@ -451,6 +510,7 @@ export default {
         }
       }
       if (url.pathname.endsWith("/users") && request.method === "POST") {
+        if (route.state !== "active") return new Response(null, { status: 503, headers: noStore });
         let text;
         try { text = await readLimited(request, 4096); } catch { return new Response(null, { status: 413 }); }
         let args;
@@ -466,7 +526,15 @@ export default {
       }
       return new Response(null, { status: 405 });
     }
-    if (env.MAPI_MAINTENANCE === "1" || !(await object.status()).recoveryReady) return new Response(null, { status: 503, headers: noStore });
+    if (route.state !== "active") return new Response(null, { status: 503, headers: noStore });
+    const appStatus = await object.status();
+    if (env.MAPI_MAINTENANCE === "1" || appStatus.maintenance || !appStatus.recoveryReady) return new Response(null, { status: 503, headers: noStore });
+    if (env.MAPI_OIDC_EXPERIMENTAL === "1" && isOAuthRoute(request.method, url.pathname, route.project_id)) {
+      if (url.origin !== route.origin) return new Response(null, { status: 403, headers: noStore });
+      if (!(await object.allowLogin(request.headers.get("cf-connecting-ip") ?? "local", "oauth"))) return new Response(null, { status: 429, headers: noStore });
+      try { return await handleOAuthIngress(request, object, route.project_id, route.origin); }
+      catch { return new Response(null, { status: 503, headers: noStore }); }
+    }
     if (env.MAPI_OFFICIAL_LOGIN === "1" && url.pathname === "/zitadel-login.mjs" && request.method === "GET") {
       return env.ASSETS.fetch(request);
     }
@@ -484,7 +552,9 @@ export default {
       if (env.MAPI_OFFICIAL_LOGIN === "1") {
         const projectId = await object.identity();
         if (!projectId) return new Response(null, { status: 503, headers: noStore });
-        return renderLogin(projectId);
+        const handles = url.searchParams.getAll("mapi_oauth");
+        if (handles.length && (env.MAPI_OIDC_EXPERIMENTAL !== "1" || handles.length !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(handles[0]))) return new Response(null, { status: 400, headers: noStore });
+        return renderLogin(projectId, handles[0] ?? "");
       }
       return page('<h1>Sign in</h1><form method="post" action="/login"><label>Email <input name="email" type="email" autocomplete="username" required></label><br><label>Password <input name="password" type="password" autocomplete="current-password" required></label><br><button>Sign in</button></form>');
     }

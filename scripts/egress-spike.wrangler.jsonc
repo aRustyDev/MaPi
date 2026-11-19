@@ -1,0 +1,7 @@
+{
+ "name": "mapi-egress-spike-local",
+ "main": "egress-spike-harness.mjs",
+ "compatibility_date": "2026-11-18",
+ "durable_objects": { "bindings": [{ "name": "EGRESS_SPIKE", "class_name": "EgressSpike" }] },
+ "migrations": [{ "tag": "v1", "new_sqlite_classes": ["EgressSpike"] }]
+}

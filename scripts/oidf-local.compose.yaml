@@ -1,0 +1,25 @@
+# Local-only OIDF prebuilt suite. MongoDB is ephemeral and neither MongoDB nor
+# the Java service has a host port. Nginx listens only on host loopback.
+services:
+  mongodb:
+    image: mongo@sha256:b415b12f638e2685d06c58ab7fb5943577c50fadec6d9340ef67d21aeac72070
+    tmpfs: ["/data/db"]
+  nginx:
+    image: registry.gitlab.com/openid/conformance-suite/nginx@sha256:8cb2923de65139ed06a27e910bfc7c6ea0054b2aca3d231c318b922e273a41bb
+    ports: ["127.0.0.1:8443:8443", "127.0.0.1:8444:8444"]
+    networks:
+      default:
+        aliases: ["localhost.emobix.co.uk"]
+    depends_on: [server]
+  server:
+    image: registry.gitlab.com/openid/conformance-suite@sha256:605026d2b54d17e64b55b3aa3911b394e3b6fff30d26c7ba7e9d50688cbe776a
+    environment:
+      BASE_URL: https://localhost.emobix.co.uk:8443
+      BASE_MTLS_URL: https://localhost.emobix.co.uk:8444
+      MONGODB_HOST: mongodb
+      SPRING_PROFILES_ACTIVE: dev
+      OIDC_GOOGLE_CLIENTID: google-client
+      OIDC_GOOGLE_SECRET: google-secret
+      OIDC_GITLAB_CLIENTID: gitlab-client
+      OIDC_GITLAB_SECRET: gitlab-secret
+    depends_on: [mongodb]

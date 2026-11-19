@@ -37,12 +37,23 @@ type Provider struct {
 	// it must not create a refresh token: the rotation store supplies the new one.
 	MintRefreshTokens func(context.Context, RefreshGrant) (*oidc.AccessTokenResponse, error)
 	AuditReuse        func(context.Context, RefreshGrant) error
+	UserInfoToken     func(context.Context, string) (*oidc.UserInfo, error)
+	RevokeToken       func(context.Context, string, string, string) error
 }
 
 // Handler mounts implemented paths only. Callers must route to the object for
 // this provider's project and enforce issuer-origin admission.
 func (p *Provider) Handler() http.Handler {
-	return op.RegisterServer(p, op.Endpoints{Authorization: op.NewEndpoint("/authorize"), Token: op.NewEndpoint("/token"), JwksURI: op.NewEndpoint("/jwks")})
+	upstream := op.RegisterServer(p, op.Endpoints{Authorization: op.NewEndpoint("/authorize"), Token: op.NewEndpoint("/token"), JwksURI: op.NewEndpoint("/jwks"), Userinfo: op.NewEndpoint("/userinfo"), Revocation: op.NewEndpoint("/revoke")})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		if r.URL.Path == "/userinfo" {
+			upstream.ServeHTTP(bearerErrorWriter{w}, r)
+			return
+		}
+		upstream.ServeHTTP(w, r)
+	})
 }
 
 func (p *Provider) Keys(ctx context.Context, _ *op.Request[struct{}]) (*op.Response, error) {
@@ -78,7 +89,7 @@ func (p *Provider) VerifyAuthRequest(ctx context.Context, r *op.Request[oidc.Aut
 
 func (p *Provider) Authorize(ctx context.Context, r *op.ClientRequest[oidc.AuthRequest]) (*op.Redirect, error) {
 	a := r.Data
-	allowed := map[string]bool{"client_id": true, "redirect_uri": true, "response_type": true, "scope": true, "state": true, "nonce": true, "response_mode": true, "code_challenge": true, "code_challenge_method": true, "request": true}
+	allowed := map[string]bool{"client_id": true, "redirect_uri": true, "response_type": true, "scope": true, "state": true, "nonce": true, "response_mode": true, "code_challenge": true, "code_challenge_method": true, "request": true, "prompt": true}
 	for key, values := range r.Form {
 		if !allowed[key] || len(values) != 1 {
 			return nil, oidc.ErrInvalidRequest()
@@ -89,6 +100,12 @@ func (p *Provider) Authorize(ctx context.Context, r *op.ClientRequest[oidc.AuthR
 	}
 	if a.RequestParam != "" {
 		return nil, oidc.ErrRequestNotSupported()
+	}
+	// This issuer does not yet have silent authorization or consent state.
+	// It can safely decline prompt=none, but must never display its login or
+	// confirmation pages in response to that request.
+	if len(a.Prompt) > 0 && (len(a.Prompt) != 1 || a.Prompt[0] != oidc.PromptNone) {
+		return nil, oidc.ErrInvalidRequest()
 	}
 	if a.ResponseType != oidc.ResponseTypeCode || a.CodeChallengeMethod != oidc.CodeChallengeMethodS256 || !validChallenge(a.CodeChallenge) || !slices.Contains(a.Scopes, "openid") || len(a.Scopes) > 2 || (len(a.Scopes) == 2 && !slices.Contains(a.Scopes, "offline_access")) {
 		return nil, oidc.ErrInvalidRequest()
@@ -102,6 +119,9 @@ func (p *Provider) Authorize(ctx context.Context, r *op.ClientRequest[oidc.AuthR
 	}
 	if slices.Contains(a.Scopes, "offline_access") && !slices.Contains(client.GrantTypes, "refresh_token") {
 		return nil, oidc.ErrInvalidRequest()
+	}
+	if len(a.Prompt) == 1 {
+		return nil, oidc.ErrInteractionRequired()
 	}
 	if p.BeginLogin == nil {
 		return nil, oidc.ErrServerError()
@@ -123,6 +143,9 @@ func (p *Provider) Authorize(ctx context.Context, r *op.ClientRequest[oidc.AuthR
 
 func (p *Provider) VerifyClient(ctx context.Context, r *op.Request[op.ClientCredentials]) (op.Client, error) {
 	grant := r.Form.Get("grant_type")
+	if r.URL != nil && r.URL.Path == "/revoke" && grant == "" {
+		grant = "authorization_code"
+	}
 	if r.Data.ClientAssertion != "" || r.Data.ClientAssertionType != "" {
 		return nil, oidc.ErrInvalidClient()
 	}
@@ -207,6 +230,48 @@ func (p *Provider) RefreshToken(ctx context.Context, r *op.ClientRequest[oidc.Re
 	}
 	tokens.RefreshToken = next
 	return op.NewResponse(tokens), nil
+}
+
+// bearerErrorWriter adds the challenge required by RFC 6750 on a rejected
+// userinfo bearer token while leaving successful responses unchanged.
+type bearerErrorWriter struct{ http.ResponseWriter }
+
+func (w bearerErrorWriter) WriteHeader(code int) {
+	if code == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (p *Provider) UserInfo(ctx context.Context, r *op.Request[oidc.UserInfoRequest]) (*op.Response, error) {
+	if p.UserInfoToken == nil {
+		return nil, oidc.ErrServerError()
+	}
+	info, err := p.UserInfoToken(ctx, r.Data.AccessToken)
+	if errors.Is(err, ErrInvalidAccess) || errors.Is(err, ErrInvalidClient) {
+		return nil, op.NewStatusError(&oidc.Error{ErrorType: "invalid_token"}, http.StatusUnauthorized)
+	}
+	if err != nil {
+		return nil, oidc.ErrServerError().WithParent(err)
+	}
+	if info == nil || info.Subject == "" {
+		return nil, oidc.ErrServerError()
+	}
+	return op.NewResponse(info), nil
+}
+
+func (p *Provider) Revocation(ctx context.Context, r *op.ClientRequest[oidc.RevocationRequest]) (*op.Response, error) {
+	client, ok := r.Client.(providerClient)
+	if !ok || p.RevokeToken == nil {
+		return nil, oidc.ErrServerError()
+	}
+	if err := p.RevokeToken(ctx, client.ClientID, client.secret, r.Data.Token); err != nil {
+		if errors.Is(err, ErrInvalidClient) {
+			return nil, oidc.ErrInvalidClient()
+		}
+		return nil, oidc.ErrServerError().WithParent(err)
+	}
+	return op.NewResponse(struct{}{}), nil
 }
 
 type providerClient struct {

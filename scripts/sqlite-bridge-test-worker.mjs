@@ -9,6 +9,12 @@ const rejected = Symbol("Go transaction failed");
 
 export class BridgeTest extends DurableObject {
   run() {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS mapi_rows_written_probe (a TEXT, b TEXT, PRIMARY KEY (a, b))");
+    this.ctx.storage.sql.exec("DELETE FROM mapi_rows_written_probe");
+    const write = this.ctx.storage.sql.exec("INSERT INTO mapi_rows_written_probe VALUES ('a', 'b')");
+    write.toArray();
+    const written = write.rowsWritten;
+    const changes = this.ctx.storage.sql.exec("SELECT changes() AS count").one().count;
     let reactor;
     let output;
     let memory;
@@ -43,7 +49,7 @@ export class BridgeTest extends DurableObject {
     const packed = reactor.run_bridge_tests();
     const pointer = Number(packed >> 32n);
     const length = Number(packed & 0xffffffffn);
-    return JSON.parse(decoder.decode(new Uint8Array(memory(), pointer, length)));
+    return { ...JSON.parse(decoder.decode(new Uint8Array(memory(), pointer, length))), written, changes };
   }
 }
 

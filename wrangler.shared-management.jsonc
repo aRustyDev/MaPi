@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mapi-nextgen-shared-management-local",
+  "main": "worker/shared-management.js",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": { "MAPI_MANAGEMENT_ENABLED": "0", "MAPI_REQUIRE_OWNER_MAINTENANCE_CHECK": "1" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication", "script_name": "mapi-nextgen-combined-owner-local" },
+      { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry", "script_name": "mapi-nextgen-combined-owner-local" }
+    ]
+  }
+}

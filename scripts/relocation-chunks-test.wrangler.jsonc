@@ -1,0 +1,10 @@
+{
+ "name": "mapi-relocation-chunks-test",
+ "main": "relocation-chunks-test-worker.mjs",
+ "compatibility_date": "2026-11-18",
+ "durable_objects": { "bindings": [
+  { "name": "PROJECT", "class_name": "ChunkProject" },
+  { "name": "REGISTRY", "class_name": "ChunkRegistry" }
+ ] },
+ "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChunkProject", "ChunkRegistry"] }]
+}

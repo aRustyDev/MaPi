@@ -2,7 +2,7 @@
 
 The authoritative upstream pin is [v0.7.0 at b0b74cd4a198428ea9b82910c217259ffc62b65c](https://github.com/zitadel/nextgen/tree/b0b74cd4a198428ea9b82910c217259ffc62b65c). Generate this file with `node scripts/parity-inventory.mjs > docs/parity-inventory.md`. Run `node scripts/parity-inventory.mjs --check` to detect drift.
 
-The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Mounts alone do not establish public ingress or parity.
+The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. The optional management and events builds each mount two additional operations. Mounts alone do not establish public ingress or parity.
 
 The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.
 
@@ -13,8 +13,8 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | System | `getLive` | `GET /livez` | adapter only, no public ingress | native/workerd adapter GET parity | partial behavior only |
 | System | `getReady` | `GET /readyz` | adapter only, no public ingress | native/workerd adapter GET parity | partial behavior only |
 | Users | `createUser` | `POST /users` | not mounted | none | native-versus-Worker test needed |
-| Users | `queryUsers` | `POST /users/query` | not mounted | none | native-versus-Worker test needed |
-| Users | `getUser` | `GET /users/{user_id}` | not mounted | none | native-versus-Worker test needed |
+| Users | `queryUsers` | `POST /users/query` | experimental management build only | experimental native/workerd authorization checks | partial behavior only |
+| Users | `getUser` | `GET /users/{user_id}` | experimental management build only | experimental native/workerd authorization checks | partial behavior only |
 | Users | `updateUser` | `PATCH /users/{user_id}` | not mounted | none | native-versus-Worker test needed |
 | Users | `deleteUser` | `DELETE /users/{user_id}` | not mounted | none | native-versus-Worker test needed |
 | Users | `listUserIdentityLinks` | `GET /users/{user_id}/identity_links` | not mounted | none | native-versus-Worker test needed |
@@ -106,8 +106,8 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | Invitations | `rejectInvitation` | `POST /invitations/reject` | not mounted | none | native-versus-Worker test needed |
 | Invitations | `getInvitation` | `GET /invitations/{invitation_id}` | not mounted | none | native-versus-Worker test needed |
 | Invitations | `cancelInvitation` | `DELETE /invitations/{invitation_id}` | not mounted | none | native-versus-Worker test needed |
-| Events | `listEvents` | `GET /events` | not mounted | none | native-versus-Worker test needed |
-| Events | `getEvent` | `GET /events/{event_id}` | not mounted | none | native-versus-Worker test needed |
+| Events | `listEvents` | `GET /events` | experimental events build only | experimental native/workerd authorization and pagination checks | partial behavior only |
+| Events | `getEvent` | `GET /events/{event_id}` | experimental events build only | experimental native/workerd authorization and pagination checks | partial behavior only |
 | Variables | `listVariables` | `GET /variables` | not mounted | none | native-versus-Worker test needed |
 | Variables | `setVariables` | `PATCH /variables` | not mounted | none | native-versus-Worker test needed |
 | Variables | `getVariable` | `GET /variables/{variable_name}` | not mounted | none | native-versus-Worker test needed |

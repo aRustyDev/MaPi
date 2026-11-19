@@ -78,6 +78,12 @@ func TestSigningKeyRotationAndSignedTokens(t *testing.T) {
 		_, err := store.DB.ExecContext(ctx, "INSERT INTO issued_tokens VALUES (?)", jti)
 		return err
 	}}
+	if err := issuer.CreateSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateClientEpochSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
 	grant.Scope = "openid offline_access"
 	var result struct{ access, id, refresh string }
 	if err := store.Transaction(func() error {
@@ -97,6 +103,15 @@ func TestSigningKeyRotationAndSignedTokens(t *testing.T) {
 	if err := issuer.ValidateAccess(ctx, result.access, grant.ClientID); err != nil {
 		t.Fatalf("valid access token rejected: %v", err)
 	}
+	savedFactors := sessions.session.Factors
+	sessions.session.Factors = []domain.AuthFactor{domain.SetAuthFactorUser(store.Now().Add(-time.Minute))}
+	if err := issuer.ValidateAccess(ctx, result.access, grant.ClientID); err == nil {
+		t.Fatal("identifier-only session accepted")
+	}
+	if err := store.Transaction(func() error { _, err := issuer.MintCodeTokens(ctx, grant); return err }); err == nil {
+		t.Fatal("identifier-only token issuance accepted")
+	}
+	sessions.session.Factors = savedFactors
 	if err := issuer.ValidateAccess(ctx, result.access, "other-client"); err == nil {
 		t.Fatal("wrong audience accepted")
 	}
@@ -142,6 +157,40 @@ func TestSigningKeyRotationAndSignedTokens(t *testing.T) {
 	var active string
 	if err := store.DB.QueryRow("SELECT key_id FROM mapi_oauth_signing_keys WHERE project_id=? AND active=1", grant.ProjectID).Scan(&active); err != nil || active != second {
 		t.Fatalf("failed rotation persisted: %s %v", active, err)
+	}
+	allow := func(context.Context) error { return nil }
+	auditRevocation := func(ctx context.Context, identity AccessIdentity) error {
+		if identity.Subject != grant.UserID || identity.SessionID != grant.SessionID {
+			t.Error("incorrect audit identity")
+		}
+		_, err := store.DB.ExecContext(ctx, "INSERT INTO issued_tokens VALUES ('revocation')")
+		return err
+	}
+	if err := issuer.RevokeAccess(ctx, result.access, "other-client", allow, auditRevocation); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuer.ValidateAccess(ctx, result.access, grant.ClientID); err != nil {
+		t.Fatalf("cross-client revocation succeeded: %v", err)
+	}
+	rollback := errors.New("failed audit")
+	if err := issuer.RevokeAccess(ctx, result.access, grant.ClientID, allow, func(context.Context, AccessIdentity) error { return rollback }); !errors.Is(err, rollback) {
+		t.Fatalf("audit error lost: %v", err)
+	}
+	if err := issuer.ValidateAccess(ctx, result.access, grant.ClientID); err != nil {
+		t.Fatalf("revocation was not rolled back: %v", err)
+	}
+	if err := issuer.RevokeAccess(ctx, result.access, grant.ClientID, allow, auditRevocation); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuer.RevokeAccess(ctx, result.access, grant.ClientID, allow, auditRevocation); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuer.ValidateAccess(ctx, result.access, grant.ClientID); !errors.Is(err, ErrInvalidAccess) {
+		t.Fatalf("revoked access accepted: %v", err)
+	}
+	var revocationCount int
+	if err := store.DB.QueryRow("SELECT COUNT(*) FROM issued_tokens WHERE value='revocation'").Scan(&revocationCount); err != nil || revocationCount != 1 {
+		t.Fatalf("non-idempotent audit: %d %v", revocationCount, err)
 	}
 	sessions.session = nil
 	if err := issuer.ValidateAccess(ctx, result.access, grant.ClientID); err == nil {

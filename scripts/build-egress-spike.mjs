@@ -1,0 +1,10 @@
+import { copyFile, mkdir } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
+const source = resolve('.mapi/nextgen');
+const pin = 'b0b74cd4a198428ea9b82910c217259ffc62b65c';
+if (execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() !== pin) throw Error('Nextgen checkout is not at the pinned commit');
+const dir = resolve(source, 'apps/api/cmd/mapi-egress-spike'); await mkdir(dir, { recursive: true }); await mkdir('worker/generated', { recursive: true });
+await copyFile('upstream/overlay/apps/api/cmd/mapi-egress-spike/main_wasip1.go', resolve(dir, 'main_wasip1.go'));
+execFileSync('go', ['build', '-trimpath', '-ldflags=-s -w', '-buildmode=c-shared', '-o', resolve('worker/generated/egress-spike.wasm'), './cmd/mapi-egress-spike'], { cwd: resolve(source, 'apps/api'), stdio: 'inherit', env: { ...process.env, GOWORK: 'off', GOOS: 'wasip1', GOARCH: 'wasm', CGO_ENABLED: '0', GOTOOLCHAIN: 'go1.26.9' } });
+console.log('Built isolated upstream OIDC discovery reactor.');

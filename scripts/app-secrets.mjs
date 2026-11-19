@@ -18,6 +18,7 @@ if (process.argv.includes("--local")) {
   await writeFile(".dev.vars.app", lines, { mode: 0o600, flag: "wx" });
   console.log("Created .dev.vars.app for local development.");
 } else {
-  await writeFile(".mapi/app-staging-secrets.json", JSON.stringify(secrets), { mode: 0o600, flag: "wx" });
-  console.log("Created .mapi/app-staging-secrets.json. Keep a secure backup of this file.");
+  const path = process.argv.includes("--oidc-staging") ? ".mapi/oidc-staging-secrets.json" : ".mapi/app-staging-secrets.json";
+  await writeFile(path, JSON.stringify(secrets), { mode: 0o600, flag: "wx" });
+  console.log(`Created ${path}. Keep a secure backup of this file.`);
 }
