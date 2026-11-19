@@ -33,6 +33,7 @@ export default {
       const result = await stub.flowRequest(request, argument);
       if (result.status !== expected) throw new Error(`expected ${expected}, got ${result.status}`);
     };
+    if (!(await main.admitLogin(route)) || await main.admitLogin({ ...route, projectId: "proj_other" }) || await main.admitLogin({ ...route, origin: "https://other.example" }) || await main.admitLogin(undefined)) throw new Error("login route identity/origin admission failed");
     await check(main, { ...route, projectId: "proj_other" }, 503);
     await check(main, { ...route, origin: "https://other.example" }, 503);
     await check(main, undefined, 503);
@@ -44,9 +45,11 @@ export default {
     const maintenance = env.TEST_MAINTENANCE.getByName("maintenance");
     const maintenanceProject = (await maintenance.provision("Maintenance test", origin)).projectId;
     await check(maintenance, { projectId: maintenanceProject, origin }, 503);
+    if (await maintenance.admitLogin({ projectId: maintenanceProject, origin })) throw new Error("maintenance login admitted");
     const recovery = env.TEST_RECOVERY.getByName("recovery");
     const recoveryProject = (await recovery.provision("Recovery test", origin)).projectId;
     await check(recovery, { projectId: recoveryProject, origin }, 503);
+    if (await recovery.admitLogin({ projectId: recoveryProject, origin })) throw new Error("recovery login admitted");
 
     // The earlier valid probe consumed one password slot. The rest race on one
     // object's synchronous owner turn; exactly 59 may pass before the bound.

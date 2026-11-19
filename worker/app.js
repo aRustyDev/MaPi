@@ -176,6 +176,10 @@ export class NextgenApplication extends DurableObject {
       this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch === (this.env.MAPI_RECOVERY_EPOCH ?? "0"));
   }
 
+  admitLogin(route) {
+    return this.#admitRoute(route);
+  }
+
   flowRequest(request, route) {
     if (!this.#admitRoute(route)) return { status: 503, headers: {}, body: null };
     const url = new URL(request.url);
@@ -434,6 +438,12 @@ export default {
       try { return await handleFlowProxy(request, object, route.project_id, route.origin); }
       catch { return new Response(null, { status: 503, headers: noStore }); }
     }
+    if (route.state === "active" && env.MAPI_OFFICIAL_LOGIN === "1" && url.pathname === "/login" && request.method === "GET") {
+      if (env.MAPI_MAINTENANCE === "1" || !(await object.admitLogin({ projectId: route.project_id, origin: route.origin }))) return new Response(null, { status: 503, headers: noStore });
+      const handles = url.searchParams.getAll("mapi_oauth");
+      if (handles.length && (env.MAPI_OIDC_EXPERIMENTAL !== "1" || handles.length !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(handles[0]))) return new Response(null, { status: 400, headers: noStore });
+      return renderLogin(route.project_id, handles[0] ?? "");
+    }
     if (route.state === "active" && route.project_id !== await object.identity()) return new Response(null, { status: 503, headers: noStore });
     if (url.pathname.startsWith("/_mapi/admin/oidc/")) {
       const actions = new Map([["/_mapi/admin/oidc/init", "initialize"], ["/_mapi/admin/oidc/clients", "register"], ["/_mapi/admin/oidc/rotate", "rotate"], ["/_mapi/admin/oidc/logout-uri", "register_logout"], ["/_mapi/admin/oidc/client-secret/rotate", "rotate_client_secret"], ["/_mapi/admin/oidc/client-secret/revoke", "revoke_client_secrets"], ["/_mapi/admin/oidc/flow/status", "flow_status"], ["/_mapi/admin/oidc/flow/publish", "flow_publish"], ["/_mapi/admin/oidc/flow/rollback", "flow_rollback"]]);
@@ -562,13 +572,6 @@ export default {
     const appStatus = await object.status();
     if (env.MAPI_MAINTENANCE === "1" || appStatus.maintenance || !appStatus.recoveryReady) return new Response(null, { status: 503, headers: noStore });
     if (url.pathname === "/login" && request.method === "GET") {
-      if (env.MAPI_OFFICIAL_LOGIN === "1") {
-        const projectId = await object.identity();
-        if (!projectId) return new Response(null, { status: 503, headers: noStore });
-        const handles = url.searchParams.getAll("mapi_oauth");
-        if (handles.length && (env.MAPI_OIDC_EXPERIMENTAL !== "1" || handles.length !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(handles[0]))) return new Response(null, { status: 400, headers: noStore });
-        return renderLogin(projectId, handles[0] ?? "");
-      }
       return page('<h1>Sign in</h1><form method="post" action="/login"><label>Email <input name="email" type="email" autocomplete="username" required></label><br><label>Password <input name="password" type="password" autocomplete="current-password" required></label><br><button>Sign in</button></form>');
     }
     if (["/login", "/logout"].includes(url.pathname) && request.method === "POST") {
