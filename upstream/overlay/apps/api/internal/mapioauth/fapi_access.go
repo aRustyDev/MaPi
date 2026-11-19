@@ -54,7 +54,7 @@ func (i FAPIAccessIssuer) valid() bool {
 		return false
 	}
 	issuer, e := url.Parse(i.Private.Assertions.Issuer)
-	return e == nil && issuer.Scheme == "https" && issuer.Host != "" && issuer.User == nil && issuer.RawQuery == "" && issuer.Fragment == "" && issuer.Path == "/oauth/"+i.Keys.ProjectID
+	return e == nil && issuer.Scheme == "https" && issuer.Host != "" && issuer.User == nil && issuer.RawQuery == "" && issuer.Fragment == "" && i.Private.Assertions.issuerPath() != "" && issuer.Path == i.Private.Assertions.issuerPath()
 }
 
 func (i FAPIAccessIssuer) session(ctx context.Context, project, user, session string) (time.Time, error) {

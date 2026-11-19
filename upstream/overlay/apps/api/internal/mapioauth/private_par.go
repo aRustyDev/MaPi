@@ -23,6 +23,7 @@ import (
 // outside that server-established scope.
 type PrivatePARConfig struct {
 	ProjectID, Issuer string
+	IssuerProfile     string // empty uses the existing issuer; "fapi" isolates the profile.
 	Store             Store
 	Pool              *service.DB
 }
@@ -49,7 +50,7 @@ func NewPrivatePAR(c PrivatePARConfig) (*PrivatePAR, error) {
 	policies.Audit = func(ctx context.Context, policy FAPIClientPolicy) error {
 		return audit.Emit(ctx, stmts, audit.EmitSpec{Type: domain.EventType("mapi.fapi.resource_policy.updated"), Category: domain.EventCategoryAdmin, ProjectID: c.ProjectID, EntityType: "oauth_client", EntityID: policy.ClientID, Payload: map[string]any{"audience": policy.Audience, "scopes": policy.Scopes, "enabled": policy.Enabled, "version": policy.Version}})
 	}
-	assertions := ClientAssertions{ProjectID: c.ProjectID, Issuer: c.Issuer, Store: c.Store, Registry: registry}
+	assertions := ClientAssertions{ProjectID: c.ProjectID, Issuer: c.Issuer, IssuerProfile: c.IssuerProfile, Store: c.Store, Registry: registry}
 	if !assertions.valid() {
 		return nil, errors.New("invalid private PAR issuer")
 	}

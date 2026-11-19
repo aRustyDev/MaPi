@@ -39,6 +39,8 @@ func RegisterApplication(ctx context.Context, applications service.ApplicationSe
 // credential and application changes cannot race a code or refresh commit.
 type ClientRegistry struct {
 	Statements service.ApplicationStatements
+	// Admit is an optional authoritative profile-membership check.
+	Admit func(context.Context, string, string) error
 }
 
 // Lookup resolves a registered client's current application revision.
@@ -48,6 +50,11 @@ func (r ClientRegistry) Lookup(ctx context.Context, projectID, clientID string) 
 	}
 	if projectID == "" || clientID == "" {
 		return Client{}, ErrInvalidClient
+	}
+	if r.Admit != nil {
+		if err := r.Admit(ctx, projectID, clientID); err != nil {
+			return Client{}, err
+		}
 	}
 	stored, err := r.Statements.GetApplicationClientByClientID(ctx, projectID, clientID)
 	if err != nil {

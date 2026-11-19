@@ -28,7 +28,9 @@ const privateKeyAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt
 // Store, Registry and both audit callbacks must use the same authoritative
 // project transaction. The ordinary confidential-client profile is unchanged.
 type ClientAssertions struct {
-	ProjectID, Issuer   string
+	ProjectID, Issuer string
+	// IssuerProfile is empty for the existing test issuer or "fapi" for the isolated issuer.
+	IssuerProfile       string
 	Store               Store
 	Registry            ClientRegistry
 	AuditKeys           func(context.Context, string, []string) error
@@ -37,7 +39,19 @@ type ClientAssertions struct {
 
 func (a ClientAssertions) valid() bool {
 	issuer, err := url.Parse(a.Issuer)
-	return err == nil && issuer.Scheme == "https" && issuer.Host != "" && issuer.User == nil && issuer.RawQuery == "" && issuer.Fragment == "" && issuer.Path == "/oauth/"+a.ProjectID && a.ProjectID != "" && url.PathEscape(a.ProjectID) == a.ProjectID && a.Store.DB != nil && a.Store.Now != nil && a.Registry.Statements != nil
+	return err == nil && issuer.Scheme == "https" && issuer.Host != "" && issuer.User == nil && issuer.RawQuery == "" && issuer.Fragment == "" && a.issuerPath() != "" && issuer.Path == a.issuerPath() && a.ProjectID != "" && url.PathEscape(a.ProjectID) == a.ProjectID && a.Store.DB != nil && a.Store.Now != nil && a.Registry.Statements != nil
+}
+
+// issuerPath permits only explicitly selected private issuer namespaces.
+func (a ClientAssertions) issuerPath() string {
+	switch a.IssuerProfile {
+	case "":
+		return "/oauth/" + a.ProjectID
+	case "fapi":
+		return "/fapi/" + a.ProjectID
+	default:
+		return ""
+	}
 }
 
 // CreateSchema must run as part of a versioned database migration before any
