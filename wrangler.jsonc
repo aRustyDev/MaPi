@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mapi-nextgen-poc",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": true,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [{ "name": "NEXTGEN_PROJECT", "class_name": "NextgenProject" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenProject"] }],
+  "env": {
+    "staging": {
+      "name": "mapi-nextgen-poc-staging",
+      "workers_dev": true,
+      "preview_urls": false,
+      "observability": { "enabled": true },
+      "durable_objects": {
+        "bindings": [{ "name": "NEXTGEN_PROJECT", "class_name": "NextgenProject" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenProject"] }]
+    }
+  }
+}

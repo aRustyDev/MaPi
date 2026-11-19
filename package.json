@@ -1,0 +1,20 @@
+{
+  "name": "mapi-nextgen-workers-poc",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "fixture": "node scripts/fixture.mjs",
+    "test:baseline": "node scripts/fixture.mjs --test",
+    "test:worker": "node scripts/test-worker.mjs",
+    "dev": "wrangler dev",
+    "prepare:staging": "node scripts/staging-secrets.mjs",
+    "deploy:staging": "wrangler deploy --env staging --secrets-file .mapi/staging-secrets.json"
+  },
+  "devDependencies": {
+    "@zitadel/testing": "0.7.0",
+    "@zitadel/cli": "0.7.0",
+    "wrangler": "4.165.0"
+  }
+}

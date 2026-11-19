@@ -32,3 +32,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Generated ZITADEL prototype artifacts and synthetic credentials
+/.mapi/
+/node_modules
+/worker/generated/
+/.dev.vars*
+/.wrangler/

@@ -1,0 +1,13 @@
+diff --git a/apps/api/internal/audit/tracing.go b/apps/api/internal/audit/tracing.go
+index 61bae98..a6968ec 100644
+--- a/apps/api/internal/audit/tracing.go
++++ b/apps/api/internal/audit/tracing.go
+@@ -12,2 +11,0 @@ import (
+-
+-	"github.com/zitadel/nextgen/internal/instrumentation/zotel"
+@@ -21 +19 @@ var tracer = otel.Tracer("github.com/zitadel/nextgen/internal/audit")
+-// root that carries [zotel.JobRoot] at the trace ratio, as it does a request's
++// root marked zitadel.job.root at the trace ratio, as it does a request's
+@@ -30 +28 @@ func startJobSpan(ctx context.Context, name string, attrs ...attribute.KeyValue)
+-		trace.WithAttributes(append(attrs, zotel.JobRoot)...),
++		trace.WithAttributes(append(attrs, attribute.Bool("zitadel.job.root", true))...),
