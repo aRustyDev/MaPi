@@ -90,11 +90,11 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | Policies | `getPolicy` | `GET /policies/{policy_id}` | not mounted | none | native-versus-Worker test needed |
 | Policies | `listPolicyRevisions` | `GET /policies/{policy_id}/revisions` | not mounted | none | native-versus-Worker test needed |
 | Policies | `getPolicyRevision` | `GET /policies/revisions/{revision_id}` | not mounted | none | native-versus-Worker test needed |
-| Releases | `createRelease` | `POST /releases` | not mounted | none | native-versus-Worker test needed |
-| Releases | `listReleases` | `GET /releases` | not mounted | none | native-versus-Worker test needed |
+| Releases | `createRelease` | `POST /releases` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
+| Releases | `listReleases` | `GET /releases` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
 | Releases | `buildRelease` | `POST /releases/build` | not mounted | none | native-versus-Worker test needed |
-| Releases | `getRelease` | `GET /releases/{release_id}` | not mounted | none | native-versus-Worker test needed |
-| Releases | `revokeRelease` | `POST /releases/{release_id}/revoke` | not mounted | none | native-versus-Worker test needed |
+| Releases | `getRelease` | `GET /releases/{release_id}` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
+| Releases | `revokeRelease` | `POST /releases/{release_id}/revoke` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
 | Grants | `createGrant` | `POST /grants` | not mounted | none | native-versus-Worker test needed |
 | Grants | `queryGrants` | `POST /grants/query` | not mounted | none | native-versus-Worker test needed |
 | Grants | `getGrant` | `GET /grants/{grant_id}` | not mounted | none | native-versus-Worker test needed |
@@ -112,11 +112,11 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | Variables | `setVariables` | `PATCH /variables` | not mounted | none | native-versus-Worker test needed |
 | Variables | `getVariable` | `GET /variables/{variable_name}` | not mounted | none | native-versus-Worker test needed |
 | Variables | `deleteVariable` | `DELETE /variables/{variable_name}` | not mounted | none | native-versus-Worker test needed |
-| Deployments | `createDeployment` | `POST /deployments` | not mounted | none | native-versus-Worker test needed |
-| Deployments | `listDeployments` | `GET /deployments` | not mounted | none | native-versus-Worker test needed |
-| Deployments | `getDeployment` | `GET /deployments/{deployment_id}` | not mounted | none | native-versus-Worker test needed |
-| Deployments | `rollbackDeployment` | `POST /deployments/{deployment_id}/rollback` | not mounted | none | native-versus-Worker test needed |
-| Deployments | `listDeploymentVariables` | `GET /deployments/{deployment_id}/variables` | not mounted | none | native-versus-Worker test needed |
+| Deployments | `createDeployment` | `POST /deployments` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
+| Deployments | `listDeployments` | `GET /deployments` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
+| Deployments | `getDeployment` | `GET /deployments/{deployment_id}` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
+| Deployments | `rollbackDeployment` | `POST /deployments/{deployment_id}/rollback` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
+| Deployments | `listDeploymentVariables` | `GET /deployments/{deployment_id}/variables` | experimental release/deployment build only | experimental native/workerd release and deployment lifecycle, authorization and audit rollback checks; foreign-credential status differs | partial behavior only |
 
 ## Other native HTTP and runtime surfaces
 

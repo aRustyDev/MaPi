@@ -1,0 +1,16 @@
+# Isolated release and deployment parity
+
+The local-only `mapi_release_deployment` adapter mounts the pinned generated handlers for release create/list/read/revoke and deployment create/list/read/variables/rollback, including `/api/v1` aliases. It wires Nextgen's own deployment and variable services; it does not change public ingress or deploy a Worker. The existing Wasm release service is constructed without the write dependencies needed for `POST /releases/build`, so that operation is deliberately **not mounted**. This slice does not prove the full release API.
+
+After `node scripts/fixture.mjs`, run:
+
+```sh
+node scripts/build-release-deployment-test.mjs
+node scripts/test-release-deployment-parity.mjs
+```
+
+The test starts separate pinned native SQLite and local workerd servers with synthetic projects and real project credentials. It creates a schema-only release from existing published revisions, checks content-hash idempotency under concurrent creation, deploys it to the primary origin, validates stale deployment guards and idempotent redeployment, then rolls back to the original release. It reads the deployment and variables, expands release data, paginates releases, rejects a revoked release and an in-use revoke, and confirms state after workerd eviction. It compares stable HTTP status and error codes, counts `release.created`, `release.revoked` and `deployment.created` mutation audits, and injects local audit errors to prove rollback of release creation, deployment, rollback and revocation. Native fault injection was not run. A valid foreign project token is present in the shared fixture object: the tested release list returns native 404 `rel.not_found` versus workerd 401 `auth.unauthorized`. A control demonstrates that the worker's object fence rejects an auth attempt for the second fixture project; this is not a separate-object or delegated-authorization proof. Unprivileged session and cross-origin requests are rejected before reaching an authorized mutation, so these results do not establish the CSRF behavior of a permitted administrator session.
+
+Two pinned behaviors differ from the documented contract. Creating a deployment by `content_hash` returns 501 `not_implemented`. The documented release-list `content_hash` filter is ignored by the pinned handler: a well-formed unknown hash still returns releases. These results match on both targets; matching an upstream bug is not a claim that the published contract is implemented.
+
+The release service has no attached schema/flow/branding/IdP/policy writers in this build and uses the fixture's existing revisions. Builtin-schema resolution, full release validation and build, frozen variable values under later changes, preview targets and expiration, release/deployment history under competing writes, session-based administrator authorization, broader response bodies and audit payloads, hosted limits and true cross-object isolation remain untested. The pinned deployment service itself documents that a concurrent release revoke can occur after its revocation check (TODO #2206); this suite does not prove that race safe. The generated Wasm was 54,181,614 bytes in one local build; it is not a Worker upload, CPU or total isolate-memory measurement. Keep the adapter private until its actual ingress, consistency and hosted gates pass.
