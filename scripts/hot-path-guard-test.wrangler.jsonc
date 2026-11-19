@@ -1,0 +1,14 @@
+{
+  "name": "mapi-hot-path-guard-test",
+  "main": "hot-path-guard-test-worker.mjs",
+  "alias": { "./wasm-module.js": "../worker/oidc-wasm-module.js" },
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [
+    { "name": "TEST_MAIN", "class_name": "NextgenApplication" },
+    { "name": "TEST_MAINTENANCE", "class_name": "MaintenanceOwner" },
+    { "name": "TEST_RECOVERY", "class_name": "RecoveryOwner" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "MaintenanceOwner", "RecoveryOwner"] }],
+  "vars": { "MAPI_OIDC_EXPERIMENTAL": "1", "MAPI_APP_ORIGIN": "https://issuer.example", "MAPI_LOCAL_TEST": "1" }
+}

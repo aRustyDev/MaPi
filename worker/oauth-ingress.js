@@ -48,7 +48,7 @@ export async function handleOAuthIngress(request, object, projectId, origin) {
   for (const name of ["accept", "authorization", "content-type", "cookie", "origin", "referer", "user-agent"]) {
     if (request.headers.has(name)) headers[name] = [request.headers.get(name)];
   }
-  const result = await object.oauthRequest({ method: request.method, url: request.url, headers, body: body.toBase64(), peer: request.headers.get("cf-connecting-ip") ?? "127.0.0.1" });
+  const result = await object.oauthRequest({ method: request.method, url: request.url, headers, body: body.toBase64(), peer: request.headers.get("cf-connecting-ip") ?? "127.0.0.1" }, { projectId, origin });
   const outgoing = new Headers(noStore);
   const accepted = new Set(["content-type", "content-security-policy", "referrer-policy", "x-content-type-options", "location", "set-cookie", "www-authenticate", "retry-after"]);
   for (const [name, values] of Object.entries(result.headers)) if (accepted.has(name.toLowerCase())) for (const value of values) outgoing.append(name, value);

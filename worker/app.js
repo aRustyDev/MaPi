@@ -168,21 +168,36 @@ export class NextgenApplication extends DurableObject {
     }
   }
 
-  flowRequest(request) {
+  // Check registry routing and recovery state in the same synchronous owner
+  // turn as the operation, so no state change can interleave after admission.
+  #admitRoute(route) {
+    return Boolean(route?.projectId && route.origin && this.env.MAPI_MAINTENANCE !== "1" &&
+      this.projectId() === route.projectId && this.projectOrigin() === route.origin &&
+      this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch === (this.env.MAPI_RECOVERY_EPOCH ?? "0"));
+  }
+
+  flowRequest(request, route) {
+    if (!this.#admitRoute(route)) return { status: 503, headers: {}, body: null };
+    const url = new URL(request.url);
+    if (url.origin !== route.origin) return { status: 403, headers: {}, body: null };
+    if (request.method === "POST" && /^\/api\/v1\/flows\/flow_[A-Za-z0-9_-]+\/submit$/.test(url.pathname) && !this.allowLogin(request.peer ?? "127.0.0.1")) return { status: 429, headers: {}, body: null };
     this.#initialize();
-    const projectId = this.projectId();
-    if (!projectId) return { status: 503, headers: {}, body: null };
-    if (new URL(request.url).pathname === "/api/v1/sessions/exchange") {
+    const projectId = route.projectId;
+    if (url.pathname === "/api/v1/sessions/exchange") {
       const { token } = this.#call("mapi_project_token", { projectId });
       request.headers.authorization = [`Bearer ${token}`];
     }
     return this.#call("mapi_request", request);
   }
 
-  oauthRequest(request) {
+  oauthRequest(request, route) {
     if (this.env.MAPI_OIDC_EXPERIMENTAL !== "1") throw new Error("Experimental issuer is disabled");
+    if (!this.#admitRoute(route)) return { status: 503, headers: {}, body: null };
+    const url = new URL(request.url);
+    if (url.origin !== route.origin || !isOAuthRoute(request.method, url.pathname, route.projectId)) return { status: 403, headers: {}, body: null };
+    if (!this.allowLogin(request.peer ?? "127.0.0.1", "oauth")) return { status: 429, headers: {}, body: null };
     this.#initialize();
-    return this.#call("mapi_oauth_request", { projectId: this.projectId(), origin: this.projectOrigin(), request });
+    return this.#call("mapi_oauth_request", { projectId: route.projectId, origin: route.origin, request });
   }
 
   oauthAdmin(action, options = {}) {
@@ -402,6 +417,18 @@ export default {
       const projectId = await object.identity();
       if (projectId) route = await registry.activate(route.origin, route.object_name, projectId);
     }
+    // Hot-path admission, rate limiting and execution happen together inside
+    // the owning object. The registry must still resolve an active route first.
+    if (route.state === "active" && env.MAPI_OIDC_EXPERIMENTAL === "1" && isOAuthRoute(request.method, url.pathname, route.project_id)) {
+      if (env.MAPI_MAINTENANCE === "1") return new Response(null, { status: 503, headers: noStore });
+      try { return await handleOAuthIngress(request, object, route.project_id, route.origin); }
+      catch { return new Response(null, { status: 503, headers: noStore }); }
+    }
+    if (route.state === "active" && env.MAPI_OFFICIAL_LOGIN === "1" && url.pathname.startsWith("/__nextgen/")) {
+      if (env.MAPI_MAINTENANCE === "1") return new Response(null, { status: 503, headers: noStore });
+      try { return await handleFlowProxy(request, object, route.project_id, route.origin); }
+      catch { return new Response(null, { status: 503, headers: noStore }); }
+    }
     if (route.state === "active" && route.project_id !== await object.identity()) return new Response(null, { status: 503, headers: noStore });
     if (url.pathname.startsWith("/_mapi/admin/oidc/")) {
       const actions = new Map([["/_mapi/admin/oidc/init", "initialize"], ["/_mapi/admin/oidc/clients", "register"], ["/_mapi/admin/oidc/rotate", "rotate"], ["/_mapi/admin/oidc/logout-uri", "register_logout"], ["/_mapi/admin/oidc/client-secret/rotate", "rotate_client_secret"], ["/_mapi/admin/oidc/client-secret/revoke", "revoke_client_secrets"], ["/_mapi/admin/oidc/flow/status", "flow_status"], ["/_mapi/admin/oidc/flow/publish", "flow_publish"], ["/_mapi/admin/oidc/flow/rollback", "flow_rollback"]]);
@@ -529,24 +556,8 @@ export default {
     if (route.state !== "active") return new Response(null, { status: 503, headers: noStore });
     const appStatus = await object.status();
     if (env.MAPI_MAINTENANCE === "1" || appStatus.maintenance || !appStatus.recoveryReady) return new Response(null, { status: 503, headers: noStore });
-    if (env.MAPI_OIDC_EXPERIMENTAL === "1" && isOAuthRoute(request.method, url.pathname, route.project_id)) {
-      if (url.origin !== route.origin) return new Response(null, { status: 403, headers: noStore });
-      if (!(await object.allowLogin(request.headers.get("cf-connecting-ip") ?? "local", "oauth"))) return new Response(null, { status: 429, headers: noStore });
-      try { return await handleOAuthIngress(request, object, route.project_id, route.origin); }
-      catch { return new Response(null, { status: 503, headers: noStore }); }
-    }
     if (env.MAPI_OFFICIAL_LOGIN === "1" && url.pathname === "/zitadel-login.mjs" && request.method === "GET") {
       return env.ASSETS.fetch(request);
-    }
-    if (env.MAPI_OFFICIAL_LOGIN === "1" && url.pathname.startsWith("/__nextgen/")) {
-      const projectId = await object.identity();
-      if (!projectId) return new Response(null, { status: 503, headers: noStore });
-      if (request.method === "POST" && /\/flows\/flow_[A-Za-z0-9_-]+\/submit$/.test(url.pathname)) {
-        if (url.origin !== route.origin || request.headers.get("origin") !== route.origin) return new Response(null, { status: 403, headers: noStore });
-        if (!(await object.allowLogin(request.headers.get("cf-connecting-ip") ?? "local"))) return new Response(null, { status: 429, headers: noStore });
-      }
-      try { return await handleFlowProxy(request, object, projectId, route.origin); }
-      catch { return new Response(null, { status: 503, headers: noStore }); }
     }
     if (url.pathname === "/login" && request.method === "GET") {
       if (env.MAPI_OFFICIAL_LOGIN === "1") {

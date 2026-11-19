@@ -24,6 +24,7 @@
     "test:app": "node scripts/test-app.mjs",
     "test:projects": "node scripts/test-project-routing.mjs",
     "test:flow-proxy": "node scripts/test-flow-proxy.mjs",
+    "test:hot-path-guard": "node scripts/test-hot-path-guard.mjs",
     "test:flow-throttle": "node scripts/test-flow-throttle.mjs",
     "test:management-proxy": "node scripts/test-management-proxy.mjs",
     "build:management": "node scripts/build-management.mjs",

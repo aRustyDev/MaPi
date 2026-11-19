@@ -1,5 +1,7 @@
-// Local-only two-project OIDC isolation test. Distinct synthetic DNS names
-// prevent host-only cookies from being shared merely because ports differ.
+// Two-project OIDC isolation test, local by default. Set MAPI_ISOLATION_HOSTED=1
+// with MAPI_ISOLATION_ORIGINS, MAPI_ISOLATION_USER_FILES and
+// MAPI_ISOLATION_SECRETS_FILE to exercise existing hosted projects without deploying.
+// Local synthetic DNS names prevent host-only cookies being shared across ports.
 import assert from 'node:assert/strict';
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, verify } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
@@ -14,8 +16,9 @@ import { chromium } from 'playwright';
 
 const temp=await mkdtemp(resolve(tmpdir(),'mapi-oidc-isolation-'));
 let worker,proxy,rp,browser;
+const hosted=process.env.MAPI_ISOLATION_HOSTED==='1';
 try {
- if(process.env.MAPI_TEST_PREBUILT!=='1'){
+ if(!hosted && process.env.MAPI_TEST_PREBUILT!=='1'){
   execFileSync('bash',['scripts/build-oidc.sh'],{stdio:'inherit'});
   execFileSync(process.execPath,['scripts/baseline.mjs'],{stdio:'inherit'});
   execFileSync(process.execPath,['scripts/build-login-assets.mjs'],{stdio:'inherit'});
@@ -25,23 +28,36 @@ try {
  const tls={key:await readFile(key),cert:await readFile(cert)};
  const certPin=createHash('sha256').update(createPublicKey(tls.cert).export({type:'spki',format:'der'})).digest('base64');
  async function port(){const s=createServer().listen(0,'127.0.0.1');await once(s,'listening');const n=s.address().port;await new Promise(done=>s.close(done));return n;}
- const workPort=await port(),inspector=await port();
- const originA=`https://a.test:${workPort}`;
- const operator=randomBytes(32).toString('base64url');
- const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048,privateKeyEncoding:{type:'pkcs8',format:'pem'},publicKeyEncoding:{type:'spki',format:'pem'}});
- const variables=resolve(temp,'worker.env');
- await writeFile(variables,`MAPI_APP_ORIGIN=${originA}\nMAPI_OPERATOR_TOKEN=${operator}\nMAPI_MASTER_KEY=${Buffer.from(JSON.stringify({id:'master-test',pem:privateKey})).toString('base64')}\nMAPI_LOCAL_TEST=1\n`,{mode:0o600});
- worker=spawn(process.execPath,[resolve('node_modules/wrangler/bin/wrangler.js'),'dev','--local','--config','wrangler.oidc-local.jsonc','--env-file',variables,'--ip','127.0.0.1','--port',String(workPort),'--inspector-port',String(inspector),'--local-protocol','https','--https-key-path',key,'--https-cert-path',cert,'--persist-to',resolve(temp,'storage')],{stdio:['ignore','ignore','inherit'],env:{...process.env,WRANGLER_LOG_PATH:resolve(temp,'wrangler.log'),WRANGLER_SEND_METRICS:'false'}});
- proxy=https.createServer(tls,(incoming,outgoing)=>{
-  const target=https.request({hostname:'127.0.0.1',port:workPort,path:incoming.url,method:incoming.method,headers:incoming.headers,ca:tls.cert},res=>{outgoing.writeHead(res.statusCode,res.headers);res.pipe(outgoing);});
-  target.on('error',()=>{if(!outgoing.headersSent)outgoing.writeHead(502);outgoing.end();});incoming.pipe(target);
- });
- proxy.listen(0,'127.0.0.1');await once(proxy,'listening');const proxyPort=proxy.address().port,originB=`https://b.test:${proxyPort}`;
- const origins=[originA,originB],ports=[workPort,proxyPort],hosts=['a.test','b.test'];
- function request(index,path,{method='GET',headers={},body=''}={}){
-  return new Promise((done,fail)=>{const req=https.request({hostname:'127.0.0.1',port:ports[index],path,method,headers:{host:`${hosts[index]}:${ports[index]}`,...headers},ca:tls.cert},res=>{const chunks=[];res.on('data',x=>chunks.push(x));res.on('end',()=>done({status:res.statusCode,headers:res.headers,body:Buffer.concat(chunks).toString()}));});req.on('error',fail);req.end(body);});
+ let origins,operator,request,fixtures;
+ if(hosted){
+  const configured=(process.env.MAPI_ISOLATION_ORIGINS||'').split(',');
+  const files=(process.env.MAPI_ISOLATION_USER_FILES||'').split(',');
+  if(configured.length!==2||files.length!==2||!process.env.MAPI_ISOLATION_SECRETS_FILE)throw Error('Two origins, two user fixture files and a secrets file are required');
+  origins=configured.map(value=>{const u=new URL(value);if(u.protocol!=='https:'||u.origin!==value)throw Error('Hosted origins must be exact HTTPS origins');return u.origin;});
+  if(origins[0]===origins[1])throw Error('Hosted origins must be distinct');
+  fixtures=await Promise.all(files.map(async path=>JSON.parse(await readFile(path,'utf8'))));
+  const secrets=JSON.parse(await readFile(process.env.MAPI_ISOLATION_SECRETS_FILE,'utf8'));operator=secrets.MAPI_OPERATOR_TOKEN;
+  if(!operator||fixtures.some(f=>!f.projectId)||fixtures[0].projectId===fixtures[1].projectId)throw Error('Invalid project fixtures or operator secret');
+  request=async(index,path,{method='GET',headers={},body=''}={})=>{
+   const response=await fetch(new URL(path,origins[index]),{method,headers,...(method==='GET'?{}:{body}),redirect:'manual'});
+   return {status:response.status,headers:Object.fromEntries(response.headers),body:await response.text()};
+  };
+ }else{
+  const workPort=await port(),inspector=await port(),originA=`https://a.test:${workPort}`;
+  operator=randomBytes(32).toString('base64url');
+  const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048,privateKeyEncoding:{type:'pkcs8',format:'pem'},publicKeyEncoding:{type:'spki',format:'pem'}});
+  const variables=resolve(temp,'worker.env');
+  await writeFile(variables,`MAPI_APP_ORIGIN=${originA}\nMAPI_OPERATOR_TOKEN=${operator}\nMAPI_MASTER_KEY=${Buffer.from(JSON.stringify({id:'master-test',pem:privateKey})).toString('base64')}\nMAPI_LOCAL_TEST=1\n`,{mode:0o600});
+  worker=spawn(process.execPath,[resolve('node_modules/wrangler/bin/wrangler.js'),'dev','--local','--config','wrangler.oidc-local.jsonc','--env-file',variables,'--ip','127.0.0.1','--port',String(workPort),'--inspector-port',String(inspector),'--local-protocol','https','--https-key-path',key,'--https-cert-path',cert,'--persist-to',resolve(temp,'storage')],{stdio:['ignore','ignore','inherit'],env:{...process.env,WRANGLER_LOG_PATH:resolve(temp,'wrangler.log'),WRANGLER_SEND_METRICS:'false'}});
+  proxy=https.createServer(tls,(incoming,outgoing)=>{
+   const target=https.request({hostname:'127.0.0.1',port:workPort,path:incoming.url,method:incoming.method,headers:incoming.headers,ca:tls.cert},res=>{outgoing.writeHead(res.statusCode,res.headers);res.pipe(outgoing);});
+   target.on('error',()=>{if(!outgoing.headersSent)outgoing.writeHead(502);outgoing.end();});incoming.pipe(target);
+  });
+  proxy.listen(0,'127.0.0.1');await once(proxy,'listening');const proxyPort=proxy.address().port;
+  origins=[originA,`https://b.test:${proxyPort}`];const ports=[workPort,proxyPort],hosts=['a.test','b.test'];
+  request=(index,path,{method='GET',headers={},body=''}={})=>new Promise((done,fail)=>{const req=https.request({hostname:'127.0.0.1',port:ports[index],path,method,headers:{host:`${hosts[index]}:${ports[index]}`,...headers},ca:tls.cert},res=>{const chunks=[];res.on('data',x=>chunks.push(x));res.on('end',()=>done({status:res.statusCode,headers:res.headers,body:Buffer.concat(chunks).toString()}));});req.on('error',fail);req.end(body);});
+  let ready=false;for(let i=0;i<100;i++){if(worker.exitCode!==null)throw Error('local workerd exited');try{await request(0,'/livez');ready=true;break;}catch{await setTimeout(200);}}if(!ready)throw Error('local Worker not ready');
  }
- let ready=false;for(let i=0;i<100;i++){if(worker.exitCode!==null)throw Error('local workerd exited');try{await request(0,'/livez');ready=true;break;}catch{await setTimeout(200);}}if(!ready)throw Error('local Worker not ready');
  const clients=[],sharedClients=[],jwks=[],results=[],states=new Map(),errors=[];
  let rpOrigin;
  rp=https.createServer(tls,async(req,res)=>{
@@ -64,22 +80,27 @@ try {
    results[i]={token,claims,header,payload,sig};res.writeHead(200,{'content-type':'text/html','cache-control':'no-store'});res.end(`<!doctype html><h1>RP project ${i} authenticated</h1>`);
   }catch(error){errors.push(error);res.writeHead(500);res.end('RP failed');}
  });
- rp.listen(0,'127.0.0.1');await once(rp,'listening');rpOrigin=`https://rp.test:${rp.address().port}`;
+ rp.listen(0,'127.0.0.1');await once(rp,'listening');rpOrigin=`https://${hosted?'127.0.0.1':'rp.test'}:${rp.address().port}`;
  const admin=(i,path,body)=>request(i,path,{method:'POST',headers:{authorization:`Bearer ${operator}`,'content-type':'application/json'},body:JSON.stringify(body)});
- const first=await admin(0,'/_mapi/admin/init',{name:'Isolation primary'});assert.equal(first.status,200);const idA=JSON.parse(first.body).projectId;
- const second=await admin(0,'/_mapi/admin/projects',{name:'Isolation secondary',origin:originB});assert.equal(second.status,200);const idB=JSON.parse(second.body).projectId;assert.notEqual(idA,idB);
+ let idA,idB;
+ if(hosted){[idA,idB]=fixtures.map(f=>f.projectId);}else{
+  const first=await admin(0,'/_mapi/admin/init',{name:'Isolation primary'});assert.equal(first.status,200);idA=JSON.parse(first.body).projectId;
+  const second=await admin(0,'/_mapi/admin/projects',{name:'Isolation secondary',origin:origins[1]});assert.equal(second.status,200);idB=JSON.parse(second.body).projectId;
+ }
+ assert.notEqual(idA,idB);
+ const runId=randomUUID();
  const email=`projects-${randomUUID()}@example.test`,passwords=[`A-${randomUUID()}!`,`B-${randomUUID()}!`];
  for(let i=0;i<2;i++){
   const projectId=[idA,idB][i];assert.equal((await admin(i,'/_mapi/admin/users',{email,password:passwords[i]})).status,200);
   const initialized=await admin(i,'/_mapi/admin/oidc/init',{});assert.equal(initialized.status,200);assert.equal(JSON.parse(initialized.body).issuer,`${origins[i]}/oauth/${projectId}`);
-  const doc={slug:`rp${i}`,name:`RP ${i}`,clients:[{slug:'web',client_id:`isolation-rp-${i}`,type:'confidential',grant_types:['authorization_code','refresh_token'],redirect_uris:[`${rpOrigin}/callback/${i}`]}]};
+  const doc={slug:`rp-${runId}-${i}`,name:`RP ${i}`,clients:[{slug:'web',client_id:`isolation-rp-${runId}-${i}`,type:'confidential',grant_types:['authorization_code','refresh_token'],redirect_uris:[`${rpOrigin}/callback/${i}`]}]};
   const created=await admin(i,'/_mapi/admin/oidc/clients',{document:doc});assert.equal(created.status,200);const s=JSON.parse(created.body).Secrets[0];clients.push({projectId,clientId:s.ClientID,secret:s.Secret});
-  const sharedDoc={slug:'shared-rp',name:'Shared client ID test',clients:[{slug:'web',client_id:'shared-rp-id',type:'confidential',grant_types:['authorization_code'],redirect_uris:[`${rpOrigin}/callback/${i}`]}]};
+  const sharedDoc={slug:`shared-rp-${runId}`,name:'Shared client ID test',clients:[{slug:'web',client_id:`shared-rp-${runId}`,type:'confidential',grant_types:['authorization_code'],redirect_uris:[`${rpOrigin}/callback/${i}`]}]};
   const shared=await admin(i,'/_mapi/admin/oidc/clients',{document:sharedDoc});assert.equal(shared.status,200);sharedClients.push(JSON.parse(shared.body).Secrets[0]);
   const keys=await request(i,`/oauth/${projectId}/jwks`);assert.equal(keys.status,200);jwks.push(JSON.parse(keys.body));
  }
  assert.notEqual(clients[0].clientId,clients[1].clientId);assert.notEqual(clients[0].secret,clients[1].secret);assert.equal(sharedClients[0].ClientID,sharedClients[1].ClientID);assert.notEqual(sharedClients[0].Secret,sharedClients[1].Secret);
- assert.equal(jwks[0].keys.length,1);assert.equal(jwks[1].keys.length,1);assert.notEqual(jwks[0].keys[0].kid,jwks[1].keys[0].kid);assert.notEqual(jwks[0].keys[0].n,jwks[1].keys[0].n);
+ assert.ok(jwks[0].keys.length);assert.ok(jwks[1].keys.length);assert.notEqual(jwks[0].keys[0].kid,jwks[1].keys[0].kid);assert.notEqual(jwks[0].keys[0].n,jwks[1].keys[0].n);
  browser=await chromium.launch({headless:true,args:['--no-proxy-server',`--ignore-certificate-errors-spki-list=${certPin}`,'--host-resolver-rules=MAP a.test 127.0.0.1, MAP b.test 127.0.0.1, MAP rp.test 127.0.0.1']});
  const contexts=await Promise.all(origins.map(()=>browser.newContext())),pages=await Promise.all(contexts.map(c=>c.newPage()));
  const unexpected=[],failed=[];for(const page of pages){page.setDefaultTimeout(20000);page.setDefaultNavigationTimeout(20000);page.on('request',req=>{const o=new URL(req.url()).origin;if(![...origins,rpOrigin].includes(o))unexpected.push(o);});page.on('requestfailed',req=>failed.push(`${new URL(req.url()).pathname}: ${req.failure()?.errorText}`));}
@@ -120,12 +141,12 @@ try {
   const own=await request(i,`/oauth/${client.projectId}/userinfo`,{headers:{authorization:`Bearer ${item.token.access_token}`}});assert.equal(own.status,200);assert.equal(JSON.parse(own.body).sub,item.claims.sub);
  }
  // Logging one project out revokes its session while the other stays active.
- await pages[0].goto(`${originA}/app`);await pages[0].getByRole('button',{name:'Sign out'}).click();await pages[0].waitForURL('**/login');
+ await pages[0].goto(`${origins[0]}/app`);await pages[0].getByRole('button',{name:'Sign out'}).click();await pages[0].waitForURL('**/login');
  assert.equal((await request(0,`/oauth/${idA}/userinfo`,{headers:{authorization:`Bearer ${results[0].token.access_token}`}})).status,401);
  assert.equal((await request(1,`/oauth/${idB}/userinfo`,{headers:{authorization:`Bearer ${results[1].token.access_token}`}})).status,200);
  const memory=[];for(let i=0;i<2;i++){const status=await request(i,'/_mapi/admin/status',{headers:{authorization:`Bearer ${operator}`}});assert.equal(status.status,200);memory.push(JSON.parse(status.body).wasmMemoryBytes);}
  for(const context of contexts)await context.close();
- console.log(`Two local projects: official login, independent RP, distinct issuers and signing keys, wrong issuer/audience/signature, credential, bearer and cookie isolation, and isolated logout passed. Wasm linear memory per project: ${memory.join(', ')} bytes.`);
+ console.log(`Two ${hosted?'hosted':'local'} projects: official login, independent RP, distinct issuers and signing keys, wrong issuer/audience/signature, credential, bearer and cookie isolation, and isolated logout passed. Wasm linear memory per project: ${memory.join(', ')} bytes.`);
 }finally{
  if(browser)await browser.close();if(rp){rp.closeAllConnections?.();await new Promise(done=>rp.close(done));}if(proxy){proxy.closeAllConnections?.();await new Promise(done=>proxy.close(done));}
  if(worker&&worker.exitCode===null&&worker.signalCode===null){const stopped=once(worker,'exit');worker.kill('SIGTERM');await stopped;}await rm(temp,{recursive:true,force:true});

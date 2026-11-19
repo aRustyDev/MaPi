@@ -69,7 +69,7 @@ export async function handleFlowProxy(request, object, projectId, expectedOrigin
   const result = await object.flowRequest({
     method: request.method, url: url.toString(), headers, body: body.toBase64(),
     peer: request.headers.get("cf-connecting-ip") ?? "127.0.0.1",
-  });
+  }, { projectId, origin: expectedOrigin });
   const outgoing = new Headers(noStore);
   for (const [name, values] of Object.entries(result.headers)) {
     // Do not pass hop-by-hop headers, redirects, or upstream cache policy.

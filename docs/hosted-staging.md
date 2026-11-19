@@ -30,6 +30,21 @@ Cloudflare's Worker invocation analytics showed no errors for the sampled
 ingress requests, but the Durable Object CPU dataset returned no rows for this
 run; do not interpret ingress CPU or memory as Durable Object measurements.
 
+The second isolated origin is `mapi-nextgen-oidc-isolated-secondary`, version
+`88e750d8-703c-41e2-bd58-18710bc93de1`, a small Worker that forwards through a
+service binding to the same authoritative owner. A distinct project was
+initialized at that origin and completed an independent OIDC browser journey.
+Simultaneous 20-journey bursts at concurrency four per project completed with
+sign-in p95 **3.93 s** and **3.96 s**, respectively, and with 21 rejected code
+replays per project. Each object reported **106,168,320 bytes** of Wasm linear
+memory. Both sign-in measurements miss the 3.5 s target; this does not establish
+total isolate memory.
+
+The hosted two-project browser isolation test passed issuer, audience and
+signature checks, foreign bearer and cookie rejection, distinct and same-ID
+foreign client-secret rejection, and independent logout. The test provisions
+synthetic users and clients that remain in the isolated project databases.
+
 To repeat the hosted RP test, set `MAPI_URL`, `MAPI_OPERATOR_TOKEN`, and
 `MAPI_TEST_USER_FILE` to the isolated deployment and its private synthetic test
 user, then run `MAPI_TEST_BURST=1 npm run test:hosted-oidc`. The test creates a
@@ -37,6 +52,6 @@ temporary local HTTPS relying party and another synthetic client. Keep its
 credentials and temporary files private. Run in a fresh throttle window.
 
 The selected mandatory-S256 policy does not pass the official Basic OP profile;
-see [OIDF conformance](oidf-conformance.md). FAPI, a second hosted project,
-cross-project OIDC load, recovery at multi-project scale, the rest of Nextgen
+see [OIDF conformance](oidf-conformance.md). FAPI, recovery at multi-project
+scale, the rest of Nextgen
 parity and the full hosted performance and security gates remain open.
