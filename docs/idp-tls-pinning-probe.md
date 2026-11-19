@@ -1,0 +1,17 @@
+# Private TLS pinning capability probe
+
+The pinned Nextgen egress policy requires checking the resolved IP that is actually connected, while validating TLS for the original hostname. The existing private IdP Workers use `fetch` only with a fixed synthetic loopback endpoint; they do not implement this policy for tenant-supplied providers. DNS lookup followed by a separate `fetch` is not a safe substitute because the second lookup can return a different address.
+
+This is an opt-in **local workerd diagnostic**, not a production transport, guard, deployed Worker, conformance test, or hosted measurement. From MaPi:
+
+```sh
+MAPI_TLS_PUBLIC_PROBE=1 node scripts/test-tls-pin-probe.mjs
+```
+
+The explicit opt-in performs DNS resolution and TLS handshakes to the fixed public host `www.google.com`; it sends no HTTP request, tenant data, credentials or IdP state. It compares `node:tls.connect` with the hostname as `host`, with an intentionally wrong `servername`, and with a resolved IPv4 literal as `host` plus the original hostname as `servername`. A native Node wrong-servername handshake is the control. Without the flag the script skips all network activity. The diagnostic returns a nonzero status unless the safe pinned-dial conditions are demonstrated; network outages or changes to the public host may also cause failure.
+
+On November 19, 2026, with local workerd via Wrangler 4.165.0, the hostname connection was authorized. The same hostname connection with `servername: 'wrong.invalid'` also reported `authorized: true`; the socket reported the supplied wrong `servername` but `remoteAddress` was the original hostname. Native Node rejected the equivalent wrong-servername control with `ERR_TLS_CERT_ALTNAME_INVALID`. The literal-IP connection with `servername: 'www.google.com'` failed before TLS with `proxy request failed, cannot connect to the specified address`, suggesting `fetch` for HTTP. Thus `safePinnedDial` was false and the pinned wrong-name test was not reached. This is an observation of this local runtime and network environment; it does not prove all deployments behave identically, nor does it establish how the internal proxy performs SNI or certificate checks.
+
+Do **not** use `socket.servername`, `socket.authorized`, a preliminary DNS result, or the hostname-valued `remoteAddress` as proof of the intended IP/hostname binding. The public probe is intentionally fixed to one origin; it does not test private-address denies, full IPv4/IPv6 policy, NAT64, redirect revalidation, HTTP request framing, tenant configuration, credentials, deadlines under load, or DNS rebinding. The existing [discovery egress proof](idp-egress-spike.md) exercises pinned Go address policy and conservative redirect denial separately. Cloudflare documents [Node TLS compatibility](https://developers.cloudflare.com/workers/runtime-apis/nodejs/tls/), [TCP socket restrictions](https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/), and [fetch-to-IP limitations](https://developers.cloudflare.com/workers/platform/known-issues/#fetch-to-ip-addresses); those documents are not proof of an application-specific connected-IP check.
+
+A real-provider adapter still needs a supported, independently verified way to enforce the pinned policy at the actual connection, validate the intended hostname, apply per-hop redirect and credential rules, and bound I/O and retries. Until that exists and has passed local and hosted adversarial tests, arbitrary-provider egress must remain disabled.

@@ -4,11 +4,31 @@ The experimental Worker is `mapi-nextgen-oidc-isolated-staging` in account
 `4d90c2d31b480584f8f878d2f62848ab`. Initial version
 `c9bac9b3-abce-4f52-b570-bcebeb6b979d` was built from commit `2c9e779` with
 an empty SQLite baseline and its own Durable Object namespaces. The current
-version `f26832ab-a21e-4728-bae6-5253d870448a` was built from commit `4685432`.
+version `7caf7302-b9cd-4c91-a5fa-f3c05672bf52` was built from commit `d8be610`.
 It is an
 isolated test deployment, not the existing Woven application or a pilot release.
 Public OIDC discovery is disabled pending the selected strict-PKCE profile and
 its conformance gates.
+
+The `d8be610` deployment was built from a clean Git archive with an offline
+lockfile install and the pinned source and toolchain. Wrangler reported
+**54,404.93 KiB** uncompressed upload and **106 ms** startup validation. One
+synthetic active and one revoked session in each project retained their state
+across the deployment; the active test sessions were then revoked. An
+independent RP completed one login per project and code replay was rejected.
+The observed first sign-in times were **5.62 s** and **4.09 s**, with
+**106,430,464 bytes** of reported Wasm linear memory. These are single smoke
+journeys, not p95, total isolate memory, or a fresh load-gate measurement.
+The post-deployment simultaneous burst completed 20 measured journeys per
+project at concurrency four, alongside 40 successful operator-status reads.
+Warm sign-in p95 was **4.58 s** and **5.34 s**, respectively, above the 3.5 s
+gate; all 42 code-replay checks were rejected. Both objects reported
+**106,430,464 bytes** of Wasm linear memory. These are not total isolate-memory
+measurements. Cloudflare's first, potentially incomplete 14:35 UTC metrics
+sample showed maximum memory of **127,478,123** and **127,478,146 bytes** and
+zero sampled CPU or memory limit errors. Metrics can arrive later and the
+sampled maximum is not a guaranteed peak. The earlier memory-limit errors and
+the current latency failure leave the MVP runtime gate open.
 
 The deployment-specific master key, key ID and operator token are backed up in
 the personal 1Password Developer vault item `MaPi OIDC isolated staging recovery`.
