@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "account_id": "4d90c2d31b480584f8f878d2f62848ab",
+  "name": "mapi-nextgen-oidc-isolated-secondary",
+  "main": "worker/secondary-router.js",
+  "compatibility_date": "2026-11-19",
+  "workers_dev": true,
+  "preview_urls": false,
+  "services": [{ "binding": "MAPI_OWNER", "service": "mapi-nextgen-oidc-isolated-staging" }],
+  "vars": { "MAPI_ROUTER_ORIGIN": "https://mapi-nextgen-oidc-isolated-secondary.woven-4d9.workers.dev" }
+}
