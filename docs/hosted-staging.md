@@ -24,7 +24,7 @@ project at concurrency four, alongside 40 successful operator-status reads.
 Warm sign-in p95 was **4.58 s** and **5.34 s**, respectively, above the 3.5 s
 gate; all 42 code-replay checks were rejected. Both objects reported
 **106,430,464 bytes** of Wasm linear memory. These are not total isolate-memory
-measurements. Cloudflare's 14:35 UTC metrics bucket, read at 14:39 UTC, showed
+measurements. Cloudflare's 14:35 UTC metrics bucket, rechecked at 14:48 UTC, showed
 sampled maximum memory of **137,503,089** and **137,699,325 bytes**, summed
 CPU time of **16.09 s** and **18.49 s**, and zero sampled CPU or memory limit
 errors. These CPU totals cover the entire five-minute bucket, including

@@ -2,7 +2,7 @@
 
 The authoritative upstream pin is [v0.7.0 at b0b74cd4a198428ea9b82910c217259ffc62b65c](https://github.com/zitadel/nextgen/tree/b0b74cd4a198428ea9b82910c217259ffc62b65c). Generate this file with `node scripts/parity-inventory.mjs > docs/parity-inventory.md`. Run `node scripts/parity-inventory.mjs --check` to detect drift.
 
-The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; the account build mounts seven, with separate test builds adding user creation and deletion. Other test builds mount four passkey, five self-service read, five team, four invitation, three session, and three branding operations. Some routes appear in more than one build. Mounts alone do not establish public ingress or parity.
+The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; the account build mounts seven, with separate test builds adding user creation and deletion. Other test builds mount four passkey, five self-service read, five team, four invitation, three session, three branding, and three schema operations. Some routes appear in more than one build. Mounts alone do not establish public ingress or parity.
 
 The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.
 
@@ -61,9 +61,9 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | Sessions | `getMySession` | `GET /sessions/me` | mounted | native/Worker parity harness, application journey | partial behavior only |
 | Sessions | `revokeMySession` | `DELETE /sessions/me` | mounted | application journey | partial behavior only |
 | Sessions | `getMySessionCsrfToken` | `GET /sessions/me/csrf` | mounted | application journey | partial behavior only |
-| Schemas | `publishSchema` | `POST /schemas` | not mounted | none | native-versus-Worker test needed |
-| Schemas | `listSchemas` | `GET /schemas` | not mounted | none | native-versus-Worker test needed |
-| Schemas | `getSchema` | `GET /schemas/{schema_id}` | not mounted | none | native-versus-Worker test needed |
+| Schemas | `publishSchema` | `POST /schemas` | experimental schema build only | experimental native/workerd schema revision, authorization, pagination and audit rollback checks; foreign-credential status differs | partial behavior only |
+| Schemas | `listSchemas` | `GET /schemas` | experimental schema build only | experimental native/workerd schema revision, authorization, pagination and audit rollback checks; foreign-credential status differs | partial behavior only |
+| Schemas | `getSchema` | `GET /schemas/{schema_id}` | experimental schema build only | experimental native/workerd schema revision, authorization, pagination and audit rollback checks; foreign-credential status differs | partial behavior only |
 | Flow Definitions | `publishFlowDefinition` | `POST /flow_definitions` | not mounted | none | native-versus-Worker test needed |
 | Flow Definitions | `listFlowDefinitions` | `GET /flow_definitions` | not mounted | none | native-versus-Worker test needed |
 | Flow Definitions | `getFlowDefinition` | `GET /flow_definitions/{flow_definition_id}` | not mounted | none | native-versus-Worker test needed |
