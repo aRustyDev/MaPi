@@ -99,13 +99,13 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | Grants | `queryGrants` | `POST /grants/query` | not mounted | none | native-versus-Worker test needed |
 | Grants | `getGrant` | `GET /grants/{grant_id}` | not mounted | none | native-versus-Worker test needed |
 | Grants | `deleteGrant` | `DELETE /grants/{grant_id}` | not mounted | none | native-versus-Worker test needed |
-| Invitations | `createInvitation` | `POST /invitations` | not mounted | none | native-versus-Worker test needed |
-| Invitations | `listInvitations` | `GET /invitations` | not mounted | none | native-versus-Worker test needed |
+| Invitations | `createInvitation` | `POST /invitations` | experimental invitation build only | experimental native/workerd invitation admin and audit checks; claim and cross-object authorization unproven | partial behavior only |
+| Invitations | `listInvitations` | `GET /invitations` | experimental invitation build only | experimental native/workerd invitation admin and audit checks; claim and cross-object authorization unproven | partial behavior only |
 | Invitations | `lookupInvitation` | `POST /invitations/lookup` | not mounted | none | native-versus-Worker test needed |
 | Invitations | `acceptInvitation` | `POST /invitations/accept` | not mounted | none | native-versus-Worker test needed |
 | Invitations | `rejectInvitation` | `POST /invitations/reject` | not mounted | none | native-versus-Worker test needed |
-| Invitations | `getInvitation` | `GET /invitations/{invitation_id}` | not mounted | none | native-versus-Worker test needed |
-| Invitations | `cancelInvitation` | `DELETE /invitations/{invitation_id}` | not mounted | none | native-versus-Worker test needed |
+| Invitations | `getInvitation` | `GET /invitations/{invitation_id}` | experimental invitation build only | experimental native/workerd invitation admin and audit checks; claim and cross-object authorization unproven | partial behavior only |
+| Invitations | `cancelInvitation` | `DELETE /invitations/{invitation_id}` | experimental invitation build only | experimental native/workerd invitation admin and audit checks; claim and cross-object authorization unproven | partial behavior only |
 | Events | `listEvents` | `GET /events` | experimental events build only | experimental native/workerd authorization and pagination checks | partial behavior only |
 | Events | `getEvent` | `GET /events/{event_id}` | experimental events build only | experimental native/workerd authorization and pagination checks | partial behavior only |
 | Variables | `listVariables` | `GET /variables` | not mounted | none | native-versus-Worker test needed |
