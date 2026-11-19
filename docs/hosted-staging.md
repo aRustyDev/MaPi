@@ -27,10 +27,15 @@ Two 20-journey OIDC bursts at concurrency four measured **4.55 s** and **3.82 s*
 sign-in p95, respectively, so the **3.5 s** target has not passed. Their full
 journey p95s were **4.87 s** and **4.19 s**, including the relying party's token,
 JWKS and replay checks. Observed Wasm linear memory was **106,168,320 bytes**.
-These figures do not establish total isolate memory or Durable Object CPU.
-Cloudflare's Worker invocation analytics showed no errors for the sampled
-ingress requests, but the Durable Object CPU dataset returned no rows for this
-run; do not interpret ingress CPU or memory as Durable Object measurements.
+Cloudflare's Durable Object periodic analytics later reported aggregate CPU and
+sampled isolate memory. In the 05:45 UTC window the primary object recorded
+**16 memory-limit errors**, zero CPU-limit errors, and a **231,310,823-byte**
+sampled isolate-memory maximum. The 05:55 window reported zero CPU or memory
+limit errors and sampled maxima of **137,510,422** and **137,509,884 bytes** for
+the two project objects; aggregate CPU in that window was **13.06 s** and
+**13.04 s**, respectively. These samples include more than Wasm linear memory
+and are not guaranteed peaks. The earlier memory errors mean the hosted
+no-limit-errors gate has not passed.
 
 The second isolated origin is `mapi-nextgen-oidc-isolated-secondary`, version
 `88e750d8-703c-41e2-bd58-18710bc93de1`, a small Worker that forwards through a
@@ -61,8 +66,8 @@ project-object queue. In a subsequent simultaneous 20-journey burst per project,
 sign-in p95 was **3.65 s** for the primary and **3.34 s** for the secondary;
 the primary still missed the 3.5 s target. Both final Wasm linear-memory
 readings were **106,168,320 bytes**. Cloudflare reported **54,396.37 KiB** upload
-and **86 ms** startup validation. These are single-run observations, and total
-isolate memory and Durable Object CPU remain unmeasured.
+and **86 ms** startup validation. These are single-run observations; sampled
+isolate-memory and aggregate CPU metrics are described above.
 
 After the single-call login admission change, a fresh simultaneous burst
 measured **3.90 s** and **3.76 s** sign-in p95, respectively. Both projects

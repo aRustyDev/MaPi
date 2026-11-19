@@ -1,0 +1,1 @@
+{"name":"mapi-argon-spike-caller","main":"argon-spike-caller.mjs","compatibility_date":"2026-11-18","workers_dev":false,"services":[{"binding":"ARGON_VERIFIER","service":"mapi-argon-spike-verifier"}]}
