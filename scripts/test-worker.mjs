@@ -32,7 +32,7 @@ async function stop() {
 async function start(state, port) {
   processHandle = spawn(process.execPath, [
     resolve("node_modules/wrangler/bin/wrangler.js"), "dev", "--local", "--ip", "127.0.0.1",
-    "--port", String(port), "--persist-to", state,
+    "--port", String(port), "--persist-to", state, "--env-file", ".dev.vars.poc",
   ], {
     stdio: ["ignore", "ignore", "inherit"],
     env: { ...process.env, WRANGLER_LOG_PATH: resolve(".mapi/wrangler.log"), WRANGLER_SEND_METRICS: "false" },

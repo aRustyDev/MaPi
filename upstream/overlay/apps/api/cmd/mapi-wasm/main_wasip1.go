@@ -31,6 +31,10 @@ var input []byte
 var output []byte
 var handler http.Handler
 var hasher *crypto.PasswapHasher
+var runtimePool *service.DB
+var runtimeKeys service.KeyService
+var runtimeTokens service.TokenService
+var runtimeHashers *crypto.HasherFactory
 
 type configuration struct {
 	KeyID     string `json:"id"`
@@ -77,6 +81,10 @@ func marshal(value any) uint64 {
 }
 
 func failure(err error) uint64 {
+	var domainError domain.Error
+	if errors.As(err, &domainError) {
+		return marshal(map[string]string{"error": err.Error(), "code": domainError.Code})
+	}
 	return marshal(map[string]string{"error": err.Error()})
 }
 
@@ -128,14 +136,20 @@ func initialize() uint64 {
 		return failure(err)
 	}
 	keys := service.NewKeyService(pool, *master, crypters, signing)
+	runtimePool, runtimeKeys, runtimeHashers = pool, keys, hashers
 	tokens := service.NewTokenService(keys, pool)
+	runtimeTokens = tokens
 	attempts := service.NewAuthAttemptService(pool,
 		service.SessionStatementsResolver{Pool: pool}, service.UserStatementsLookup{Pool: pool},
 		service.NewProjectHasherResolver(pool, hashers), hasher)
 	sessions := service.NewSessionService(pool, refs,
 		service.SessionConfig{DefaultTTL: domain.SessionDefaultTTL, MaxTTL: 720 * time.Hour})
 	releases := service.NewReleaseService(pool, nil, nil, nil, nil, nil, domain.BuiltinSchemaBases{})
-	handler, err = api.CloudflareHandler(config.ProjectID, pool, attempts, sessions, keys, tokens, releases, service.NewRuntimeResolver(pool, releases))
+	flows, projects, err := newFlowStack(pool, keys, hashers, attempts)
+	if err != nil {
+		return failure(err)
+	}
+	handler, err = api.CloudflareHandler(config.ProjectID, pool, attempts, sessions, keys, tokens, releases, service.NewRuntimeResolver(pool, releases), flows, projects)
 	if err != nil {
 		return failure(err)
 	}
@@ -161,7 +175,7 @@ func handleRequest() uint64 {
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, r)
-	if strings.HasSuffix(r.URL.Path, "/verify") {
+	if strings.HasSuffix(r.URL.Path, "/verify") || strings.HasSuffix(r.URL.Path, "/submit") {
 		// Go/Wasm linear memory can grow but cannot shrink. Reclaim the
 		// Argon2 scratch space before another proof can allocate a second arena.
 		runtime.GC()

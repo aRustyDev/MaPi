@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "account_id": "4d90c2d31b480584f8f878d2f62848ab",
+  "name": "mapi-nextgen-mvp",
+  "main": "worker/app.js",
+  "alias": { "./wasm-module.js": "./worker/flow-wasm-module.js" },
+  "compatibility_date": "2026-11-18",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": { "directory": "./worker/assets", "binding": "ASSETS", "run_worker_first": true },
+  "durable_objects": {
+    "bindings": [{ "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" }, { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "ProjectRegistry"] }],
+  "vars": { "MAPI_OFFICIAL_LOGIN": "1" },
+  "env": {
+    "staging": {
+      "name": "mapi-nextgen-mvp-staging",
+      "workers_dev": true,
+      "preview_urls": false,
+      "assets": { "directory": "./worker/assets", "binding": "ASSETS", "run_worker_first": true },
+      "vars": { "MAPI_OFFICIAL_LOGIN": "1", "MAPI_APP_ORIGIN": "https://mapi-nextgen-mvp-staging.woven-4d9.workers.dev" },
+      "observability": { "enabled": true },
+      "durable_objects": {
+        "bindings": [{ "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" }, { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "ProjectRegistry"] }]
+    }
+  }
+}

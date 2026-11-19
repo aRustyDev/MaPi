@@ -1,0 +1,76 @@
+import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
+const commit = "b0b74cd4a198428ea9b82910c217259ffc62b65c";
+const source = resolve(process.env.MAPI_NEXTGEN_SOURCE ?? ".mapi/nextgen");
+const openapiPath = "apps/api/api/openapi/bundled/openapi.json";
+const spec = JSON.parse(execFileSync("git", ["-C", source, "show", `${commit}:${openapiPath}`], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }));
+const routeSource = await readFile("upstream/overlay/apps/api/internal/api/generated/mapi_routes_wasip1.go", "utf8");
+const mounts = [...routeSource.matchAll(/mount\("([A-Z]+)",\s*"([^"]+)",\s*func\([^]*?s\.handle([A-Za-z0-9]+)Request\(/g)]
+  .map((match) => ({ method: match[1], path: match[2], operationId: match[3][0].toLowerCase() + match[3].slice(1) }));
+const normalize = (path) => path.replace(/\{[^}]+\}/g, "{}");
+const methods = new Set(["get", "post", "put", "patch", "delete", "head", "options", "trace"]);
+const operations = Object.entries(spec.paths).flatMap(([path, item]) =>
+  Object.entries(item).filter(([method, operation]) => methods.has(method) && operation.operationId)
+    .map(([method, operation]) => ({ path, method: method.toUpperCase(), id: operation.operationId, tag: operation.tags?.[0] ?? "Other" })));
+if (operations.length !== 107) throw new Error(`Pinned OpenAPI operation count changed: ${operations.length}`);
+if (new Set(operations.map(({ id }) => id)).size !== operations.length) throw new Error("Duplicate OpenAPI operation ID");
+for (const mount of mounts) {
+  if (!operations.some((operation) => operation.id === mount.operationId && operation.method === mount.method && normalize(operation.path) === normalize(mount.path))) {
+    throw new Error(`Go mount has no matching pinned OpenAPI operation: ${mount.method} ${mount.path} ${mount.operationId}`);
+  }
+}
+if (new Set(mounts.map(({ operationId }) => operationId)).size !== mounts.length) throw new Error("Duplicate Go mount");
+
+// These are explicit coverage claims for the current checked-in suites. A route
+// mounted in Go is not necessarily exposed by either Worker or parity-tested.
+const parity = new Set(["createAuthAttempt", "createAuthAttemptChallenge", "verifyAuthAttemptChallenge", "createAuthAttemptHandoff", "exchangeHandoff", "getMySession", "revokeSession"]);
+const browser = new Set(["createAuthAttempt", "createAuthAttemptChallenge", "verifyAuthAttemptChallenge", "createAuthAttemptHandoff", "exchangeHandoff", "getMySession", "getMySessionCsrfToken", "revokeMySession"]);
+const experimentalFlow = new Set(["createFlow", "getFlowStep", "submitFlowStep"]);
+for (const id of [...parity, ...browser]) if (!operations.some((operation) => operation.id === id)) throw new Error(`Coverage references unknown operation: ${id}`);
+const lines = [
+  "# Nextgen parity inventory", "",
+  `The authoritative upstream pin is [v0.7.0 at ${commit}](https://github.com/zitadel/nextgen/tree/${commit}). Generate this file with \`node scripts/parity-inventory.mjs > docs/parity-inventory.md\`. Run \`node scripts/parity-inventory.mjs --check\` to detect drift.`, "",
+  `The pinned OpenAPI document declares **${operations.length} operations**. The Go adapter mounts **${mounts.length}**. Mounts alone do not establish public ingress or parity.`, "",
+  "The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.", "",
+  "## OpenAPI operations", "",
+  "| Area | Operation | Route | Go adapter | Existing evidence | Remaining parity gap |",
+  "| --- | --- | --- | --- | --- | --- |",
+];
+for (const op of operations) {
+  const mounted = mounts.some((mount) => mount.operationId === op.id);
+  const evidence = [];
+  if (parity.has(op.id)) evidence.push("native/Worker parity harness");
+  if (browser.has(op.id)) evidence.push("application journey");
+  if (["getLive", "getReady"].includes(op.id)) evidence.push("native/workerd adapter GET parity");
+  const adapter = mounted ? (experimentalFlow.has(op.id) ? "experimental MVP build only" : ["getLive", "getReady"].includes(op.id) ? "adapter only, no public ingress" : "mounted") : "not mounted";
+  lines.push(`| ${op.tag} | \`${op.id}\` | \`${op.method} ${op.path}\` | ${adapter} | ${evidence.join(", ") || "none"} | ${evidence.length ? "partial behavior only" : "native-versus-Worker test needed"} |`);
+}
+lines.push("", "## Other native HTTP and runtime surfaces", "",
+  "These are not all represented as separate operations in the bundled OpenAPI document. Their MaPi parity coverage is pending.", "",
+  "| Surface | Native behavior | MaPi gap |", "| --- | --- | --- |",
+  "| Resource API aliases | `/api/v1` and root aliases, deprecation and link headers, legacy `/flow` aliases and deployment target compatibility | Headers and alias behavior need native comparison |",
+  "| OpenAPI and probes | `/api/v1/openapi.json`, `/livez`, `/readyz` and API-prefixed probes | GET probes and OpenAPI document compared through adapter; default ingress, error cases, and readiness failure still need coverage |",
+  "| Console | Configurable Console asset path and `/console/runtime.json` | Upstream Console and runtime bootstrap need porting and browser tests |",
+  "| External IdP callbacks | `/idp/{slug}/callback` and `/__nextgen/idp/{slug}/callback` | Callback, binding, egress and provider failure tests needed |",
+  "| Retention and security reports | Optional `/cron/events-retention` and `/csp-report` | Scheduling, authorization and report handling need tests |",
+  "| OAuth/OIDC issuer scaffolding | Optional metadata routes and `/oauth` handlers | v0.7.0 denies issuer admission and its OP server is unimplemented. The MVP issuer is an additional extension and needs protocol conformance tests |",
+  "", "## Upstream acceptance suites", "",
+  "| Suite | Upstream source | MaPi evidence gap |", "| --- | --- | --- |",
+  `| Browser journeys | [e2e/journey](https://github.com/zitadel/nextgen/tree/${commit}/e2e/journey) | Official component journeys against MaPi are not yet run |`,
+  `| Console | [e2e/console](https://github.com/zitadel/nextgen/tree/${commit}/e2e/console) | Console suites against MaPi are not yet run |`,
+  `| CLI | [e2e/cli](https://github.com/zitadel/nextgen/tree/${commit}/e2e/cli) | Upstream CLI deployment suite against MaPi is not yet run |`,
+  `| SDKs | [conformance](https://github.com/zitadel/nextgen/tree/${commit}/conformance) | Framework and SDK conformance against MaPi is not yet run |`,
+  "", "## Draft and extension capabilities", "",
+  "| Capability | Pinned status | MaPi follow-up |", "| --- | --- | --- |",
+  `| OAuth/OIDC provider | [ADR 082](https://github.com/zitadel/nextgen/blob/${commit}/docs/adrs/082-oauth-and-oidc-server.md) describes the intended protocol profile. Server wiring denies admission and the provider handlers are unimplemented. | Deliver and test the MVP issuer as an extension. |`,
+  `| TOTP, recovery codes, and password recovery | [ADR 038](https://github.com/zitadel/nextgen/blob/${commit}/docs/adrs/038-user-credential-migration-and-recovery.md) is proposed. Storage or domain types alone do not establish a shipped user journey. | Check the public contract at the selected pin before classifying each journey as parity or an extension. |`,
+  "| Notifications and background jobs | The release and shipped server behavior must be verified independently for each channel and job. | Classify each delivered job or notification as parity and planned additions as extensions. |",
+  "", "The current MaPi evidence is in `scripts/parity.mjs`, `scripts/test-worker.mjs`, `scripts/test-app.mjs`, and `scripts/test-browser.mjs`. Hosted results and their limits are recorded in `REPORT.md`.", "");
+const output = lines.join("\n");
+if (process.argv.includes("--check")) {
+  const actual = await readFile("docs/parity-inventory.md", "utf8");
+  if (actual !== output) throw new Error("Parity inventory is stale; regenerate docs/parity-inventory.md");
+  console.log(`Parity inventory matches ${operations.length} operations and ${mounts.length} Go mounts.`);
+} else process.stdout.write(output);

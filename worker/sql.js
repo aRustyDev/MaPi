@@ -6,13 +6,18 @@ function columnPair(column) {
 }
 
 function bind(statement, args) {
-  let position = 0;
-  const sql = statement.replace(/'(?:''|[^'])*'|"(?:""|[^"])*"|--[^\n]*|\/\*[\s\S]*?\*\/|\?/g, (part) => {
-    if (part !== "?") return part;
-    if (position >= args.length) throw new Error("Missing SQLite argument");
-    return args[position++].kind === "int" ? "CAST(? AS INTEGER)" : "?";
+  let highest = 0;
+  const sql = statement.replace(/'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|--[^\n]*|\/\*[\s\S]*?\*\/|\?(\d*)/g, (part, numbered) => {
+    if (numbered === undefined) return part;
+    const index = numbered === "" ? highest + 1 : Number(numbered);
+    // SQLite Durable Objects support at most 100 bound parameters.
+    if (!Number.isSafeInteger(index) || index < 1 || index > 100) throw new Error("Invalid SQLite parameter index");
+    highest = Math.max(highest, index);
+    if (index > args.length) throw new Error("Missing SQLite argument");
+    const placeholder = `?${index}`;
+    return args[index - 1].kind === "int" ? `CAST(${placeholder} AS INTEGER)` : placeholder;
   });
-  if (position !== args.length) throw new Error("SQLite argument count mismatch");
+  if (highest !== args.length) throw new Error("SQLite argument count mismatch");
   const values = args.map(({ kind, value }) => kind === "blob" ? Uint8Array.fromBase64(value).buffer : value);
   return { sql, values };
 }

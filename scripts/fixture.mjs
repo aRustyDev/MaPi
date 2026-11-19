@@ -59,7 +59,7 @@ try {
   await writeFile(output, JSON.stringify(fixture), { mode: 0o600 });
   const masterKey = JSON.stringify(key);
   await writeFile(resolve(".mapi", "runtime-key.json"), masterKey, { mode: 0o600 });
-  await writeFile(resolve(".dev.vars"), "MAPI_MASTER_KEY=" + Buffer.from(masterKey).toString("base64") + "\nMAPI_LOCAL_TEST=1\n", { mode: 0o600 });
+  await writeFile(resolve(".dev.vars.poc"), "MAPI_MASTER_KEY=" + Buffer.from(masterKey).toString("base64") + "\nMAPI_LOCAL_TEST=1\n", { mode: 0o600 });
 
   if (process.argv.includes("--test")) {
     const db = new DatabaseSync(dbPath);

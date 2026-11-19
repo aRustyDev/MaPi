@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "account_id": "4d90c2d31b480584f8f878d2f62848ab",
+  "name": "mapi-nextgen-app",
+  "main": "worker/app.js",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": true,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [{ "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" }, { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication"] }, { "tag": "v2", "new_sqlite_classes": ["ProjectRegistry"] }],
+  "env": {
+    "recovery": {
+      "name": "mapi-nextgen-app-recovery",
+      "vars": { "MAPI_APP_ORIGIN": "https://mapi-nextgen-app-recovery.woven-4d9.workers.dev", "MAPI_SCHEMA_TARGET": "2", "MAPI_RECOVERY_EPOCH": "rehearsal-1" },
+      "workers_dev": true,
+      "preview_urls": false,
+      "durable_objects": {
+        "bindings": [{ "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" }, { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication"] }, { "tag": "v2", "new_sqlite_classes": ["ProjectRegistry"] }]
+    },
+    "staging": {
+      "name": "mapi-nextgen-app-staging",
+      "vars": { "MAPI_APP_ORIGIN": "https://mapi-nextgen-app-staging.woven-4d9.workers.dev", "MAPI_SCHEMA_TARGET": "2" },
+      "workers_dev": true,
+      "preview_urls": false,
+      "observability": { "enabled": true },
+      "durable_objects": {
+        "bindings": [{ "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" }, { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication"] }, { "tag": "v2", "new_sqlite_classes": ["ProjectRegistry"] }]
+    }
+  }
+}

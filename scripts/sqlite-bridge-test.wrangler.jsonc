@@ -1,0 +1,10 @@
+{
+  "name": "mapi-sqlite-bridge-test",
+  "main": "sqlite-bridge-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": {
+    "bindings": [{ "name": "BRIDGE_TEST", "class_name": "BridgeTest" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BridgeTest"] }]
+}

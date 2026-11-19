@@ -2,19 +2,48 @@
   "name": "mapi-nextgen-workers-poc",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "bin": {
+    "mapi": "./scripts/mapi.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "build": "bash scripts/build.sh",
+    "build:flow": "bash scripts/build-flow.sh",
+    "build:login-assets": "node scripts/build-login-assets.mjs",
+    "baseline": "node scripts/baseline.mjs",
+    "dev:app": "wrangler dev --config wrangler.app.jsonc --env-file .dev.vars.app",
+    "prepare:app-local": "node scripts/app-secrets.mjs --local",
+    "prepare:app-staging": "node scripts/app-secrets.mjs",
+    "deploy:app-staging": "wrangler deploy --config wrangler.app.jsonc --env staging --secrets-file .mapi/app-staging-secrets.json",
     "fixture": "node scripts/fixture.mjs",
     "test:baseline": "node scripts/fixture.mjs --test",
     "test:worker": "node scripts/test-worker.mjs",
-    "dev": "wrangler dev",
+    "test:app": "node scripts/test-app.mjs",
+    "test:projects": "node scripts/test-project-routing.mjs",
+    "test:flow-proxy": "node scripts/test-flow-proxy.mjs",
+    "test:official-login": "node scripts/test-official-login.mjs",
+    "test:official-projects": "node scripts/test-official-projects.mjs",
+    "test:relocation": "node scripts/test-relocation.mjs",
+    "test:sql-bind": "node scripts/test-sql-bind.mjs",
+    "test:sqlite-bridge": "node scripts/test-sqlite-bridge.mjs",
+    "test:system-parity": "node scripts/test-system-parity.mjs",
+    "inventory": "node scripts/parity-inventory.mjs",
+    "inventory:check": "node scripts/parity-inventory.mjs --check",
+    "test:browser": "node scripts/test-browser.mjs",
+    "benchmark:app": "node scripts/benchmark-app.mjs",
+    "benchmark:flow": "node scripts/benchmark-flow.mjs",
+    "benchmark:cold": "node scripts/cold-app.mjs",
+    "dev": "wrangler dev --env-file .dev.vars.poc",
     "prepare:staging": "node scripts/staging-secrets.mjs",
     "deploy:staging": "wrangler deploy --env staging --secrets-file .mapi/staging-secrets.json"
   },
   "devDependencies": {
-    "@zitadel/testing": "0.7.0",
     "@zitadel/cli": "0.7.0",
+    "@zitadel/components": "0.7.0",
+    "@zitadel/testing": "0.7.0",
+    "playwright": "^1.65.1",
     "wrangler": "4.165.0"
   }
 }

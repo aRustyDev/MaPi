@@ -1,0 +1,10 @@
+{
+  "name": "mapi-relocation-test",
+  "main": "relocation-test-worker.mjs",
+  "compatibility_date": "2026-04-01",
+  "durable_objects": { "bindings": [
+    { "name": "PROJECT", "class_name": "RelocationProject" },
+    { "name": "REGISTRY", "class_name": "RelocationRegistry" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelocationProject", "RelocationRegistry"] }]
+}

@@ -8,6 +8,21 @@ func (s *Server) MountMaPi(mux *http.ServeMux, prefix string) {
 	mount := func(method, path string, h http.HandlerFunc) {
 		mux.HandleFunc(method+" "+prefix+path, h)
 	}
+	mount("GET", "/livez", func(w http.ResponseWriter, r *http.Request) {
+		s.handleGetLiveRequest([0]string{}, false, w, r)
+	})
+	mount("GET", "/readyz", func(w http.ResponseWriter, r *http.Request) {
+		s.handleGetReadyRequest([0]string{}, false, w, r)
+	})
+	mount("POST", "/flows", func(w http.ResponseWriter, r *http.Request) {
+		s.handleCreateFlowRequest([0]string{}, false, w, r)
+	})
+	mount("GET", "/flows/{flow}", func(w http.ResponseWriter, r *http.Request) {
+		s.handleGetFlowStepRequest([1]string{r.PathValue("flow")}, false, w, r)
+	})
+	mount("POST", "/flows/{flow}/submit", func(w http.ResponseWriter, r *http.Request) {
+		s.handleSubmitFlowStepRequest([1]string{r.PathValue("flow")}, false, w, r)
+	})
 	mount("POST", "/auth_attempts", func(w http.ResponseWriter, r *http.Request) {
 		s.handleCreateAuthAttemptRequest([0]string{}, false, w, r)
 	})
@@ -25,6 +40,12 @@ func (s *Server) MountMaPi(mux *http.ServeMux, prefix string) {
 	})
 	mount("GET", "/sessions/me", func(w http.ResponseWriter, r *http.Request) {
 		s.handleGetMySessionRequest([0]string{}, false, w, r)
+	})
+	mount("GET", "/sessions/me/csrf", func(w http.ResponseWriter, r *http.Request) {
+		s.handleGetMySessionCsrfTokenRequest([0]string{}, false, w, r)
+	})
+	mount("DELETE", "/sessions/me", func(w http.ResponseWriter, r *http.Request) {
+		s.handleRevokeMySessionRequest([0]string{}, false, w, r)
 	})
 	mount("DELETE", "/sessions/{session}", func(w http.ResponseWriter, r *http.Request) {
 		s.handleRevokeSessionRequest([1]string{r.PathValue("session")}, false, w, r)
