@@ -6,6 +6,18 @@ Run locally with `node scripts/test-argon-spike.mjs`. It builds the pinned react
 
 The verifier and probe are separate staging Workers. The verifier config sets `workers_dev: false` and `preview_urls: false`; the probe has a gated HTTPS endpoint that generates its own synthetic credentials and accepts no caller-supplied password. Both use a deployment-specific service secret, and the probe requires a second bearer secret. These scripts do not log either secret, the synthetic password or hash. The probe has no persistent data and makes no external backend call. Its Worker URL is public but its endpoint returns 404 without the high-entropy probe token. Restrict access further with network controls before keeping it around; remove both experimental Workers after measurements.
 
+On Woven staging, the committed verifier and gated probe completed the synthetic
+20-verification burst at concurrency four with **78,643,200 bytes** of Wasm
+linear memory. An independent client measured **10.29 s** for the entire probe,
+including setup, negative verification and the burst. The probe's internal
+`Date.now()` timing fields are not reliable on Workers and must not be used as
+latency evidence. Cloudflare's sampled verifier invocation metrics reported
+**90,227,280 bytes** of isolate memory at p95 and p99, CPU p50 **505.2 ms**,
+CPU p95 **804.5 ms**, and zero errors across 23 sampled invocations. These
+samples are not guaranteed peaks or evidence of end-to-end login performance.
+Both temporary Workers were deleted after the measurement. The spike is still
+unconnected to the application and the fencing requirements below remain open.
+
 For an authorized isolated Woven staging measurement, build from committed source, then set secrets without placing their values in shell history:
 
 ```sh
