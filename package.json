@@ -37,6 +37,7 @@
     "test:oauth-composition": "node scripts/test-oauth-composition.mjs",
     "test:oauth-browser": "node scripts/test-oauth-browser.mjs",
     "test:hosted-oidc": "node scripts/test-hosted-oidc.mjs",
+    "test:deploy-preservation": "node scripts/test-deploy-preservation.mjs",
     "test:oidc-admin-cli": "node scripts/test-oidc-admin-cli.mjs",
     "test:oidc-project-isolation": "node scripts/test-oidc-project-isolation.mjs",
     "test:native-oidc": "node scripts/test-native-oidc.mjs",

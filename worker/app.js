@@ -382,6 +382,11 @@ export class NextgenApplication extends DurableObject {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // The login SDK is a public build-time asset and contains no project data.
+    // It can be served without waiting for a busy project's owner object.
+    if (env.MAPI_OFFICIAL_LOGIN === "1" && url.pathname === "/zitadel-login.mjs" && request.method === "GET") {
+      return env.ASSETS.fetch(request);
+    }
     const registry = env.PROJECT_REGISTRY.getByName("projects");
     const configuredOrigin = canonicalOrigin(env.MAPI_APP_ORIGIN);
     let requestOrigin = url.origin;
@@ -556,9 +561,6 @@ export default {
     if (route.state !== "active") return new Response(null, { status: 503, headers: noStore });
     const appStatus = await object.status();
     if (env.MAPI_MAINTENANCE === "1" || appStatus.maintenance || !appStatus.recoveryReady) return new Response(null, { status: 503, headers: noStore });
-    if (env.MAPI_OFFICIAL_LOGIN === "1" && url.pathname === "/zitadel-login.mjs" && request.method === "GET") {
-      return env.ASSETS.fetch(request);
-    }
     if (url.pathname === "/login" && request.method === "GET") {
       if (env.MAPI_OFFICIAL_LOGIN === "1") {
         const projectId = await object.identity();

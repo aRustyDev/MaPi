@@ -1,5 +1,5 @@
 // Test-only direct owner RPC probes. Never deployed.
-import { NextgenApplication } from "../worker/app.js";
+import app, { NextgenApplication } from "../worker/app.js";
 
 export { NextgenApplication };
 export class MaintenanceOwner extends NextgenApplication {
@@ -11,6 +11,19 @@ export class RecoveryOwner extends NextgenApplication {
 
 export default {
   async fetch(_request, env) {
+    // The asset is public, but only this exact GET may bypass project routing.
+    let assetFetches = 0;
+    const staticEnv = { MAPI_OFFICIAL_LOGIN: "1", ASSETS: { fetch: () => { assetFetches++; return new Response("public-sdk"); } }, PROJECT_REGISTRY: { getByName: () => { throw new Error("registry must not be used"); } } };
+    for (const hostname of ["issuer.example", "other.example"]) {
+      const asset = await app.fetch(new Request(`https://${hostname}/zitadel-login.mjs`), staticEnv);
+      if (asset.status !== 200 || await asset.text() !== "public-sdk") throw new Error("public asset unavailable");
+    }
+    if (assetFetches !== 2) throw new Error("unexpected asset forwarding");
+    for (const req of [new Request("https://issuer.example/login"), new Request("https://issuer.example/zitadel-login.mjs", { method: "POST" })]) {
+      let rejected = false;
+      try { await app.fetch(req, staticEnv); } catch { rejected = true; }
+      if (!rejected) throw new Error("non-asset route bypassed registry");
+    }
     const origin = "https://issuer.example";
     const main = env.TEST_MAIN.getByName("main");
     const { projectId } = await main.provision("Guard race test", origin);
