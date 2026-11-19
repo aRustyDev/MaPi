@@ -1,0 +1,9 @@
+{
+  "name":"mapi-upstream-split-test",
+  "main":"upstream-split-test-worker.mjs",
+  "compatibility_date":"2026-11-18",
+  "workers_dev":false,
+  "services":[{"binding":"ARGON_VERIFIER","service":"mapi-argon-spike-verifier"}],
+  "durable_objects":{"bindings":[{"name":"SPLIT","class_name":"UpstreamSplitTest"}]},
+  "migrations":[{"tag":"v1","new_sqlite_classes":["UpstreamSplitTest"]}]
+}

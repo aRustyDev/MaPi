@@ -1,0 +1,25 @@
+# Real project recovery fencing: local experiment
+
+This local-only test combines the existing Go-backed `NextgenApplication` object with an independent SQLite-backed registry and a test-only per-project recovery era. It creates two projects and password users through the upstream Go services. It does not modify production ingress, the existing `ProjectRegistry`, or the app's deployment-wide recovery configuration.
+
+After the normal local prerequisites (`npm ci`, `npm run build`, `npm run baseline` and, if absent, `npm run prepare:app-local`), run:
+
+```sh
+node scripts/build-real-recovery-proof.mjs
+node scripts/test-real-recovery-proof.mjs
+```
+
+The build script injects the experiment into an ignored copy of `worker/app.js`; it uses the existing built `worker/generated/nextgen.wasm` and baseline, not a new upstream build. The test uses `.dev.vars.app`, a fresh temporary workerd database and synthetic credentials, and removes the temporary database afterward. No credentials, cookies or handoffs are printed.
+
+The test provisions separate objects, creates users, signs in and mints a handoff using the real Go implementation. It snapshots selected project session, session-token, auth-attempt and check rows into test-only local tables, revokes the session, and suspends two potential user writes. The registry enters recovery with a fresh era and the owner freezes; a stale route and a resumed pre-freeze write are rejected. A **partial simulated restore** restores the saved rows and old local era, then aborts the object. The in-flight request fails, and the registry continues to reject the old era after restart. This emulates only selected affected rows; it is not an actual SQLite point-in-time restore or full database snapshot.
+
+An injected mutation-audit failure causes the real `mapi_recover` transaction to roll back its session revocations, handoff expiry, epoch and audit. A successful retry commits one `mapi.recovery.completed` audit event. The test calls `ctx.storage.sync()` and then aborts before the test-only owner marker is updated: after restart, the committed epoch and audit survive, and idempotent reconciliation updates the owner without writing another recovery audit. The registry remains in recovery until reconciliation finishes. After activation, the old route, both an active and a previously revoked restored session cookie, and the outstanding handoff are rejected; the user can sign in again and the second project's session remains valid. The test checks that a Go transaction actually entered the injected owner guard, and that no delayed user write survived.
+
+During development, forcing an abort immediately after the synchronous Go recovery call, without awaiting storage persistence or returning a response, lost that unacknowledged write in one local run. This is not a durability violation: Durable Object output gates hold outgoing messages until pending writes are durable. The test's post-commit crash checkpoint explicitly awaits `storage.sync()` before aborting, so it tests recovery after acknowledged storage persistence, not a claim about every crash timing. Actual Cloudflare PITR applies to the entire object storage on its next session and is not supported in local workerd. [Cloudflare SQLite storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+
+## Remaining safety work
+
+- The registry and owner guard are experimental additions generated only for this test. Production app and management paths, background work, direct SQL, recovery and relocation do not use these generation checks. The test covers selected user, login, session and handoff operations; it does not prove all upstream mutation boundaries or cross-project grants.
+- The registry lookup and owner transaction are not atomic across objects. Correctness depends on an authenticated coordinator fencing and draining the owner before restore, restarting it before reopening, and rejecting stale or forged control messages. Test control RPCs trust their caller. An old registry response delayed across recovery, overlapping coordinators, concurrent activation and recovery, and registry restore are not modeled. Real object relocation is not exercised, and an era must never be reused after ownership transfer or restoration.
+- The simulated restore covers selected rows only. It does not restore audit history, keys, schema, reference data or every project table, and is not evidence that a real PITR bookmark or full export/import is safe. A hosted PITR rehearsal must fence all traffic, validate the selected bookmark and keys, restore, restart, reconcile authoritative ownership and invalidate all affected sessions, tokens and pending handoffs before reopening.
+- A crash before storage persistence may leave either committed or uncommitted work; retry must inspect authoritative state and remain idempotent. This experiment tests one acknowledged crash checkpoint, not every partial failure. Maintenance authorization, audit completeness, key rotation, cancellation, cleanup, load, recovery of the independent registry, and production observability and access controls remain open.

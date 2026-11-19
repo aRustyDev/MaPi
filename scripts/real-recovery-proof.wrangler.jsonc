@@ -1,0 +1,11 @@
+{
+  "name": "mapi-real-recovery-proof",
+  "main": "real-recovery-proof-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [
+    { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" },
+    { "name": "RECOVERY_REGISTRY", "class_name": "RecoveryRegistry" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "RecoveryRegistry"] }]
+}

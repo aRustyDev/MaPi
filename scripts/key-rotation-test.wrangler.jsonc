@@ -1,0 +1,1 @@
+{"name":"mapi-key-rotation-test","main":"key-rotation-test-worker.mjs","compatibility_date":"2026-11-18","workers_dev":false,"durable_objects":{"bindings":[{"name":"KEY_TEST","class_name":"KeyRotationTest"}]},"migrations":[{"tag":"v1","new_sqlite_classes":["KeyRotationTest"]}]}

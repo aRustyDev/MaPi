@@ -1,0 +1,8 @@
+{
+  "name": "mapi-native-import-test",
+  "main": "native-import-test-worker.mjs",
+  "compatibility_date": "2026-11-19",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "PROJECT", "class_name": "NextgenProject" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenProject"] }]
+}

@@ -6,7 +6,7 @@ import {execute,sqliteError} from '../worker/sql.js';
 const enc=new TextEncoder(),dec=new TextDecoder('utf-8',{fatal:true}),rejected=Symbol('rollback');
 export class IDPBridgeTest extends DurableObject {
  status(){const row=this.ctx.storage.sql.exec('SELECT challenge_payload,factor_payload FROM checks WHERE auth_attempt_id IS NOT NULL').toArray()[0];return row?{pending:row.challenge_payload!==null,result:row.factor_payload!==null}:null;}
- async run(pem,issuer,failStage){
+ async run(pem,issuer,failStage,realConfig=false){
   if(this.env.MAPI_LOCAL_TEST!=='1')return {error:'denied'};if(this.busy)return {error:'restart_required'};
   let base;try {const u=new URL(issuer);if(issuer!==this.env.MAPI_EGRESS_ORIGIN||u.protocol!=='https:'||u.hostname!=='127.0.0.1'||!u.port||u.pathname!=='/'||u.search||u.hash||u.username||u.password)throw Error();base=u.origin;}catch{return {error:'denied'};}
   this.busy=true;try{
@@ -15,7 +15,9 @@ export class IDPBridgeTest extends DurableObject {
    reactor=instantiateReactor(wasm,getMemory=>{memory=getMemory;return {sql:(p,n)=>{const q=JSON.parse(dec.decode(new Uint8Array(memory(),p,n)));let r;try{r=execute(this.ctx.storage,q);}catch(e){r={error:sqliteError(e)}}output=enc.encode(JSON.stringify(r));return output.length;},result:(p,n)=>{new Uint8Array(memory(),p,n).set(output);output.fill(0);output=undefined;},transaction:()=>{try{this.ctx.storage.transactionSync(()=>{if(reactor.mapi_transaction_body()!==0)throw rejected;});return 0;}catch(e){return e===rejected?1:2;}}};},bytes=>{if(diagnostic.length<1000)diagnostic+=dec.decode(bytes);});
    const call=(name,value)=>{const bytes=enc.encode(JSON.stringify(value)),p=reactor.mapi_alloc(bytes.length);new Uint8Array(memory(),p,bytes.length).set(bytes);bytes.fill(0);const packed=reactor[name](),ptr=Number(packed>>32n),n=Number(packed&0xffffffffn),r=JSON.parse(dec.decode(new Uint8Array(memory(),ptr,n)));reactor.mapi_release();if(r?.error)throw Error(`${name}: ${r.error} ${diagnostic.slice(-200)}`);return r;};
    call('mapi_init',{id:'master-test',pem,projectId:''});const project=call('mapi_provision',{name:'IdP bridge test',origin:'https://issuer.example'}).projectId;call('mapi_init',{id:'master-test',pem,projectId:project});
-   let result=call('mapi_idp_bridge_start',{ProjectID:project,Issuer:base,WrongBinding:failStage==='wrong-binding'});const nonce=result.nonce,attemptId=result.attemptId;await this.ctx.storage.sync();
+   if(failStage==='config-audit')this.ctx.storage.sql.exec("CREATE TRIGGER fail_idp_config_audit BEFORE INSERT ON events WHEN NEW.event_type='idp.created' BEGIN SELECT RAISE(ABORT,'synthetic configuration audit failure'); END");
+   let result;try{result=call('mapi_idp_bridge_start',{ProjectID:project,Issuer:base,WrongBinding:failStage==='wrong-binding',RealConfig:realConfig});}catch(error){if(failStage==='config-audit'){const connections=this.ctx.storage.sql.exec('SELECT count(*) AS n FROM idp_connections WHERE project_id=?',project).one().n;const events=this.ctx.storage.sql.exec("SELECT count(*) AS n FROM events WHERE project_id=? AND event_type='idp.created'",project).one().n;if(connections||events)throw Error('configuration audit did not roll back');this.ctx.storage.sql.exec('DROP TRIGGER fail_idp_config_audit');const retry=call('mapi_idp_bridge_start',{ProjectID:project,Issuer:base,RealConfig:true});if(!retry.next)throw Error('configuration retry failed');return {configAuditRollback:true};}throw error;}
+   const nonce=result.nonce,attemptId=result.attemptId;await this.ctx.storage.sync();
    for(let step=0;result.next&&step<4;step++){
     const intent=result.next,target=new URL(intent.URL),expected=[['GET','/.well-known/openid-configuration'],['POST','/token'],['GET','/keys'],['GET','/userinfo']][step];
     if(!expected||target.origin!==base||target.pathname!==expected[1]||target.search||target.hash||intent.Method!==expected[0]||enc.encode(intent.Body??'').length>8192)throw Error('egress denied');
@@ -31,4 +33,4 @@ export class IDPBridgeTest extends DurableObject {
   }finally{this.busy=false;}
  }
 }
-export default{async fetch(req,env){const u=new URL(req.url);if(env.MAPI_LOCAL_TEST!=='1'||!['localhost','127.0.0.1'].includes(u.hostname)||req.method!=='POST'||req.headers.get('x-local-test-key')!==env.MAPI_TEST_KEY)return new Response(null,{status:404});try{const v=await req.json(),o=env.IDP_BRIDGE.getByName(v.object??'test');if(u.pathname==='/status')return Response.json(await o.status());return Response.json(await o.run(v.pem,v.issuer,v.failStage??''));}catch(e){return Response.json({error:String(e)},{status:500});}}};
+export default{async fetch(req,env){const u=new URL(req.url);if(env.MAPI_LOCAL_TEST!=='1'||!['localhost','127.0.0.1'].includes(u.hostname)||req.method!=='POST'||req.headers.get('x-local-test-key')!==env.MAPI_TEST_KEY)return new Response(null,{status:404});try{const v=await req.json(),o=env.IDP_BRIDGE.getByName(v.object??'test');if(u.pathname==='/status')return Response.json(await o.status());return Response.json(await o.run(v.pem,v.issuer,v.failStage??'',v.realConfig===true));}catch(e){return Response.json({error:String(e)},{status:500});}}};
