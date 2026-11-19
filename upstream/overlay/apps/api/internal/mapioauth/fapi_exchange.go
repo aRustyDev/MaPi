@@ -22,12 +22,14 @@ type FAPIExchange struct {
 	CheckSession func(context.Context, string, string, string) error
 	Mint         func(context.Context, FAPIExchangeGrant) ([]byte, error)
 	Audit        func(context.Context, FAPIExchangeGrant) error
+	AuditReuse   func(context.Context, FAPIExchangeGrant) error
 }
 
 type FAPIExchangeGrant struct {
 	ProjectID, ClientID, UserID, SessionID, Scope, Nonce, DPoPJKT string
 	FromRefresh                                                   bool
 	PolicyVersion                                                 int64
+	Family                                                        string
 }
 
 var ErrInvalidRefreshScope = errors.New("invalid refresh scope")
@@ -49,6 +51,7 @@ func (x FAPIExchange) exchange(ctx context.Context, req FAPIExchangeRequest, ref
 	}
 	endpoint := p.Assertions.Issuer + "/token"
 	var committed []byte
+	var reused bool
 	err := p.Store.Transaction(func() error {
 		client, err := p.Assertions.AuthenticateInTransaction(ctx, req.ClientID, req.AssertionType, req.Assertion)
 		if err != nil {
@@ -81,7 +84,7 @@ func (x FAPIExchange) exchange(ctx context.Context, req FAPIExchangeRequest, ref
 			if err != nil {
 				return err
 			}
-			g = FAPIExchangeGrant{ProjectID: v.ProjectID, ClientID: v.ClientID, UserID: v.UserID, SessionID: v.SessionID, Scope: v.Scope, DPoPJKT: v.DPoPJKT, FromRefresh: true, PolicyVersion: v.PolicyVersion}
+			g = FAPIExchangeGrant{ProjectID: v.ProjectID, ClientID: v.ClientID, UserID: v.UserID, SessionID: v.SessionID, Scope: v.Scope, DPoPJKT: v.DPoPJKT, FromRefresh: true, PolicyVersion: v.PolicyVersion, Family: v.Family}
 			if req.ScopeProvided {
 				requested, err := canonicalFAPIRefreshScopes(req.Scope)
 				if err != nil {
@@ -97,10 +100,24 @@ func (x FAPIExchange) exchange(ctx context.Context, req FAPIExchangeRequest, ref
 			}
 		} else {
 			v, err := p.Grants.ConsumeCodeInTransaction(ctx, req.Code, req.ClientID, req.RedirectURI, req.Verifier, proof.Thumbprint)
+			if errors.Is(err, ErrFAPICodeReuse) {
+				family, err := p.Grants.revokeFamily(ctx, req.Code, req.ClientID)
+				if err != nil {
+					return err
+				}
+				if x.AuditReuse == nil {
+					return errors.New("FAPI code-reuse audit not configured")
+				}
+				if err = x.AuditReuse(ctx, family); err != nil {
+					return err
+				}
+				reused = true
+				return nil
+			}
 			if err != nil {
 				return err
 			}
-			g = FAPIExchangeGrant{ProjectID: v.ProjectID, ClientID: v.ClientID, UserID: v.UserID, SessionID: v.SessionID, Scope: v.Scope, Nonce: v.Nonce, DPoPJKT: v.DPoPJKT, PolicyVersion: v.PolicyVersion}
+			g = FAPIExchangeGrant{ProjectID: v.ProjectID, ClientID: v.ClientID, UserID: v.UserID, SessionID: v.SessionID, Scope: v.Scope, Nonce: v.Nonce, DPoPJKT: v.DPoPJKT, PolicyVersion: v.PolicyVersion, Family: v.Family}
 		}
 		policy, err := p.Policies.require(ctx, g.ClientID, g.Scope)
 		if errors.Is(err, ErrFAPIPolicyDenied) {
@@ -136,6 +153,9 @@ func (x FAPIExchange) exchange(ctx context.Context, req FAPIExchangeRequest, ref
 	})
 	if err != nil {
 		return nil, err
+	}
+	if reused {
+		return nil, ErrInvalidCode
 	}
 	return committed, nil
 }

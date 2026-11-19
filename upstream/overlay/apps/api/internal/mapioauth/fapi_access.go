@@ -36,6 +36,7 @@ type fapiAccessClaims struct {
 	SessionID     string `json:"sid"`
 	Scope         string `json:"scope"`
 	PolicyVersion int64  `json:"mapi_policy_version"`
+	Family        string `json:"mapi_code_family,omitempty"`
 	Confirmation  struct {
 		JKT string `json:"jkt"`
 	} `json:"cnf"`
@@ -132,7 +133,7 @@ func (i FAPIAccessIssuer) Mint(ctx context.Context, g FAPIExchangeGrant) ([]byte
 		return nil, err
 	}
 	audience := policy.Audience
-	claims := fapiAccessClaims{Claims: jwt.Claims{Issuer: i.Private.Assertions.Issuer, Subject: g.UserID, Audience: jwt.Audience{audience}, IssuedAt: jwt.NewNumericDate(now), Expiry: jwt.NewNumericDate(end), ID: id}, ClientID: g.ClientID, SessionID: g.SessionID, Scope: g.Scope, PolicyVersion: policy.Version}
+	claims := fapiAccessClaims{Claims: jwt.Claims{Issuer: i.Private.Assertions.Issuer, Subject: g.UserID, Audience: jwt.Audience{audience}, IssuedAt: jwt.NewNumericDate(now), Expiry: jwt.NewNumericDate(end), ID: id}, ClientID: g.ClientID, SessionID: g.SessionID, Scope: g.Scope, PolicyVersion: policy.Version, Family: g.Family}
 	claims.Confirmation.JKT = g.DPoPJKT
 	token, err := jwt.Signed(signer).Claims(claims).Serialize()
 	if err != nil {
@@ -157,7 +158,7 @@ func (i FAPIAccessIssuer) Mint(ctx context.Context, g FAPIExchangeGrant) ([]byte
 		if expiry.After(sessionEnd) {
 			expiry = sessionEnd
 		}
-		response.RefreshToken, err = i.Private.Grants.IssueRefreshInTransaction(ctx, FAPIRefresh{RefreshGrant: RefreshGrant{ProjectID: g.ProjectID, ClientID: g.ClientID, UserID: g.UserID, SessionID: g.SessionID, Scope: g.Scope, ExpiresAt: expiry}, DPoPJKT: g.DPoPJKT, PolicyVersion: policy.Version})
+		response.RefreshToken, err = i.Private.Grants.IssueRefreshInTransaction(ctx, FAPIRefresh{RefreshGrant: RefreshGrant{ProjectID: g.ProjectID, ClientID: g.ClientID, UserID: g.UserID, SessionID: g.SessionID, Scope: g.Scope, ExpiresAt: expiry}, DPoPJKT: g.DPoPJKT, PolicyVersion: policy.Version, Family: g.Family})
 		if err != nil {
 			return nil, err
 		}
@@ -232,6 +233,11 @@ func (i FAPIAccessIssuer) validateResource(ctx context.Context, token, proof, me
 		now := i.Private.Store.Now()
 		if err = i.client(ctx, claims.ClientID); err != nil {
 			return ErrInvalidAccess
+		}
+		if claims.Family != "" {
+			if err = i.Private.Grants.familyValid(ctx, claims.Family, claims.ClientID); err != nil {
+				return err
+			}
 		}
 		currentPolicy, err := i.Private.Policies.require(ctx, claims.ClientID, claims.Scope)
 		if errors.Is(err, ErrFAPIPolicyDenied) {

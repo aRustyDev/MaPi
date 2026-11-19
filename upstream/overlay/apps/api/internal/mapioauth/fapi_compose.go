@@ -44,6 +44,9 @@ func ComposePrivateFAPI(p *PrivatePAR, pool *service.DB, keys service.KeyService
 	}, Mint: tokens.Mint, Audit: func(ctx context.Context, g FAPIExchangeGrant) error {
 		return audit.Emit(ctx, stmts, audit.EmitSpec{Type: domain.EventType("mapi.fapi.token.exchanged"), Category: domain.EventCategoryAuth, ProjectID: project, EntityType: "oauth_client", EntityID: g.ClientID, UserID: g.UserID, SessionID: &g.SessionID})
 	}}
+	exchange.AuditReuse = func(ctx context.Context, g FAPIExchangeGrant) error {
+		return audit.Emit(ctx, stmts, audit.EmitSpec{Type: domain.EventType("mapi.fapi.code.reused"), Category: domain.EventCategoryAuth, ProjectID: project, EntityType: "oauth_client", EntityID: g.ClientID, UserID: g.UserID, SessionID: &g.SessionID})
+	}
 	if !tokens.valid() {
 		return nil, errors.New("private FAPI issuer invalid")
 	}

@@ -283,6 +283,7 @@ func TestPrivatePARRealClientAndDPoP(t *testing.T) {
 			return nil
 		},
 	}
+	exchange.AuditReuse = exchange.Audit
 	codeGrant := AuthorizationCode{ProjectID: project.ID, ClientID: client, RedirectURI: "https://rp.example/callback", UserID: "user", SessionID: "session", Scope: "openid", Nonce: "nonce", CodeChallenge: base64.RawURLEncoding.EncodeToString(challenge[:]), ExpiresAt: now.Add(30 * time.Second), PolicyVersion: 1}
 	var code string
 	if err = store.Transaction(func() error {
@@ -317,6 +318,8 @@ func TestPrivatePARRealClientAndDPoP(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	exchangeRequest.Assertion = assertion("refresh-after-code-reuse")
+	exchangeRequest.Proof = tokenProof("refresh-after-code-reuse", tokenNonce)
 	exchangeRequest.RefreshToken = refresh
 	if result, err := exchange.ExchangeRefresh(ctx, exchangeRequest); err != nil || string(result) != "synthetic-result" {
 		t.Fatalf("refresh exchange: %q %v", result, err)

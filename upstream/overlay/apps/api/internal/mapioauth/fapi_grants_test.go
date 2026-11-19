@@ -111,7 +111,7 @@ func TestPrivateFAPISchemaUpgradeIsAtomic(t *testing.T) {
 	if err := p.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []int{1, 2, 3, 4, 5, 6, 7} {
+	for _, version := range []int{1, 2, 3, 4, 5, 6, 7, 8} {
 		for _, q := range []string{"DROP TABLE mapi_fapi_logins", "DROP TABLE mapi_fapi_codes", "DROP TABLE mapi_fapi_refresh_tokens"} {
 			if _, err := s.DB.Exec(q); err != nil {
 				t.Fatal(err)
@@ -140,7 +140,7 @@ func TestPrivateFAPISchemaUpgradeIsAtomic(t *testing.T) {
 		if err := p.InitializeSchema(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.DB.QueryRow("SELECT version FROM mapi_private_par_schema").Scan(&got); err != nil || got != 8 {
+		if err := s.DB.QueryRow("SELECT version FROM mapi_private_par_schema").Scan(&got); err != nil || got != 9 {
 			t.Fatalf("successful migration version = %d, %v", got, err)
 		}
 	}

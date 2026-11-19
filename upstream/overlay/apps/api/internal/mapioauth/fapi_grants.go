@@ -25,6 +25,7 @@ type FAPIGrants struct {
 type FAPICode struct {
 	AuthorizationCode
 	DPoPJKT string
+	Family  string
 }
 type FAPIRefresh struct {
 	RefreshGrant
@@ -32,6 +33,7 @@ type FAPIRefresh struct {
 	// request key on read; confidential refresh authority is client-bound.
 	DPoPJKT       string
 	PolicyVersion int64
+	Family        string
 }
 
 func (g FAPIGrants) valid() bool { return g.ProjectID != "" && g.Store.DB != nil && g.Store.Now != nil }
@@ -57,7 +59,10 @@ func (g FAPIGrants) CreateSchema(ctx context.Context) error {
 	if err = createFAPIPolicyBindings(ctx, g.Store); err != nil {
 		return err
 	}
-	return createFAPIPromptSchema(ctx, g.Store)
+	if err = createFAPIPromptSchema(ctx, g.Store); err != nil {
+		return err
+	}
+	return createFAPIFamilySchema(ctx, g.Store)
 }
 func randomFAPIToken() (string, [32]byte, error) {
 	var raw [32]byte
@@ -112,7 +117,7 @@ func (g FAPIGrants) ConsumeCodeInTransaction(ctx context.Context, plain, clientI
 	var expiry int64
 	err := g.Store.DB.QueryRowContext(ctx, `SELECT project_id,client_id,redirect_uri,user_id,session_id,scope,nonce,code_challenge,dpop_jkt,expires_at FROM mapi_fapi_codes WHERE code_hash=?`, hash[:]).Scan(&code.ProjectID, &code.ClientID, &code.RedirectURI, &code.UserID, &code.SessionID, &code.Scope, &code.Nonce, &code.CodeChallenge, &code.DPoPJKT, &expiry)
 	if errors.Is(err, sql.ErrNoRows) {
-		return FAPICode{}, ErrInvalidCode
+		return FAPICode{}, g.consumedReplay(ctx, hash[:], clientID, redirectURI, verifier, verifiedJKT)
 	}
 	if err != nil {
 		return FAPICode{}, err
@@ -139,6 +144,10 @@ func (g FAPIGrants) ConsumeCodeInTransaction(ctx context.Context, plain, clientI
 	if err = deleteFAPIPolicyBinding(ctx, g.Store, "code", hash[:]); err != nil {
 		return FAPICode{}, err
 	}
+	if err = g.saveConsumedFamily(ctx, hash[:], code); err != nil {
+		return FAPICode{}, err
+	}
+	code.Family = familyID(hash[:])
 	code.DPoPJKT = verifiedJKT
 	return code, nil
 }
@@ -164,6 +173,21 @@ func (g FAPIGrants) IssueRefreshInTransaction(ctx context.Context, grant FAPIRef
 	}
 	if err = bindFAPIPolicy(ctx, g.Store, "refresh", hash[:], grant.ProjectID, grant.ClientID, grant.PolicyVersion, grant.ExpiresAt); err != nil {
 		return "", err
+	}
+	if grant.Family != "" {
+		if _, err = g.Store.DB.ExecContext(ctx, `DELETE FROM mapi_fapi_refresh_family WHERE rowid IN (SELECT rowid FROM mapi_fapi_refresh_family WHERE project_id=? AND expires_at<=? LIMIT 100)`, g.ProjectID, now.UnixMilli()); err != nil {
+			return "", err
+		}
+		family, err := familyHash(grant.Family)
+		if err != nil {
+			return "", err
+		}
+		if err = g.familyValid(ctx, grant.Family, grant.ClientID); err != nil {
+			return "", err
+		}
+		if _, err = g.Store.DB.ExecContext(ctx, `INSERT INTO mapi_fapi_refresh_family(token_hash,project_id,client_id,family_hash,expires_at) VALUES(?,?,?,?,?)`, hash[:], grant.ProjectID, grant.ClientID, family, grant.ExpiresAt.UnixMilli()); err != nil {
+			return "", err
+		}
 	}
 	return plain, nil
 }
@@ -201,6 +225,20 @@ func (g FAPIGrants) RefreshInTransaction(ctx context.Context, plain, clientID, v
 	}
 	if grant.ProjectID != g.ProjectID || grant.ClientID != clientID || revoked.Valid || !g.Store.Now().Before(grant.ExpiresAt) {
 		return FAPIRefresh{}, ErrInvalidRefresh
+	}
+	var family []byte
+	err = g.Store.DB.QueryRowContext(ctx, `SELECT family_hash FROM mapi_fapi_refresh_family WHERE token_hash=? AND project_id=? AND client_id=?`, hash[:], g.ProjectID, clientID).Scan(&family)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return FAPIRefresh{}, err
+	}
+	if err == nil {
+		grant.Family = familyID(family)
+		if err = g.familyValid(ctx, grant.Family, clientID); err != nil {
+			if errors.Is(err, ErrInvalidAccess) {
+				return FAPIRefresh{}, ErrInvalidRefresh
+			}
+			return FAPIRefresh{}, err
+		}
 	}
 	grant.DPoPJKT = verifiedJKT
 	return grant, nil

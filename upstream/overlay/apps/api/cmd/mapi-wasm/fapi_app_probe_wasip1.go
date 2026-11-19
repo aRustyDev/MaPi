@@ -340,18 +340,6 @@ func fapiAppProbe() uint64 {
 	if replay := post(tokenHandler, endpoint, tokenForm, raw); replay.Code != 400 || !strings.Contains(replay.Body.String(), "invalid_dpop_proof") {
 		return failure(errors.New("token proof replay accepted"))
 	}
-	as, err = assertion("app-token-replay")
-	if err != nil {
-		return failure(err)
-	}
-	tokenForm.Set("client_assertion", as)
-	raw, err = proof("app-token-replay", endpoint, nonce)
-	if err != nil {
-		return failure(err)
-	}
-	if post(tokenHandler, endpoint, tokenForm, raw).Code == 200 {
-		return failure(errors.New("code replay accepted"))
-	}
 	for _, eventType := range []string{"mapi.fapi.login_started", "mapi.fapi.code_issued", "mapi.fapi.token.exchanged"} {
 		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE project_id=? AND event_type=? AND entity_id=?`, args.ProjectID, eventType, client).Scan(&count); err != nil || count != 1 {
 			return failure(fmt.Errorf("missing committed audit %s", eventType))
@@ -522,6 +510,59 @@ func fapiAppProbe() uint64 {
 	}
 	if rotatedClaims.Confirmation.JKT != base64.RawURLEncoding.EncodeToString(rotatedThumb) || rotatedClaims.Confirmation.JKT == jkt {
 		return failure(errors.New("access token not bound to rotated key"))
+	}
+	// An authenticated replay must revoke the whole code family, but only
+	// after its audit commits. A failed audit rolls back both the revocation
+	// and the assertion/proof replay records, making this exact retry safe.
+	as, err = assertion("app-token-replay")
+	if err != nil {
+		return failure(err)
+	}
+	tokenForm.Set("client_assertion", as)
+	raw, err = proof("app-token-replay", endpoint, nonce)
+	if err != nil {
+		return failure(err)
+	}
+	badReplay := composed.Exchange
+	badReplay.AuditReuse = func(ctx context.Context, g mapioauth.FAPIExchangeGrant) error {
+		if err := composed.Exchange.AuditReuse(ctx, g); err != nil {
+			return err
+		}
+		return errors.New("injected reuse audit failure")
+	}
+	if post(mapioauth.FAPITokenHTTP{Exchange: badReplay}, endpoint, tokenForm, raw).Code != 500 {
+		return failure(errors.New("failed reuse audit accepted"))
+	}
+	beforeReplayProof, err := resourceProof("reuse-audit-rollback")
+	if err != nil {
+		return failure(err)
+	}
+	if _, err = composed.Tokens.ValidateResource(ctx, tokens.AccessToken, beforeReplayProof, "GET", resourceURL, client); err != nil {
+		return failure(errors.New("failed reuse audit revoked token"))
+	}
+	if response := post(tokenHandler, endpoint, tokenForm, raw); response.Code != 400 || !strings.Contains(response.Body.String(), "invalid_grant") {
+		return failure(errors.New("code replay not rejected"))
+	}
+	afterReplayProof, err := resourceProof("reuse-revoked")
+	if err != nil {
+		return failure(err)
+	}
+	if _, err = composed.Tokens.ValidateResource(ctx, tokens.AccessToken, afterReplayProof, "GET", resourceURL, client); !errors.Is(err, mapioauth.ErrInvalidAccess) {
+		return failure(errors.New("reused code did not revoke access token"))
+	}
+	if err = db.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE project_id=? AND event_type='mapi.fapi.code.reused'`, args.ProjectID).Scan(&count); err != nil || count != 1 {
+		return failure(errors.New("missing code-reuse audit"))
+	}
+	reuseRefreshAssertion, err := assertion("reuse-refresh-assertion")
+	if err != nil {
+		return failure(err)
+	}
+	reuseRefreshProof, err := proof("reuse-refresh-proof", endpoint, nonce)
+	if err != nil {
+		return failure(err)
+	}
+	if _, err = composed.Exchange.ExchangeRefresh(ctx, mapioauth.FAPIExchangeRequest{ClientID: client, AssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", Assertion: reuseRefreshAssertion, Proof: reuseRefreshProof, RefreshToken: tokens.RefreshToken}); !errors.Is(err, mapioauth.ErrInvalidRefresh) {
+		return failure(errors.New("reused code did not revoke refresh"))
 	}
 	// Pending state and tokens retain the policy generation in which they
 	// were authorized; a disable/regrant must not revive any of them.

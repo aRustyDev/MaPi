@@ -176,6 +176,7 @@ func exerciseJKTOnly(t *testing.T, p *PrivatePAR, db *sql.DB, now *time.Time, cl
 		}
 		return nil
 	}}
+	exchange.AuditReuse = exchange.Audit
 	tf := url.Values{"grant_type": {"authorization_code"}, "client_id": {client}, "client_assertion_type": {privateKeyAssertionType}, "client_assertion": {assertion("jkt-token")}, "code": {completed.Code}, "redirect_uri": {"https://rp.example/callback"}, "code_verifier": {verifier}}
 	token := FAPITokenHTTP{Exchange: exchange}
 	if w = post(token, endpoint, tf, ""); w.Code != 400 {

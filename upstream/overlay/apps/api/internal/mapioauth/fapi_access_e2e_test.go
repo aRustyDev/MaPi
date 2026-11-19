@@ -91,6 +91,7 @@ func exerciseFAPIAccess(t *testing.T, p *PrivatePAR, pool *service.DB, db *sql.D
 	}, Mint: issuer.Mint, Audit: func(ctx context.Context, g FAPIExchangeGrant) error {
 		return audit.Emit(ctx, pool.Statements(), audit.EmitSpec{Type: domain.EventType("mapi.fapi.token.exchanged"), Category: domain.EventCategoryAuth, ProjectID: project, EntityType: "oauth_client", EntityID: g.ClientID, UserID: g.UserID, SessionID: &g.SessionID})
 	}}
+	exchange.AuditReuse = exchange.Audit
 	tokenNonce, err := p.Nonces.Issue(ctx, mapidpop.NonceScope{ProjectID: project, ClientID: client, Purpose: "token"})
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +443,56 @@ func exerciseFAPIAccess(t *testing.T, p *PrivatePAR, pool *service.DB, db *sql.D
 	}
 	if _, err = different.ValidateResource(ctx, response.AccessToken, mkProof(signer, "wrong-issuer", ath), "GET", resourceURL, client); err == nil {
 		t.Fatal("wrong issuer accepted")
+	}
+	// Authenticated code reuse revokes the original and refresh-derived
+	// access tokens and refresh authority only if the audit commits.
+	reuse := req
+	reuse.Assertion = assertion("family-replay-assertion")
+	reuse.Proof = freshProof("family-replay-proof")
+	wrongVerifier := reuse
+	wrongVerifier.Verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._x"
+	if _, err = exchange.ExchangeCode(ctx, wrongVerifier); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("wrong PKCE verifier accepted on replay: %v", err)
+	}
+	wrongRedirect := reuse
+	wrongRedirect.RedirectURI = "https://other.example/callback"
+	if _, err = exchange.ExchangeCode(ctx, wrongRedirect); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("wrong redirect accepted on replay: %v", err)
+	}
+	wrongProof := reuse
+	wrongProof.Proof, err = jwt.Signed(wrongSigner).Claims(map[string]any{"jti": "family-wrong-key", "htm": "POST", "htu": p.Assertions.Issuer + "/token", "iat": now.Unix(), "nonce": tokenNonce}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = exchange.ExchangeCode(ctx, wrongProof); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("wrong proof key accepted on replay: %v", err)
+	}
+	failReuse := exchange
+	failReuse.AuditReuse = func(ctx context.Context, g FAPIExchangeGrant) error {
+		if err := exchange.AuditReuse(ctx, g); err != nil {
+			return err
+		}
+		return errors.New("injected family audit failure")
+	}
+	if _, err = failReuse.ExchangeCode(ctx, reuse); err == nil || errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("reuse audit failure hidden: %v", err)
+	}
+	if _, err = issuer.ValidateResource(ctx, response.AccessToken, mkProof(signer, "family-audit-rollback", ath), "GET", resourceURL, client); err != nil {
+		t.Fatalf("failed audit revoked token: %v", err)
+	}
+	if _, err = exchange.ExchangeCode(ctx, reuse); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("reuse was not invalid grant: %v", err)
+	}
+	if _, err = issuer.ValidateResource(ctx, response.AccessToken, mkProof(signer, "family-first-token-revoked", ath), "GET", resourceURL, client); !errors.Is(err, ErrInvalidAccess) {
+		t.Fatalf("first access survived reuse: %v", err)
+	}
+	refreshedHash := sha256.Sum256([]byte(refreshed.AccessToken))
+	if _, err = issuer.ValidateResource(ctx, refreshed.AccessToken, mkProof(signer, "family-refreshed-token-revoked", base64.RawURLEncoding.EncodeToString(refreshedHash[:])), "GET", resourceURL, client); !errors.Is(err, ErrInvalidAccess) {
+		t.Fatalf("refreshed access survived reuse: %v", err)
+	}
+	err = p.Store.Transaction(func() error { _, e := p.Grants.RefreshInTransaction(ctx, response.RefreshToken, client, jkt); return e })
+	if !errors.Is(err, ErrInvalidRefresh) {
+		t.Fatalf("refresh survived code reuse: %v", err)
 	}
 	// A configured resource audience and client-scoped application grant
 	// survive issuance. Authorization requires exact audience, client and
