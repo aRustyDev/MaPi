@@ -1,0 +1,17 @@
+# Isolated Nextgen passkey adapter
+
+This local-only build mounts the pinned Nextgen management passkey registration and list handlers and the session-only passkey list handler, using upstream generated validation, security and services. The existing upstream authentication-attempt handlers perform passkey challenges, proof verification, handoff and session exchange. The test-only `mapi_passkey` build is separate from account and management builds; it does not change production ingress or deploy a Worker.
+
+Reproduce from the MaPi checkout after installing repository dependencies and the Playwright Chromium binary:
+
+```sh
+node scripts/fixture.mjs
+node scripts/build-passkey-test.mjs
+node scripts/test-passkey-parity.mjs
+```
+
+The test starts a pinned native SQLite server and an isolated local SQLite Durable Object. A Playwright Chromium virtual CTAP2 authenticator creates discoverable credentials at each `http://localhost` origin. Through each real API, an authorized project credential begins enrollment and submits the browser attestation; a new authentication attempt then obtains a browser assertion, verifies it, exchanges the handoff, lists the current user's passkeys using the resulting session cookie, and confirms session revocation. Native/workerd comparisons cover wrong origin and wrong RP ID in both registration and authentication, a repeated registration response, assertion replay, and missing or foreign-project credentials at begin, finish and assertion. Both reject foreign credentials, but the native server returned 404 for those tested requests while the object project fence returned 401 for registration and 403 for assertion. That is a known status-parity gap.
+
+The test checks that successful registration emits `auth.factor.passkey.enrolled`. In local workerd it injects audit errors while completing registration and verifying authentication: enrollment leaves no credential or enrollment event, the check leaves no success event, and the same ceremony can be retried. This is not a proof that *every* side effect rolls back: pinned `recordPasskeyUsage` updates the credential's sign count, backup state and last-used time best-effort before the authentication success transaction. An audit failure can therefore leave that usage update even when the success check rolls back. Native fault injection for this path was not exercised.
+
+The test build's Wasm was 53,252,491 bytes in one local build. It does not measure hosted CPU, full isolate memory, throughput or Worker upload size. It exercises the API and Chromium virtual authenticator, not the official login component's passkey journey, hardware authenticators, passkey deletion/recovery, all counter/backup policies or a deployed origin. The isolated test's raw loopback ingress does not establish production route, delegated authorization or CSRF safety. Upstream management enrollment accepts RP ID and allowed origins from its privileged caller; a future public integration must derive and enforce its own trusted origin/RP policy. Keep this slice unexposed until project routing, user authorization, official UI behavior and hosted tests pass.
