@@ -1,0 +1,737 @@
+{
+  "plan": "fapi2-security-profile-final-test-plan",
+  "variant": {
+    "fapi_profile": "plain_fapi",
+    "authorization_request_type": "simple",
+    "client_auth_type": "private_key_jwt",
+    "openid": "openid_connect",
+    "sender_constrain": "dpop",
+    "grant_management": "disabled"
+  },
+  "configuredModules": 53,
+  "attempted": 53,
+  "outcomes": [
+    {
+      "module": "fapi2-security-profile-final-discovery-end-point-verification",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-happy-flow",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 2,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-user-rejects-authentication",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 2,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-authorization-request-without-state-success",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-authorization-request-without-nonce-success",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-authorization-request-with-64-char-nonce-success",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-other-scope-order-succeeds",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-test-claims-parameter-identity-claims",
+      "status": "FINISHED",
+      "result": "SKIPPED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-access-token-type-header-case-sensitivity",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-check-dpop-proof-nbf-exp",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-dpopproof-with-iat-10seconds-before-succeeds",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-dpopproof-with-iat-10seconds-after-succeeds",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-mismatched-dpop-jkt-fails",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-token-endpoint-fails-with-mismatched-dpop-proof-jkt",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-token-endpoint-fails-with-mismatched-dpop-jkt",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-dpopproof-at-par-endpoint-binding-success",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-dpop-auth-code-binding-success",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-different-nonce-inside-and-outside-request-object",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-different-state-inside-and-outside-request-object",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-authorization-request-with-long-nonce",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-authorization-request-with-long-state",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-state-only-outside-request-object-not-used",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-request-object-without-redirect-uri-fails",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-plain-fapi-tolerate-unregistered-redirect-uri",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-unsigned-authorization-request-without-using-par-fails",
+      "status": "WAITING",
+      "result": null,
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 400,
+        "path": "/oauth/:project/authorize",
+        "queryKeys": [
+          "client_id",
+          "code_challenge",
+          "code_challenge_method",
+          "nonce",
+          "redirect_uri",
+          "response_type",
+          "scope",
+          "state"
+        ]
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-redirect-uri-in-authorization-request",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-response-type-code-idtoken-fails",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-response-type-token-fails",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-client-id-in-token-endpoint",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-holder-of-key-required",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-holder-of-key-required-at-non-alias-token-endpoint",
+      "status": "FINISHED",
+      "result": "SKIPPED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-authorization-code-is-bound-to-client",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-attempt-reuse-authorization-code-after-one-second",
+      "status": "FINISHED",
+      "result": "WARNING",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-token-endpoint-fails-with-expired-auth-code",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-signed-client-assertion-with-RS256-fails",
+      "status": "FINISHED",
+      "result": "SKIPPED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-client-assertion-in-token-endpoint",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-client-assertion-with-exp-is-5-minutes-in-past-fails",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-client-assertion-with-wrong-aud-fails",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-client-assertion-with-no-sub-fails",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-invalid-client-assertions-fail",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-dpop-negative-tests",
+      "status": "FINISHED",
+      "result": "WARNING",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-refresh-token",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 2,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "reloaded": true,
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-attempt-reuse-request_uri",
+      "status": "WAITING",
+      "result": null,
+      "failures": [],
+      "browserInfo": {
+        "visits": 2,
+        "http": 400,
+        "path": "/oauth/:project/authorize",
+        "queryKeys": [
+          "client_id",
+          "redirect_uri",
+          "request_uri",
+          "response_type",
+          "scope"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-attempt-to-use-expired-request_uri",
+      "status": "WAITING",
+      "result": null,
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 400,
+        "path": "/oauth/:project/authorize",
+        "queryKeys": [
+          "client_id",
+          "redirect_uri",
+          "request_uri",
+          "response_type",
+          "scope"
+        ]
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-attempt-to-use-request_uri-for-different-client",
+      "status": "WAITING",
+      "result": null,
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 400,
+        "path": "/oauth/:project/authorize",
+        "queryKeys": [
+          "client_id",
+          "redirect_uri",
+          "request_uri",
+          "response_type",
+          "scope"
+        ]
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-authorization-request-containing-request_uri-form-param",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-attempt-invalid-http-method",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-ensure-pkce-required",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-pkce-code-verifier-required",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-incorrect-pkce-code-verifier-rejected",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-plain-pkce-rejected",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-without-duplicate-parameters",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    }
+  ]
+}
