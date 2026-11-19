@@ -130,8 +130,22 @@ export default { async fetch(request, env) {
     check(await settled, 'Pre-restore verifier committed');
     const counts = await owner.counts();
     check(counts.sessions === 0 && counts.handoffs === 0 && counts.commits === 0, 'Recovery did not invalidate state');
+    const pendingAcrossRestart = owner.startVerification(recovery.era, 'restart-job');
+    const restartSettled = pendingAcrossRestart.then(() => false, () => true);
+    for (let i = 0; i < 50 && !(await owner.waiting('restart-job')); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    check(await owner.waiting('restart-job'), 'Restart verification did not suspend');
+    const nextRecovery = await registry.begin(recovery.era);
+    await owner.freeze(recovery.era);
+    await owner.simulateRestore(recovery.era);
     await rejects(() => owner.evict(), 'Eviction failed');
-    await env.PROJECT.getByName('project').admit(recovery.era);
+    check(await restartSettled, 'Verification survived object restart');
+    const restarted = env.PROJECT.getByName('project');
+    await rejects(() => restarted.admit(recovery.era), 'Restored owner admitted during recovery after restart');
+    await restarted.reconcile(nextRecovery.era);
+    await registry.activate(nextRecovery.era);
+    await rejects(() => restarted.admit(recovery.era), 'Old route admitted after restart and recovery');
+    await restarted.admit(nextRecovery.era);
+    check((await restarted.counts()).commits === 0, 'Pre-restart verification committed');
     return Response.json({ ok: true });
   } catch (error) { return Response.json({ ok: false, error: String(error), stack: error?.stack }, { status: 500 }); }
 } };
