@@ -1,0 +1,1 @@
+{"name":"mapi-idp-callback-private-local","main":"idp-callback-worker.mjs","compatibility_date":"2026-11-18","durable_objects":{"bindings":[{"name":"CALLBACK_SPIKE","class_name":"CallbackSpike"}]},"migrations":[{"tag":"v1","new_sqlite_classes":["CallbackSpike"]}]}

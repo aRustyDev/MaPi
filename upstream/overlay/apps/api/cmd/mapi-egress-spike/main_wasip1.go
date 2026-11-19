@@ -139,3 +139,85 @@ func resume() uint64 {
 	return send(map[string]any{"userinfo": party.UserinfoEndpoint()})
 }
 func main() {}
+
+// The callback probe replays an ephemeral transcript through the real pinned
+// Nextgen OIDC engine. A missing request is returned to the host as an intent;
+// no asynchronous I/O or host callback runs inside Go or a SQL transaction.
+type callbackMessage struct {
+	Issuer    string             `json:"issuer"`
+	Responses []callbackResponse `json:"responses"`
+	Code      string             `json:"code"`
+	Nonce     string             `json:"nonce"`
+	Verifier  string             `json:"verifier"`
+	Secret    string             `json:"secret"`
+}
+type callbackRequest struct {
+	Method        string `json:"method"`
+	URL           string `json:"url"`
+	Authorization string `json:"authorization,omitempty"`
+	ContentType   string `json:"contentType,omitempty"`
+	Body          string `json:"body,omitempty"`
+}
+type callbackResponse struct {
+	Request     callbackRequest `json:"request"`
+	Status      int             `json:"status"`
+	Body        string          `json:"body"`
+	ContentType string          `json:"contentType"`
+}
+type callbackTransport struct {
+	responses []callbackResponse
+	seen      int
+	next      *callbackRequest
+}
+
+func (t *callbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	var err error
+	if req.Body != nil {
+		body, err = io.ReadAll(io.LimitReader(req.Body, 8193))
+		if err != nil || len(body) > 8192 {
+			return nil, errors.New("request too large")
+		}
+	}
+	intent := callbackRequest{Method: req.Method, URL: req.URL.String(), Authorization: req.Header.Get("Authorization"), ContentType: req.Header.Get("Content-Type"), Body: string(body)}
+	if t.seen >= len(t.responses) {
+		t.next = &intent
+		return nil, errors.New("next request")
+	}
+	recorded := t.responses[t.seen]
+	t.seen++
+	if recorded.Request != intent || len(recorded.Body) > 16384 {
+		return nil, errors.New("transcript mismatch")
+	}
+	return &http.Response{StatusCode: recorded.Status, Header: http.Header{"Content-Type": []string{recorded.ContentType}}, Body: io.NopCloser(strings.NewReader(recorded.Body)), Request: req}, nil
+}
+
+//go:wasmexport mapi_idp_callback
+func idpCallback() uint64 {
+	var a callbackMessage
+	if json.Unmarshal(input, &a) != nil || len(a.Responses) > 4 || a.Code == "" || a.Nonce == "" || a.Verifier == "" || a.Secret == "" {
+		return send(map[string]any{"error": "invalid"})
+	}
+	conn, err := parse(args{Issuer: a.Issuer, AllowLoopback: true})
+	if err != nil {
+		return send(map[string]any{"error": "denied"})
+	}
+	conn.ClaimMapping = map[string]string{"email": "email"}
+	transport := &callbackTransport{responses: a.Responses}
+	client := &http.Client{Transport: transport} //egress:allow isolated in-memory record/replay transport never dials
+	party, err := idp.NewOIDCClient(context.Background(), conn, "https://app.example.test/callback", client)
+	if err == nil {
+		var identity idp.ExternalIdentity
+		identity, err = party.Callback(context.Background(), idp.CallbackRequest{Code: a.Code, Nonce: a.Nonce, PKCEVerifier: a.Verifier, RedirectURI: "https://app.example.test/callback", RevisionID: "revision_synthetic", ClientSecret: a.Secret})
+		if err == nil {
+			if transport.seen != len(a.Responses) {
+				return send(map[string]any{"error": "unused response"})
+			}
+			return send(map[string]any{"subject": identity.Subject, "email": identity.Claims["email"]})
+		}
+	}
+	if transport.next != nil {
+		return send(map[string]any{"next": transport.next})
+	}
+	return send(map[string]any{"error": "callback_failed"})
+}
