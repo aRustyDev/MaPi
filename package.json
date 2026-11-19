@@ -65,6 +65,7 @@
     "deploy:staging": "wrangler deploy --env staging --secrets-file .mapi/staging-secrets.json"
   },
   "devDependencies": {
+    "@zitadel/api": "0.7.0",
     "@zitadel/cli": "0.7.0",
     "@zitadel/components": "0.7.0",
     "@zitadel/testing": "0.7.0",

@@ -1,0 +1,7 @@
+{
+  "name": "mapi-sdk-api-test",
+  "main": "sdk-api-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "durable_objects": { "bindings": [{ "name": "NEXTGEN_PROJECT", "class_name": "NextgenProject" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenProject"] }]
+}
