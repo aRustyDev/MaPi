@@ -1,0 +1,37 @@
+{
+  "plan": "fapi2-security-profile-final-test-plan",
+  "variant": {
+    "fapi_profile": "plain_fapi",
+    "authorization_request_type": "simple",
+    "client_auth_type": "private_key_jwt",
+    "openid": "openid_connect",
+    "sender_constrain": "dpop",
+    "grant_management": "disabled"
+  },
+  "configuredModules": 53,
+  "attempted": 1,
+  "outcomes": [
+    {
+      "module": "fapi2-security-profile-final-ensure-unsigned-authorization-request-without-using-par-fails",
+      "status": "FINISHED",
+      "result": "REVIEW",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 400,
+        "path": "/oauth/:project/authorize",
+        "queryKeys": [
+          "client_id",
+          "code_challenge",
+          "code_challenge_method",
+          "nonce",
+          "redirect_uri",
+          "response_type",
+          "scope",
+          "state"
+        ],
+        "errorPageEvidenceSubmitted": true
+      }
+    }
+  ]
+}
