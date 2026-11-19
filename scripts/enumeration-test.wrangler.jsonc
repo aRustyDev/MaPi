@@ -1,0 +1,1 @@
+{"name":"mapi-enumeration-test","main":"enumeration-test-worker.mjs","compatibility_date":"2026-11-18","workers_dev":false,"assets":{"directory":"../worker/assets","binding":"ASSETS","run_worker_first":true},"durable_objects":{"bindings":[{"name":"ENUMERATION_TEST","class_name":"EnumerationTest"}]},"migrations":[{"tag":"v1","new_sqlite_classes":["EnumerationTest"]}]}

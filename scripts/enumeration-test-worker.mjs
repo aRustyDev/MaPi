@@ -1,0 +1,68 @@
+// Local-only browser harness. Never deployed or mounted in the application.
+import { DurableObject } from 'cloudflare:workers';
+import wasm from '../worker/generated/enumeration-test.wasm';
+import baseline from '../worker/generated/baseline.json';
+import { instantiateReactor } from '../worker/wasi.js';
+import { execute, sqliteError } from '../worker/sql.js';
+import { renderLogin } from '../worker/login-ui.js';
+import { handleFlowProxy } from '../worker/flow-proxy.js';
+const enc=new TextEncoder(),dec=new TextDecoder(),rejected=Symbol('rollback');
+export class EnumerationTest extends DurableObject {
+ reactor;memory;project;origin;token;
+ call(name,data){const bytes=enc.encode(JSON.stringify(data)),ptr=this.reactor.mapi_alloc(bytes.length);new Uint8Array(this.memory(),ptr,bytes.length).set(bytes);bytes.fill(0);const packed=this.reactor[name](),p=Number(packed>>32n),n=Number(packed&0xffffffffn),out=JSON.parse(dec.decode(new Uint8Array(this.memory(),p,n)));this.reactor.mapi_release();if(out?.error)throw Error(`${name}: ${out.error}`);return out;}
+ setup(args){
+  this.ctx.storage.transactionSync(()=>{for(const statement of baseline.statements)this.ctx.storage.sql.exec(statement);this.ctx.storage.sql.exec('CREATE TABLE mapi_project(project_id TEXT PRIMARY KEY,schema_url TEXT NOT NULL)');this.ctx.storage.sql.exec('CREATE TABLE mapi_project_origin(origin TEXT NOT NULL)');this.ctx.storage.sql.exec('INSERT INTO mapi_project_origin VALUES (?)',args.origin);});
+  this.origin=args.origin;this.boot();
+  this.call('mapi_init',{id:'master-test',pem:atob(this.env.TEST_MASTER_KEY),projectId:''});this.project=this.call('mapi_provision',{name:'FAPI browser project',origin:args.origin}).projectId;
+  this.call('mapi_init',{id:'master-test',pem:atob(this.env.TEST_MASTER_KEY),projectId:this.project});this.call('mapi_add_user',{projectId:this.project,email:args.email,password:args.password});this.token=this.call('mapi_project_token',{projectId:this.project}).token;
+  this.ctx.storage.sql.exec('CREATE TABLE mapi_masked_flows(flow_id TEXT PRIMARY KEY, valid INTEGER NOT NULL)');this.ctx.storage.sql.exec('CREATE TABLE mapi_masked_limits(key TEXT PRIMARY KEY, window INTEGER NOT NULL, count INTEGER NOT NULL)');
+  const status=this.call('mapi_flow_release',{projectId:this.project,origin:this.origin,action:'status'});const definition=args.definition;definition.name=status.loginFlows[0].name;this.call('mapi_flow_release',{projectId:this.project,origin:this.origin,action:'publish',document:definition,expectedDeploymentId:status.deploymentId});this.call('mapi_enumeration_dummy_init',{});return {projectId:this.project};
+ }
+ boot(){
+  let output,reactor;reactor=instantiateReactor(wasm,get=>{this.memory=get;return{sql:(p,n)=>{const q=JSON.parse(dec.decode(new Uint8Array(this.memory(),p,n)));let out;try{out=execute(this.ctx.storage,q);}catch(e){out={error:sqliteError(e)};}output=enc.encode(JSON.stringify(out));return output.length;},result:(p,n)=>{new Uint8Array(this.memory(),p,n).set(output);output.fill(0);output=undefined;},transaction:()=>{try{this.ctx.storage.transactionSync(()=>{if(reactor.mapi_transaction_body()!==0)throw rejected;});return 0;}catch(e){return e===rejected?1:2;}}};});this.reactor=reactor;
+ }
+ ensure(){if(this.reactor)return;let row;try{row=this.ctx.storage.sql.exec('SELECT project_id FROM mapi_project').toArray()[0];}catch{return;}if(!row)return;this.project=row.project_id;this.origin=this.ctx.storage.sql.exec('SELECT origin FROM mapi_project_origin').one().origin;this.boot();this.call('mapi_init',{id:'master-test',pem:atob(this.env.TEST_MASTER_KEY),projectId:this.project});this.token=this.call('mapi_project_token',{projectId:this.project}).token;this.call('mapi_enumeration_dummy_init',{});}
+ identity(){this.ensure();return this.project;}
+ counts(){this.ensure();return {users:this.ctx.storage.sql.exec('SELECT count(*) AS n FROM users WHERE project_id=?',this.project).one().n,credentialFactors:this.ctx.storage.sql.exec('SELECT count(*) AS n FROM checks WHERE project_id=? AND session_id IS NOT NULL AND last_verified_at IS NOT NULL AND type <> 1',this.project).one().n};}
+ session(cookie){this.ensure();return this.call('mapi_request',{method:'GET',url:this.origin+'/api/v1/sessions/me?project_id='+encodeURIComponent(this.project),headers:{cookie:[cookie]},body:'',peer:'127.0.0.1'});}
+ limits(){this.ensure();return this.ctx.storage.sql.exec('SELECT key,window,count FROM mapi_masked_limits ORDER BY key').toArray();}
+ seedLimits(ip,count){this.ensure();const window=Math.floor(Date.now()/60000);this.ctx.storage.sql.exec('INSERT INTO mapi_masked_limits VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET window=excluded.window,count=excluded.count',`ip:${ip}`,window,count);}
+ evict(){this.ctx.abort("synthetic FAPI eviction");}
+ flowRequest(request){
+  this.ensure();const url=new URL(request.url),path=url.pathname,sql=this.ctx.storage.sql;
+  if(path==='/api/v1/sessions/exchange'){request.headers.authorization=[`Bearer ${this.token}`];return this.call('mapi_request',request);}
+  const match=path.match(/^\/api\/v1\/flows\/(flow_[A-Za-z0-9_-]+)(\/submit)?$/);
+  if(match){const row=sql.exec('SELECT valid FROM mapi_masked_flows WHERE flow_id=?',match[1]).toArray()[0];if(!row?.valid)return {status:404,headers:{},body:''};}
+  if(match?.[2]){
+   const window=Math.floor(Date.now()/60000),ip=request.peer??'local';const permitted=this.ctx.storage.transactionSync(()=>{for(const [key,max] of [['global',120],[`ip:${ip}`,60]]){const row=sql.exec('SELECT window,count FROM mapi_masked_limits WHERE key=?',key).toArray()[0];if(row?.window===window&&row.count>=max)return false;}for(const key of ['global',`ip:${ip}`])sql.exec('INSERT INTO mapi_masked_limits VALUES (?,?,1) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN window=excluded.window THEN count+1 ELSE 1 END,window=excluded.window',key,window);return true;});
+   if(!permitted)return {status:429,headers:{},body:''};
+  }
+  const result=this.call('mapi_request',request);
+  const data=result.body?JSON.parse(dec.decode(Uint8Array.fromBase64(result.body))):null;
+  if(path==='/api/v1/flows'&&request.method==='POST'&&result.status===201&&data?.id)sql.exec('INSERT INTO mapi_masked_flows VALUES (?,1)',data.id);
+  if(match?.[2]&&result.status===400&&['error.user_not_found','error.invalid_credentials'].includes(data?.step?.error)){
+   const body=JSON.parse(dec.decode(Uint8Array.fromBase64(request.body)));const password=body.fields?.['x-auth-methods#password'];if(typeof password!=='string'||enc.encode(password).length>1024)return {status:400,headers:{},body:''};
+   if(data.step.error==='error.user_not_found')this.call('mapi_enumeration_dummy_verify',{password});
+   // Invalidate both failed flows before exposing a freshly minted flow.
+   sql.exec('UPDATE mapi_masked_flows SET valid=0 WHERE flow_id=?',match[1]);
+   const start={method:'POST',url:this.origin+'/api/v1/flows',headers:{'content-type':['application/json'],origin:[this.origin]},body:enc.encode(JSON.stringify({project_id:this.project,purpose:'login'})).toBase64(),peer:request.peer};
+   const fresh=this.call('mapi_request',start);if(fresh.status!==201)throw Error('fresh flow unavailable');const normalized=JSON.parse(dec.decode(Uint8Array.fromBase64(fresh.body)));normalized.step.error='error.invalid_credentials';sql.exec('INSERT INTO mapi_masked_flows VALUES (?,1)',normalized.id);fresh.status=400;fresh.body=enc.encode(JSON.stringify(normalized)).toBase64();return fresh;
+  }
+  return result;
+ }
+
+}
+export default {async fetch(request,env){
+ const u=new URL(request.url),object=env.ENUMERATION_TEST.getByName('one');
+ if(u.pathname==='/__setup'&&request.method==='POST'&&request.headers.get('authorization')===`Bearer ${env.TEST_AUTH}`){const args=await request.json();return Response.json(await object.setup(args));}
+ if(u.pathname==='/__evict'&&request.method==='POST'&&request.headers.get('authorization')===`Bearer ${env.TEST_AUTH}`){try{await object.evict();}catch{}return new Response(null,{status:204});}
+ if(u.pathname==='/__session'&&request.headers.get('authorization')===`Bearer ${env.TEST_AUTH}`){const result=await object.session(request.headers.get('x-test-cookie')??'');return new Response(null,{status:result.status});}
+ if(u.pathname==='/__counts'&&request.headers.get('authorization')===`Bearer ${env.TEST_AUTH}`)return Response.json(await object.counts());
+ if(u.pathname==='/__limits'&&request.headers.get('authorization')===`Bearer ${env.TEST_AUTH}`)return Response.json(await object.limits());
+ if(u.pathname==='/__seed-limits'&&request.method==='POST'&&request.headers.get('authorization')===`Bearer ${env.TEST_AUTH}`){const a=await request.json();await object.seedLimits(a.ip,a.count);return new Response(null,{status:204});}
+ const p=await object.identity();if(!p)return new Response(null,{status:503});
+ if(u.pathname==='/zitadel-login.mjs')return env.ASSETS.fetch(request);
+ if(u.pathname==='/login')return renderLogin(p);
+ if(u.pathname.startsWith('/__nextgen/'))return handleFlowProxy(request,object,p,u.origin);
+ return new Response(null,{status:404});
+}};
