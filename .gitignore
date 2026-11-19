@@ -39,4 +39,4 @@ go.work.sum
 /worker/generated/
 /worker/assets/
 /.dev.vars*
-/.wrangler/
+.wrangler/

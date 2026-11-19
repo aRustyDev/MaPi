@@ -1,0 +1,8 @@
+{
+  "name": "mapi-mutation-generation-test",
+  "main": "mutation-generation-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "GEN_TEST", "class_name": "MutationGenerationTest" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MutationGenerationTest"] }]
+}

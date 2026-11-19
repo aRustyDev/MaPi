@@ -195,6 +195,29 @@ func Verify(ctx context.Context, headers []string, opt Options, replay Replay) (
 	if issued.Before(opt.Now.Add(-opt.MaxAge)) || issued.After(opt.Now.Add(opt.FutureSkew)) {
 		return invalid()
 	}
+	// Optional JWT time constraints still apply when clients include them.
+	// FAPI adapters allow exactly ten seconds of future clock skew.
+	for _, name := range []string{"nbf", "exp"} {
+		value, present := rawClaims[name]
+		if !present {
+			continue
+		}
+		if len(value) == 0 || value[0] == '"' || string(value) == "null" {
+			return invalid()
+		}
+		number, err := strconv.ParseFloat(string(value), 64)
+		if err != nil || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 || number > 253402300799 {
+			return invalid()
+		}
+		whole, fraction := math.Modf(number)
+		instant := time.Unix(int64(whole), int64(fraction*1e9))
+		if name == "nbf" && instant.After(opt.Now.Add(opt.FutureSkew)) {
+			return invalid()
+		}
+		if name == "exp" && !instant.After(opt.Now) {
+			return invalid()
+		}
+	}
 	if opt.AccessToken != "" {
 		if opt.ExpectedThumbprint == "" {
 			return invalid()

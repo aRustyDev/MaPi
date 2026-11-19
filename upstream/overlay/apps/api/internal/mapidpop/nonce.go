@@ -16,11 +16,11 @@ import (
 var ErrInvalidNonce = errors.New("invalid or expired DPoP nonce")
 
 // NonceScope is constructed from server-validated context, not proof claims.
-// Purpose separates PAR, token and resource-server nonce domains.
+// Purpose separates PAR, token, revocation and resource-server nonce domains.
 type NonceScope struct{ ProjectID, ClientID, Purpose string }
 
 func (s NonceScope) valid() bool {
-	return s.ProjectID != "" && len(s.ProjectID) <= 256 && s.ClientID != "" && len(s.ClientID) <= 512 && (s.Purpose == "par" || s.Purpose == "token" || s.Purpose == "resource")
+	return s.ProjectID != "" && len(s.ProjectID) <= 256 && s.ClientID != "" && len(s.ClientID) <= 512 && (s.Purpose == "par" || s.Purpose == "token" || s.Purpose == "resource" || s.Purpose == "revocation")
 }
 
 // NonceStore stores only a hash. Issue requires a transaction and audit;

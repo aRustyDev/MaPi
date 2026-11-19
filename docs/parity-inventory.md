@@ -2,7 +2,7 @@
 
 The authoritative upstream pin is [v0.7.0 at b0b74cd4a198428ea9b82910c217259ffc62b65c](https://github.com/zitadel/nextgen/tree/b0b74cd4a198428ea9b82910c217259ffc62b65c). Generate this file with `node scripts/parity-inventory.mjs > docs/parity-inventory.md`. Run `node scripts/parity-inventory.mjs --check` to detect drift.
 
-The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. The optional management and events builds each mount two additional operations. Mounts alone do not establish public ingress or parity.
+The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; a separate account build mounts seven, including one also present in management; a separate passkey build mounts four and a self-service read build mounts five. Mounts alone do not establish public ingress or parity.
 
 The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.
 
@@ -14,24 +14,24 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | System | `getReady` | `GET /readyz` | adapter only, no public ingress | native/workerd adapter GET parity | partial behavior only |
 | Users | `createUser` | `POST /users` | not mounted | none | native-versus-Worker test needed |
 | Users | `queryUsers` | `POST /users/query` | experimental management build only | experimental native/workerd authorization checks | partial behavior only |
-| Users | `getUser` | `GET /users/{user_id}` | experimental management build only | experimental native/workerd authorization checks | partial behavior only |
-| Users | `updateUser` | `PATCH /users/{user_id}` | not mounted | none | native-versus-Worker test needed |
+| Users | `getUser` | `GET /users/{user_id}` | experimental management and account builds | experimental native/workerd authorization checks, experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
+| Users | `updateUser` | `PATCH /users/{user_id}` | experimental account build only | experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
 | Users | `deleteUser` | `DELETE /users/{user_id}` | not mounted | none | native-versus-Worker test needed |
-| Users | `listUserIdentityLinks` | `GET /users/{user_id}/identity_links` | not mounted | none | native-versus-Worker test needed |
-| Users | `listUserPasskeys` | `GET /users/{user_id}/passkeys` | not mounted | none | native-versus-Worker test needed |
-| Users | `createUserPasskeyRegistration` | `POST /users/{user_id}/passkeys/registrations` | not mounted | none | native-versus-Worker test needed |
-| Users | `completeUserPasskeyRegistration` | `POST /users/{user_id}/passkeys/registrations/{registration_id}` | not mounted | none | native-versus-Worker test needed |
-| Users | `getUserPasswordState` | `GET /users/{user_id}/password` | not mounted | none | native-versus-Worker test needed |
-| Users | `setUserPassword` | `PUT /users/{user_id}/password` | not mounted | none | native-versus-Worker test needed |
-| Users | `listUserTeams` | `GET /users/{user_id}/teams` | not mounted | none | native-versus-Worker test needed |
-| Users | `getMyUser` | `GET /users/me` | not mounted | none | native-versus-Worker test needed |
-| Users | `updateMyUser` | `PATCH /users/me` | not mounted | none | native-versus-Worker test needed |
-| Users | `listMyIdentityLinks` | `GET /users/me/identity_links` | not mounted | none | native-versus-Worker test needed |
-| Users | `listMyPasskeys` | `GET /users/me/passkeys` | not mounted | none | native-versus-Worker test needed |
-| Users | `getMyPasswordState` | `GET /users/me/password` | not mounted | none | native-versus-Worker test needed |
+| Users | `listUserIdentityLinks` | `GET /users/{user_id}/identity_links` | experimental self-service build only | experimental native/workerd paginated self-service authorization checks; foreign-credential status differs | partial behavior only |
+| Users | `listUserPasskeys` | `GET /users/{user_id}/passkeys` | experimental passkey build only | experimental native/workerd virtual authenticator checks; foreign-credential status differs | partial behavior only |
+| Users | `createUserPasskeyRegistration` | `POST /users/{user_id}/passkeys/registrations` | experimental passkey build only | experimental native/workerd virtual authenticator checks; foreign-credential status differs | partial behavior only |
+| Users | `completeUserPasskeyRegistration` | `POST /users/{user_id}/passkeys/registrations/{registration_id}` | experimental passkey build only | experimental native/workerd virtual authenticator checks; foreign-credential status differs | partial behavior only |
+| Users | `getUserPasswordState` | `GET /users/{user_id}/password` | experimental account build only | experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
+| Users | `setUserPassword` | `PUT /users/{user_id}/password` | experimental account build only | experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
+| Users | `listUserTeams` | `GET /users/{user_id}/teams` | experimental self-service build only | experimental native/workerd paginated self-service authorization checks; foreign-credential status differs | partial behavior only |
+| Users | `getMyUser` | `GET /users/me` | experimental account build only | experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
+| Users | `updateMyUser` | `PATCH /users/me` | experimental account build only | experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
+| Users | `listMyIdentityLinks` | `GET /users/me/identity_links` | experimental self-service build only | experimental native/workerd paginated self-service authorization checks; foreign-credential status differs | partial behavior only |
+| Users | `listMyPasskeys` | `GET /users/me/passkeys` | experimental passkey build only | experimental native/workerd virtual authenticator checks; foreign-credential status differs | partial behavior only |
+| Users | `getMyPasswordState` | `GET /users/me/password` | experimental account build only | experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
 | Projects | `listMyProjects` | `GET /users/me/projects` | not mounted | none | native-versus-Worker test needed |
-| Users | `getMyUserSchema` | `GET /users/me/schema` | not mounted | none | native-versus-Worker test needed |
-| Users | `listMyTeams` | `GET /users/me/teams` | not mounted | none | native-versus-Worker test needed |
+| Users | `getMyUserSchema` | `GET /users/me/schema` | experimental self-service build only | experimental native/workerd paginated self-service authorization checks; foreign-credential status differs | partial behavior only |
+| Users | `listMyTeams` | `GET /users/me/teams` | experimental self-service build only | experimental native/workerd paginated self-service authorization checks; foreign-credential status differs | partial behavior only |
 | Flows | `createFlow` | `POST /flows` | experimental MVP build only | none | native-versus-Worker test needed |
 | Flows | `getFlowStep` | `GET /flows/{flow_id}` | experimental MVP build only | none | native-versus-Worker test needed |
 | Flows | `submitFlowStep` | `POST /flows/{flow_id}/submit` | experimental MVP build only | none | native-versus-Worker test needed |

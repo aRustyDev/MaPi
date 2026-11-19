@@ -31,6 +31,7 @@ func TestPARAtomicityBindingAndReplay(t *testing.T) {
 	auditFails := false
 	clientAllowed := true
 	p := PARStore{Store: store, ProjectID: grant.ProjectID, Endpoint: "https://issuer.example/oauth/proj_A/par", TTL: time.Minute,
+		PolicyVersion: func(context.Context, string, string, string) (int64, error) { return 1, nil },
 		Authenticate: func(ctx context.Context, _ *http.Request, form url.Values) (string, error) {
 			if !strings.HasPrefix(form.Get("client_assertion"), "signed-") {
 				return "", ErrInvalidClient
@@ -89,7 +90,7 @@ func TestPARAtomicityBindingAndReplay(t *testing.T) {
 	if w := request(form, "proof-1"); w.Code != 500 {
 		t.Fatalf("audit failure status %d", w.Code)
 	}
-	for _, table := range []string{"mapi_oauth_par", "par_audit", "par_assertions", "par_proofs"} {
+	for _, table := range []string{"mapi_oauth_par", "mapi_fapi_policy_bindings", "par_audit", "par_assertions", "par_proofs"} {
 		var count int
 		if err := store.DB.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("push rollback %s: %d %v", table, count, err)

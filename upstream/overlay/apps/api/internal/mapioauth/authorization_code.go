@@ -38,6 +38,7 @@ type AuthorizationCode struct {
 	Nonce         string
 	CodeChallenge string
 	ExpiresAt     time.Time
+	PolicyVersion int64 // private FAPI only; ignored by the bearer store.
 }
 
 // CreateSchema must be called during the database's versioned migration.

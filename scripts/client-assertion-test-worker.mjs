@@ -18,7 +18,7 @@ export class ClientAssertionTest extends DurableObject {
   const result=call('mapi_assertion_probe',{projectId,origin:'https://issuer.example'});
   if(!result.ok||result.algorithms!==3||result.auditedUses!==4)throw Error('assertion probe failed');
   const par=call('mapi_private_par_probe',{projectId,origin:'https://issuer.example'});
-  if(!par.ok||par.auditEvents!==5)throw Error('composed PAR probe failed');
+  if(!par.ok||par.auditEvents!==11)throw Error('composed PAR probe failed');
   return {...result,par:par.ok,memoryBytes:memory().byteLength};
  }
 }

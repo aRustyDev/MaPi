@@ -203,15 +203,15 @@ that FAPI requires those exact limits.
 These checks follow the final [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-security-profile-2_0-final.html)
 and [OpenID Connect client-authentication requirements](https://openid.net/specs/openid-connect-core-1_0.html#ClientAuthentication).
 FAPI also requires sender-constrained access tokens and further protocol and
-operational controls. Those are separate work; the existing JWT bearer tokens
-and their refresh behavior must not be presented as a FAPI profile.
+operational controls. The existing JWT bearer tokens and their refresh behavior
+must not be presented as a FAPI profile.
 
 After preparing the pinned checkout and baseline, exercise the private
 foundation with:
 
 ```sh
 cd .mapi/nextgen/apps/api
-GOWORK=off go test -race -tags=mapi_native_e2e ./internal/mapioauth -run 'Test(ClientAssertion|PARAuthenticator)'
+GOWORK=off go test -race -tags=mapi_native_e2e ./internal/mapioauth ./internal/mapidpop
 cd ../../../..
 node scripts/test-client-assertions.mjs
 ```
@@ -226,7 +226,42 @@ registry, PAR store and DPoP proof verifier inside one project transaction.
 The local integration tests exercise a real upstream client, an invalid-proof
 rollback followed by a valid retry, replay rejection for both credentials,
 atomic PAR consumption and preservation of the DPoP thumbprint. The test-only
-probe uses a fixed synthetic nonce. Real server-issued nonce lifecycle and
-sender-constrained code, refresh-token, access-token and resource handling must
-be integrated and tested before exposing this profile. The existing production
+probe uses a server-issued nonce scoped to the project, authenticated client,
+and PAR purpose. A separate, unmounted grant store preserves optional PAR
+code binding and requires a verified thumbprint for code exchange and refresh.
+`FAPIExchange` composes assertion and token-purpose nonce verification with a
+fresh DPoP proof, grant consumption, and required transactional session, mint
+and audit callbacks. Local composition tests use synthetic session and mint
+callbacks. The separate `ComposePrivateFAPI` binds that exchange to Nextgen's
+transaction-scoped session and client reads, encrypted project key service and
+audit emitter. Code exchange signs an ES256 ID token containing the session,
+authentication time, optional request nonce and access-token hash; refresh
+responses omit it. Its experimental ES256 access token has a `cnf.jkt`, and its
+resource validator checks issuer, audience, session, client, DPoP key and
+`ath` together with a server-issued resource nonce. A private revoker stores
+project-scoped token hashes and commits authenticated client revocation
+with its audit record. Its unmounted RFC 7009 adapter accepts access and refresh
+token revocation without a DPoP header; if a proof is provided it validates the
+nonce, replay and sender key without requiring `ath`. Resource use and refresh
+redemption still require DPoP.
+The isolated native and
+workerd tests seed synthetic session records and exercise real session reads;
+they do not represent a complete browser login or a hosted measurement. The
+ES256 key ring is separate from bearer keys and retains old public keys on
+rotation. Resource routes use `AuthorizeResource` with a trusted audience, allowed-client
+set and required scopes. Each project stores a versioned policy per client;
+`Policies.Put` performs an audited compare-and-set update and fails closed for
+missing or disabled policy. PAR, token issuance and resource validation read
+that durable policy in their authoritative transaction. Private schema v7 binds PAR,
+pending login, authorization codes, access tokens and refresh tokens to the
+policy version at authorization. Any policy update invalidates those existing
+artifacts, including after a disable/regrant. Older pre-v7 artifacts lack the
+binding and fail closed; clients must authenticate again after upgrading. ID
+tokens are validated against the live session and client separately. An authenticated
+operator interface for policy management is not implemented. `ValidateResource`
+validates identity and proof only and must not be treated as authorization.
+The private HTTP adapters are unmounted. Public ingress, an operator policy interface, key retirement, a
+full-stack hosted memory and CPU gate, and
+full protocol conformance remain unimplemented or unverified, so this is not an
+advertised FAPI profile. The existing production
 bearer profile remains separate and unchanged.

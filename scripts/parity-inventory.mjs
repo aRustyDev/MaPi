@@ -29,6 +29,15 @@ const parity = new Set(["createAuthAttempt", "createAuthAttemptChallenge", "veri
 const browser = new Set(["createAuthAttempt", "createAuthAttemptChallenge", "verifyAuthAttemptChallenge", "createAuthAttemptHandoff", "exchangeHandoff", "getMySession", "getMySessionCsrfToken", "revokeMySession"]);
 const experimentalFlow = new Set(["createFlow", "getFlowStep", "submitFlowStep"]);
 const experimentalManagement = new Set(["getUser", "queryUsers", "listEvents", "getEvent"]);
+const experimentalSelf = new Set(["getMyUserSchema", "listMyTeams", "listMyIdentityLinks", "listUserTeams", "listUserIdentityLinks"]);
+const selfSource = await readFile("upstream/overlay/apps/api/internal/api/generated/mapi_self_wasip1.go", "utf8");
+for (const operation of experimentalSelf) { const handler = operation[0].toUpperCase() + operation.slice(1); if (!selfSource.includes(`s.handle${handler}Request(`)) throw new Error(`Experimental self-service mount missing: ${operation}`); }
+const experimentalPasskey = new Set(["listUserPasskeys", "createUserPasskeyRegistration", "completeUserPasskeyRegistration", "listMyPasskeys"]);
+const passkeySource = await readFile("upstream/overlay/apps/api/internal/api/generated/mapi_passkey_wasip1.go", "utf8");
+for (const operation of experimentalPasskey) { const handler = operation[0].toUpperCase() + operation.slice(1); if (!passkeySource.includes(`s.handle${handler}Request(`)) throw new Error(`Experimental passkey mount missing: ${operation}`); }
+const experimentalAccount = new Set(["getUser", "updateUser", "getUserPasswordState", "setUserPassword", "getMyUser", "updateMyUser", "getMyPasswordState"]);
+const accountSource = await readFile("upstream/overlay/apps/api/internal/api/generated/mapi_account_wasip1.go", "utf8");
+for (const operation of experimentalAccount) { const handler = operation[0].toUpperCase() + operation.slice(1); if (!accountSource.includes(`s.handle${handler}Request(`)) throw new Error(`Experimental account mount missing: ${operation}`); }
 const managementSource = (await Promise.all(["mapi_management_wasip1.go", "mapi_events_wasip1.go"].map(name => readFile(`upstream/overlay/apps/api/internal/api/generated/${name}`, "utf8")))).join("\n");
 for (const operation of experimentalManagement) {
   const handler = operation[0].toUpperCase() + operation.slice(1);
@@ -38,7 +47,7 @@ for (const id of [...parity, ...browser]) if (!operations.some((operation) => op
 const lines = [
   "# Nextgen parity inventory", "",
   `The authoritative upstream pin is [v0.7.0 at ${commit}](https://github.com/zitadel/nextgen/tree/${commit}). Generate this file with \`node scripts/parity-inventory.mjs > docs/parity-inventory.md\`. Run \`node scripts/parity-inventory.mjs --check\` to detect drift.`, "",
-  `The pinned OpenAPI document declares **${operations.length} operations**. The Go adapter mounts **${mounts.length}**. The optional management and events builds each mount two additional operations. Mounts alone do not establish public ingress or parity.`, "",
+  `The pinned OpenAPI document declares **${operations.length} operations**. The Go adapter mounts **${mounts.length}**. Optional management and events builds each mount two operations; a separate account build mounts seven, including one also present in management; a separate passkey build mounts four and a self-service read build mounts five. Mounts alone do not establish public ingress or parity.`, "",
   "The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.", "",
   "## OpenAPI operations", "",
   "| Area | Operation | Route | Go adapter | Existing evidence | Remaining parity gap |",
@@ -51,7 +60,10 @@ for (const op of operations) {
   if (browser.has(op.id)) evidence.push("application journey");
   if (["getLive", "getReady"].includes(op.id)) evidence.push("native/workerd adapter GET parity");
   if (experimentalManagement.has(op.id)) evidence.push(["listEvents", "getEvent"].includes(op.id) ? "experimental native/workerd authorization and pagination checks" : "experimental native/workerd authorization checks");
-  const adapter = mounted ? (experimentalFlow.has(op.id) ? "experimental MVP build only" : ["getLive", "getReady"].includes(op.id) ? "adapter only, no public ingress" : "mounted") : ["listEvents", "getEvent"].includes(op.id) ? "experimental events build only" : experimentalManagement.has(op.id) ? "experimental management build only" : "not mounted";
+  if (experimentalAccount.has(op.id)) evidence.push("experimental native/workerd account and authorization comparisons; foreign-credential status differs");
+  if (experimentalPasskey.has(op.id)) evidence.push("experimental native/workerd virtual authenticator checks; foreign-credential status differs");
+  if (experimentalSelf.has(op.id)) evidence.push("experimental native/workerd paginated self-service authorization checks; foreign-credential status differs");
+  const adapter = mounted ? (experimentalFlow.has(op.id) ? "experimental MVP build only" : ["getLive", "getReady"].includes(op.id) ? "adapter only, no public ingress" : "mounted") : ["listEvents", "getEvent"].includes(op.id) ? "experimental events build only" : experimentalSelf.has(op.id) ? "experimental self-service build only" : experimentalPasskey.has(op.id) ? "experimental passkey build only" : experimentalAccount.has(op.id) && experimentalManagement.has(op.id) ? "experimental management and account builds" : experimentalAccount.has(op.id) ? "experimental account build only" : experimentalManagement.has(op.id) ? "experimental management build only" : "not mounted";
   lines.push(`| ${op.tag} | \`${op.id}\` | \`${op.method} ${op.path}\` | ${adapter} | ${evidence.join(", ") || "none"} | ${evidence.length ? "partial behavior only" : "native-versus-Worker test needed"} |`);
 }
 lines.push("", "## Other native HTTP and runtime surfaces", "",

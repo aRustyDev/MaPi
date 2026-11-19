@@ -56,7 +56,7 @@ func TestPrivatePARRealClientAndDPoP(t *testing.T) {
 	}
 	pool := service.NewPool(native)
 	apps := service.NewApplicationService(pool, schemas, secrets.NewRandomSecretGenerator())
-	created, err := apps.CreateOrRevise(ctx, project.ID, []byte(`{"slug":"rp","name":"RP","clients":[{"slug":"web","type":"confidential","grant_types":["authorization_code"],"redirect_uris":["https://rp.example/callback"]}]}`))
+	created, err := apps.CreateOrRevise(ctx, project.ID, []byte(`{"slug":"rp","name":"RP","clients":[{"slug":"web","type":"confidential","grant_types":["authorization_code","refresh_token"],"redirect_uris":["https://rp.example/callback"]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +84,9 @@ func TestPrivatePARRealClientAndDPoP(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = private.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = private.Policies.Put(ctx, client, client, []string{"payments.read"}, true, 0); err != nil {
 		t.Fatal(err)
 	}
 	serverNonce, err := private.Nonces.Issue(ctx, mapidpop.NonceScope{ProjectID: project.ID, ClientID: client, Purpose: "par"})
@@ -196,8 +199,148 @@ func TestPrivatePARRealClientAndDPoP(t *testing.T) {
 	if err = private.PAR.Consume(ctx, project.ID, client, response.RequestURI, func(context.Context, PushedAuthorizationRequest) error { return nil }); !errors.Is(err, ErrInvalidPAR) {
 		t.Fatal("PAR handle replay accepted")
 	}
+	// RFC 9449 permits a JKT commitment without a PAR proof, and FAPI
+	// permits a code without key binding. The token endpoint must still
+	// verify a proof before issuing a DPoP-bound token in either case.
+	form.Set("client_assertion", assertion("assertion-jkt-only"))
+	w = request(form, "")
+	if w.Code != 201 {
+		t.Fatalf("JKT-only PAR rejected: %d %s", w.Code, w.Body.String())
+	}
+	var jktOnly struct {
+		RequestURI string `json:"request_uri"`
+	}
+	if err = json.Unmarshal(w.Body.Bytes(), &jktOnly); err != nil {
+		t.Fatal(err)
+	}
+	if err = private.PAR.Consume(ctx, project.ID, client, jktOnly.RequestURI, func(_ context.Context, p PushedAuthorizationRequest) error {
+		if p.DPoPJKT != jkt {
+			t.Error("JKT commitment lost")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	form.Set("client_assertion", assertion("assertion-unbound"))
+	form.Del("dpop_jkt")
+	w = request(form, "")
+	if w.Code != 201 {
+		t.Fatalf("unbound PAR rejected: %d %s", w.Code, w.Body.String())
+	}
+	var unbound struct {
+		RequestURI string `json:"request_uri"`
+	}
+	if err = json.Unmarshal(w.Body.Bytes(), &unbound); err != nil {
+		t.Fatal(err)
+	}
+	if err = private.PAR.Consume(ctx, project.ID, client, unbound.RequestURI, func(_ context.Context, p PushedAuthorizationRequest) error {
+		if p.DPoPJKT != "" {
+			t.Error("unbound request unexpectedly bound")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Compose real client assertion, nonce and DPoP verification with the
+	// grant store. The signer and session callbacks are synthetic: this test
+	// does not claim that FAPI signed access tokens are implemented.
+	tokenNonce, err := private.Nonces.Issue(ctx, mapidpop.NonceScope{ProjectID: project.ID, ClientID: client, Purpose: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenProof := func(id, nonce string) string {
+		raw, err := jwt.Signed(proofSigner).Claims(map[string]any{"jti": id, "htm": "POST", "htu": private.Assertions.Issuer + "/token", "iat": now.Unix(), "nonce": nonce}).Serialize()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	if _, err = db.Exec(`CREATE TABLE fapi_exchange_test_audit (client TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("injected audit failure")
+	failAudit := true
+	exchange := FAPIExchange{Private: private,
+		CheckSession: func(_ context.Context, projectID, userID, sessionID string) error {
+			if projectID != project.ID || userID != "user" || sessionID != "session" {
+				return ErrInvalidLogin
+			}
+			return nil
+		},
+		Mint: func(_ context.Context, g FAPIExchangeGrant) ([]byte, error) {
+			if g.DPoPJKT != jkt {
+				return nil, errors.New("binding lost")
+			}
+			return []byte("synthetic-result"), nil
+		},
+		Audit: func(ctx context.Context, g FAPIExchangeGrant) error {
+			if _, err := db.ExecContext(ctx, `INSERT INTO fapi_exchange_test_audit VALUES (?)`, g.ClientID); err != nil {
+				return err
+			}
+			if failAudit {
+				return failure
+			}
+			return nil
+		},
+	}
+	codeGrant := AuthorizationCode{ProjectID: project.ID, ClientID: client, RedirectURI: "https://rp.example/callback", UserID: "user", SessionID: "session", Scope: "openid", Nonce: "nonce", CodeChallenge: base64.RawURLEncoding.EncodeToString(challenge[:]), ExpiresAt: now.Add(30 * time.Second), PolicyVersion: 1}
+	var code string
+	if err = store.Transaction(func() error {
+		var e error
+		code, e = private.Grants.IssueCodeInTransaction(ctx, codeGrant, jkt)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exchangeRequest := FAPIExchangeRequest{ClientID: client, AssertionType: privateKeyAssertionType, Assertion: assertion("exchange-assertion"), Proof: tokenProof("exchange-proof", tokenNonce), Code: code, RedirectURI: codeGrant.RedirectURI, Verifier: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"}
+	if result, err := exchange.ExchangeCode(ctx, exchangeRequest); !errors.Is(err, failure) || result != nil {
+		t.Fatalf("failed transaction returned result: %q %v", result, err)
+	}
+	if count("fapi_exchange_test_audit") != 0 {
+		t.Fatal("failed exchange audit persisted")
+	}
+	failAudit = false
+	if result, err := exchange.ExchangeCode(ctx, exchangeRequest); err != nil || string(result) != "synthetic-result" {
+		t.Fatalf("valid retry: %q %v", result, err)
+	}
+	exchangeRequest.Assertion = assertion("exchange-assertion-2")
+	exchangeRequest.Proof = tokenProof("exchange-proof-2", tokenNonce)
+	if _, err := exchange.ExchangeCode(ctx, exchangeRequest); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("code replay: %v", err)
+	}
+	refreshGrant := FAPIRefresh{RefreshGrant: RefreshGrant{ProjectID: project.ID, ClientID: client, UserID: "user", SessionID: "session", Scope: "openid offline_access", ExpiresAt: now.Add(time.Hour)}, DPoPJKT: jkt, PolicyVersion: 1}
+	var refresh string
+	if err = store.Transaction(func() error {
+		var e error
+		refresh, e = private.Grants.IssueRefreshInTransaction(ctx, refreshGrant)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exchangeRequest.RefreshToken = refresh
+	if result, err := exchange.ExchangeRefresh(ctx, exchangeRequest); err != nil || string(result) != "synthetic-result" {
+		t.Fatalf("refresh exchange: %q %v", result, err)
+	}
+	exchangeRequest.Assertion = assertion("exchange-assertion-3")
+	if _, err := exchange.ExchangeRefresh(ctx, exchangeRequest); !errors.Is(err, ErrInvalidDPoP) {
+		t.Fatalf("DPoP replay: %v", err)
+	}
+	exchangeRequest.Proof = tokenProof("exchange-proof-3", tokenNonce)
+	if _, err := exchange.ExchangeRefresh(ctx, exchangeRequest); err != nil {
+		t.Fatalf("fresh refresh proof: %v", err)
+	}
 	var leaks int
 	if err = db.QueryRow(`SELECT count(*) FROM events WHERE payload LIKE ? OR payload LIKE ?`, "%"+form.Get("client_assertion")+"%", "%"+goodProof+"%").Scan(&leaks); err != nil || leaks != 0 {
 		t.Fatal("credentials leaked to audit")
 	}
+	exerciseFAPIAccess(t, private, pool, db, now, client, jkt, assertion, proofSigner, base64.RawURLEncoding.EncodeToString(challenge[:]))
+	exerciseFAPINonceHTTP(t, private, db, form, proof, assertion, &now, exchange, tokenProof, codeGrant, jkt)
+	exerciseJKTOnly(t, private, db, &now, client, jkt, assertion, proofSigner)
+	exerciseFAPIPolicies(t, private, db, client)
+	exerciseFAPIGenerationFence(t, private, db, now, client, jkt, assertion, proofSigner)
+	badRedirect := url.Values{"client_id": {client}, "client_assertion_type": {privateKeyAssertionType}, "client_assertion": {assertion("invalid-redirect-assertion")}, "response_type": {"code"}, "redirect_uri": {"https://unregistered.example/callback"}, "scope": {"openid"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
+	if w := request(badRedirect, ""); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_request") {
+		t.Fatalf("unregistered redirect error: %d %s", w.Code, w.Body.String())
+	}
+
 }

@@ -148,3 +148,32 @@ func TestNonceCleanupBounded(t *testing.T) {
 		t.Fatalf("wrong project cleanup: %d %v", n, err)
 	}
 }
+
+func TestNonceClockFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	db := dbForTest(t)
+	now := time.Unix(1700000000, 0)
+	store := nonceStore(t, db, &now, func(context.Context, NonceScope) error { return nil })
+	scope := NonceScope{"p", "c", "par"}
+	value, err := store.Issue(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := claims()
+	c["nonce"] = value
+	proof := sign(t, key, c, "dpop+jwt", true)
+	now = time.Time{}
+	if value, err := store.Issue(ctx, scope); err == nil || value != "" {
+		t.Fatal("unavailable clock issued nonce")
+	}
+	if _, err := store.ResolveProof(ctx, scope, proof); err == nil {
+		t.Fatal("unavailable clock accepted nonce")
+	}
+	if err := store.Cleanup(ctx, scope.ProjectID); err == nil {
+		t.Fatal("unavailable clock cleaned nonces")
+	}
+}

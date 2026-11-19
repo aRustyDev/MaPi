@@ -104,15 +104,17 @@ target configuration `fapi_profile=plain_fapi`,
 variant selection may change the configured set. This is a target for future
 testing, not a profile that has been run or passed.
 
-An isolated, unmounted PAR endpoint and storage primitive now exist in
-`upstream/overlay/apps/api/internal/mapioauth/par.go` and `par_http.go`.
-Their native tests cover bounded lifetime, client/project/PKCE binding,
-one-time consumption, callback replay, and transactional audit rollback.
-The client assertion and DPoP verifier hooks are mandatory but are not yet
-connected here. In particular, the verified DPoP thumbprint must propagate
-through the login and authorization code into token redemption; a PAR handle
-alone does not establish sender-constrained token security. The PAR endpoint
-and FAPI profile remain unavailable on the Worker ingress.
+An isolated, unmounted FAPI PAR composition now connects private-key JWT
+client authentication, DPoP verification and the login/code/token primitives.
+The authorization-code binding supports either a PAR `dpop_jkt` commitment or a
+PAR DPoP proof, and rejects differing keys if both are supplied, as required by
+[RFC 9449 section 10.1](https://www.rfc-editor.org/rfc/rfc9449.html#section-10.1).
+Token exchange always requires a fresh DPoP proof and checks the bound key.
+Native and local-workerd tests cover both paths, rollback and replay; the
+proofless PAR case is also exercised through a real upstream password session
+with `node scripts/test-fapi-jkt-only.mjs`. These are private integration tests,
+not OpenID conformance results. The FAPI profile remains unavailable on Worker
+ingress until its complete profile and security gates pass.
 
 To reproduce the configured plan from the project root:
 

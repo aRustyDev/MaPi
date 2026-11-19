@@ -22,6 +22,7 @@ var (
 // assertions and DPoP proof JWTs must never be persisted in this record.
 type PushedAuthorizationRequest struct {
 	ProjectID, ClientID, RedirectURI, Scope, State, Nonce, CodeChallenge, DPoPJKT string
+	PolicyVersion                                                                 int64
 }
 
 // PARStore is a private FAPI-oriented building block. All hooks must use the
@@ -43,12 +44,13 @@ type PARStore struct {
 	Authenticate        func(context.Context, *http.Request, url.Values) (string, error)
 	VerifyDPoP          func(context.Context, string, string, string, string) (string, error)
 	CheckClient         func(context.Context, string, string, string, string) error
+	PolicyVersion       func(context.Context, string, string, string) (int64, error)
 	Audit               func(context.Context, string, PushedAuthorizationRequest) error
 }
 
 func (p PARStore) configured() bool {
 	u, err := url.Parse(p.Endpoint)
-	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && u.Path != "" && p.ProjectID != "" && p.Store.DB != nil && p.Store.Transaction != nil && p.Store.Now != nil && p.TTL >= time.Second && p.TTL < 600*time.Second && p.TTL%time.Second == 0 && p.Authenticate != nil && p.VerifyDPoP != nil && p.CheckClient != nil && p.Audit != nil
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && u.Path != "" && p.ProjectID != "" && p.Store.DB != nil && p.Store.Transaction != nil && p.Store.Now != nil && p.TTL >= time.Second && p.TTL < 600*time.Second && p.TTL%time.Second == 0 && p.Authenticate != nil && p.VerifyDPoP != nil && p.CheckClient != nil && p.PolicyVersion != nil && p.Audit != nil
 }
 
 // CreatePARSchema belongs in a versioned migration, not the request path.
@@ -61,7 +63,10 @@ func (p PARStore) CreatePARSchema(ctx context.Context) error {
 		redirect_uri TEXT NOT NULL, scope TEXT NOT NULL, state TEXT NOT NULL, nonce TEXT NOT NULL,
 		code_challenge TEXT NOT NULL, dpop_jkt TEXT NOT NULL, expires_at INTEGER NOT NULL
 	)`)
-	return err
+	if err != nil {
+		return err
+	}
+	return createFAPIPolicyBindings(ctx, p.Store)
 }
 
 // Push performs client authentication, request validation, DPoP binding and
@@ -94,11 +99,17 @@ func (p PARStore) Push(ctx context.Context, r *http.Request, form url.Values) (s
 	if _, err := safeAuthorizationRedirect(CompletedLogin{RedirectURI: form.Get("redirect_uri"), Code: "validation"}); err != nil {
 		return "", ErrInvalidPAR
 	}
-	scope := CanonicalLoginScope(strings.Fields(form.Get("scope")))
-	if scope != "openid" && scope != "openid offline_access" {
+	scope, err := canonicalFAPIScopes(form.Get("scope"))
+	if err != nil {
 		return "", ErrInvalidPAR
 	}
 	requestedJKT := form.Get("dpop_jkt")
+	if _, present := form["dpop_jkt"]; present && requestedJKT == "" {
+		return "", ErrInvalidDPoP
+	}
+	if headers := r.Header.Values("DPoP"); len(headers) == 1 && headers[0] == "" {
+		return "", ErrInvalidDPoP
+	}
 	if requestedJKT != "" && !validLoginSecret(requestedJKT) {
 		return "", ErrInvalidDPoP
 	}
@@ -118,6 +129,13 @@ func (p PARStore) Push(ctx context.Context, r *http.Request, form url.Values) (s
 		}
 		if err := p.CheckClient(ctx, p.ProjectID, clientID, request.RedirectURI, request.Scope); err != nil {
 			return err
+		}
+		request.PolicyVersion, err = p.PolicyVersion(ctx, p.ProjectID, clientID, request.Scope)
+		if err != nil || request.PolicyVersion <= 0 {
+			if err != nil {
+				return err
+			}
+			return ErrInvalidPAR
 		}
 		binding, err := p.VerifyDPoP(ctx, clientID, r.Header.Get("DPoP"), requestedJKT, p.Endpoint)
 		if err != nil {
@@ -140,6 +158,9 @@ func (p PARStore) Push(ctx context.Context, r *http.Request, form url.Values) (s
 			(handle_hash,project_id,client_id,redirect_uri,scope,state,nonce,code_challenge,dpop_jkt,expires_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?)`, hash[:], request.ProjectID, request.ClientID, request.RedirectURI, request.Scope, request.State, request.Nonce, request.CodeChallenge, request.DPoPJKT, p.Store.Now().Add(p.TTL).UnixMilli())
 		if err != nil {
+			return err
+		}
+		if err = bindFAPIPolicy(ctx, p.Store, "par", hash[:], request.ProjectID, clientID, request.PolicyVersion, p.Store.Now().Add(p.TTL)); err != nil {
 			return err
 		}
 		return p.Audit(ctx, "pushed", request)
@@ -182,13 +203,33 @@ func (p PARStore) Consume(ctx context.Context, projectID, clientID, requestURI s
 		if err := p.CheckClient(ctx, projectID, clientID, request.RedirectURI, request.Scope); err != nil {
 			return err
 		}
-		result, err := p.Store.DB.ExecContext(ctx, "DELETE FROM mapi_oauth_par WHERE handle_hash=?", hash[:])
+		request.PolicyVersion, err = getFAPIPolicyBinding(ctx, p.Store, "par", hash[:], projectID, clientID)
+		if errors.Is(err, ErrFAPIPolicyDenied) {
+			return ErrInvalidPAR
+		}
 		if err != nil {
 			return err
 		}
-		count, err := result.RowsAffected()
-		if err != nil || count != 1 {
+		current, err := p.PolicyVersion(ctx, projectID, clientID, request.Scope)
+		if errors.Is(err, ErrFAPIPolicyDenied) {
 			return ErrInvalidPAR
+		}
+		if err != nil {
+			return err
+		}
+		if current != request.PolicyVersion {
+			return ErrInvalidPAR
+		}
+		if err = deleteFAPIPolicyBinding(ctx, p.Store, "par", hash[:]); err != nil {
+			return err
+		}
+		var deleted []byte
+		err = p.Store.DB.QueryRowContext(ctx, "DELETE FROM mapi_oauth_par WHERE handle_hash=? RETURNING handle_hash", hash[:]).Scan(&deleted)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrInvalidPAR
+		}
+		if err != nil {
+			return err
 		}
 		if err := begin(ctx, request); err != nil {
 			return err
