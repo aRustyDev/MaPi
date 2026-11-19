@@ -4,7 +4,7 @@ The experimental Worker is `mapi-nextgen-oidc-isolated-staging` in account
 `4d90c2d31b480584f8f878d2f62848ab`. Initial version
 `c9bac9b3-abce-4f52-b570-bcebeb6b979d` was built from commit `2c9e779` with
 an empty SQLite baseline and its own Durable Object namespaces. The current
-version `0883e031-f6b1-4ff0-ae96-86a628eee1b5` was built from commit `40c9e61`.
+version `f26832ab-a21e-4728-bae6-5253d870448a` was built from commit `4685432`.
 It is an
 isolated test deployment, not the existing Woven application or a pilot release.
 Public OIDC discovery is disabled pending the selected strict-PKCE profile and
@@ -63,6 +63,12 @@ the primary still missed the 3.5 s target. Both final Wasm linear-memory
 readings were **106,168,320 bytes**. Cloudflare reported **54,396.37 KiB** upload
 and **86 ms** startup validation. These are single-run observations, and total
 isolate memory and Durable Object CPU remain unmeasured.
+
+After the single-call login admission change, a fresh simultaneous burst
+measured **3.90 s** and **3.76 s** sign-in p95, respectively. Both projects
+completed all journeys and replay checks and reported **106,168,320 bytes** of
+Wasm linear memory afterward. Cloudflare reported **54,396.55 KiB** upload and
+**91 ms** startup validation. The latency gate remains open.
 
 To repeat the hosted RP test, set `MAPI_URL`, `MAPI_OPERATOR_TOKEN`, and
 `MAPI_TEST_USER_FILE` to the isolated deployment and its private synthetic test
