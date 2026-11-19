@@ -121,7 +121,7 @@ func (h FAPITokenHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grant := form.Get("grant_type")
-	if (grant == "authorization_code" && (req.Code == "" || req.RedirectURI == "" || req.Verifier == "" || req.RefreshToken != "")) || (grant == "refresh_token" && (req.RefreshToken == "" || req.Code != "" || req.RedirectURI != "" || req.Verifier != "")) || (grant != "authorization_code" && grant != "refresh_token") {
+	if (grant == "authorization_code" && (req.Code == "" || req.RedirectURI == "" || req.RefreshToken != "")) || (grant == "refresh_token" && (req.RefreshToken == "" || req.Code != "" || req.RedirectURI != "" || req.Verifier != "")) || (grant != "authorization_code" && grant != "refresh_token") {
 		fapiError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}

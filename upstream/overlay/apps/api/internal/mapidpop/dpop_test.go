@@ -133,7 +133,10 @@ func TestProofValidation(t *testing.T) {
 		{"valid", nil, "dpop+jwt", true, false, true}, {"bad type", nil, "JWT", true, false, false}, {"private JWK", nil, "dpop+jwt", false, false, false},
 		{"wrong method", func(c map[string]any, o *Options) { c["htm"] = "GET" }, "dpop+jwt", true, false, false},
 		{"wrong URI", func(c map[string]any, o *Options) { c["htu"] = "https://other.test/token" }, "dpop+jwt", true, false, false},
-		{"claim query", func(c map[string]any, o *Options) { c["htu"] = "https://example.test/token?x=1" }, "dpop+jwt", true, false, false},
+		{"claim query", func(c map[string]any, o *Options) { c["htu"] = "https://example.test/token?x=1" }, "dpop+jwt", true, false, true},
+		{"claim fragment", func(c map[string]any, o *Options) { c["htu"] = "https://example.test/token#ignored" }, "dpop+jwt", true, false, true},
+		{"query cannot hide wrong host", func(c map[string]any, o *Options) { c["htu"] = "https://other.test/token?https://example.test/token" }, "dpop+jwt", true, false, false},
+		{"fragment cannot hide wrong path", func(c map[string]any, o *Options) { c["htu"] = "https://example.test/other#token" }, "dpop+jwt", true, false, false},
 		{"normalization", func(c map[string]any, o *Options) { c["htu"] = "https://EXAMPLE.test:443/a/../%74oken" }, "dpop+jwt", true, false, true},
 		{"encoded slash distinct", func(c map[string]any, o *Options) { c["htu"] = "https://example.test%2ftoken" }, "dpop+jwt", true, false, false},
 		{"old", func(c map[string]any, o *Options) { c["iat"] = 1699999939 }, "dpop+jwt", true, false, false},
@@ -185,16 +188,16 @@ func TestProofValidation(t *testing.T) {
 }
 func TestHTUNormalization(t *testing.T) {
 	cases := []struct {
-		in, want    string
-		claim, fail bool
+		in, want string
+		fail     bool
 	}{
-		{"https://EXAMPLE.test:443/a/../%74oken?foo=bar", "https://example.test/token", false, false},
-		{"https://example.test//a/./b/../", "https://example.test//a/", false, false},
-		{"https://example.test/a%2Fb", "https://example.test/a%2Fb", true, false},
-		{"https://example.test/a?x=1", "", true, true}, {"http://example.test/a", "", false, true},
+		{"https://EXAMPLE.test:443/a/../%74oken?foo=bar", "https://example.test/token", false},
+		{"https://example.test//a/./b/../", "https://example.test//a/", false},
+		{"https://example.test/a%2Fb", "https://example.test/a%2Fb", false},
+		{"https://example.test/a?x=1#fragment", "https://example.test/a", false}, {"http://example.test/a", "", true},
 	}
 	for _, tc := range cases {
-		got, err := normalizeHTU(tc.in, tc.claim)
+		got, err := normalizeHTU(tc.in)
 		if (err != nil) != tc.fail || got != tc.want {
 			t.Errorf("%q => %q %v", tc.in, got, err)
 		}

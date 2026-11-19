@@ -1,0 +1,89 @@
+{
+  "plan": "fapi2-security-profile-final-test-plan",
+  "variant": {
+    "fapi_profile": "plain_fapi",
+    "authorization_request_type": "simple",
+    "client_auth_type": "private_key_jwt",
+    "openid": "openid_connect",
+    "sender_constrain": "dpop",
+    "grant_management": "disabled"
+  },
+  "configuredModules": 53,
+  "attempted": 6,
+  "outcomes": [
+    {
+      "module": "fapi2-security-profile-final-discovery-end-point-verification",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-happy-flow",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 2,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-plain-fapi-tolerate-unregistered-redirect-uri",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-dpop-negative-tests",
+      "status": "FINISHED",
+      "result": "WARNING",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-refresh-token",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "failures": [
+        "CheckPAREndpointResponse201WithNoError"
+      ],
+      "browserInfo": {
+        "visits": 0
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-ensure-pkce-code-verifier-required",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    }
+  ]
+}

@@ -178,11 +178,11 @@ func Verify(ctx context.Context, headers []string, opt Options, replay Replay) (
 	if dec.Decode(&claims) != nil || claims.JTI == "" || len(claims.JTI) > 256 || strings.ContainsAny(claims.JTI, "\x00\r\n") || claims.HTM != opt.Method || !constant(claims.Nonce, opt.Nonce) {
 		return invalid()
 	}
-	claimURL, err := normalizeHTU(claims.HTU, true)
+	claimURL, err := normalizeHTU(claims.HTU)
 	if err != nil {
 		return invalid()
 	}
-	requestURL, err := normalizeHTU(opt.URL, false)
+	requestURL, err := normalizeHTU(opt.URL)
 	if err != nil || claimURL != requestURL {
 		return invalid()
 	}
@@ -307,10 +307,9 @@ func uniqueJSON(data []byte) bool {
 	return errors.Is(err, io.EOF)
 }
 
-func normalizeHTU(raw string, claim bool) (string, error) {
-	if claim && strings.ContainsAny(raw, "?#") {
-		return "", ErrInvalidProof
-	}
+// RFC 9449 section 4.3 compares normalized HTTP URIs while ignoring
+// query and fragment components on both sides.
+func normalizeHTU(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.User != nil || u.Host == "" || u.Opaque != "" {
 		return "", ErrInvalidProof

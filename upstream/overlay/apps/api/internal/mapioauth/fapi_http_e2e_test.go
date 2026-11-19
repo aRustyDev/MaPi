@@ -158,6 +158,15 @@ func exerciseFAPINonceHTTP(t *testing.T, p *PrivatePAR, db *sql.DB, form url.Val
 	}
 	w = post(FAPITokenHTTP{Exchange: exchange}, tokenEndpoint, tokenForm, tokenProof("http-token-proof", ""))
 	n = challenge(w)
+	missingVerifier := url.Values{}
+	for key, values := range tokenForm {
+		missingVerifier[key] = append([]string(nil), values...)
+	}
+	missingVerifier.Del("code_verifier")
+	if failed := post(FAPITokenHTTP{Exchange: exchange}, tokenEndpoint, missingVerifier, tokenProof("http-token-proof", n)); failed.Code != 400 || !strings.Contains(failed.Body.String(), "invalid_grant") {
+		t.Fatal("missing verifier did not return invalid_grant")
+	}
+	// The failed verifier cannot consume the code, assertion or DPoP proof.
 	w = post(FAPITokenHTTP{Exchange: exchange}, tokenEndpoint, tokenForm, tokenProof("http-token-proof", n))
 	if w.Code != 200 {
 		t.Fatalf("token retry: %d %s", w.Code, w.Body.String())

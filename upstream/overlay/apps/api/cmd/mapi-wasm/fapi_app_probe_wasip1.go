@@ -271,9 +271,17 @@ func fapiAppProbe() uint64 {
 	if w.Code != 400 || nonce == "" {
 		return failure(fmt.Errorf("token challenge failed: %d", w.Code))
 	}
-	raw, err = proof("app-token-proof", endpoint, nonce)
+	raw, err = proof("app-token-proof", endpoint+"?ignored=yes#fragment", nonce)
 	if err != nil {
 		return failure(err)
+	}
+	missingVerifier := url.Values{}
+	for key, values := range tokenForm {
+		missingVerifier[key] = append([]string(nil), values...)
+	}
+	missingVerifier.Del("code_verifier")
+	if missing := post(tokenHandler, endpoint, missingVerifier, raw); missing.Code != 400 || !strings.Contains(missing.Body.String(), "invalid_grant") {
+		return failure(errors.New("missing PKCE verifier did not return invalid_grant"))
 	}
 	// A valid proof for a different key cannot redeem the bound code. The
 	// failed transaction must leave the original assertion and code usable.
@@ -392,7 +400,7 @@ func fapiAppProbe() uint64 {
 	accessHash := sha256.Sum256([]byte(tokens.AccessToken))
 	ath := base64.RawURLEncoding.EncodeToString(accessHash[:])
 	resourceProof := func(id string) (string, error) {
-		return jwt.Signed(dpop).Claims(map[string]any{"jti": id, "htm": "GET", "htu": resourceURL, "iat": time.Now().Unix(), "nonce": resourceNonce, "ath": ath}).Serialize()
+		return jwt.Signed(dpop).Claims(map[string]any{"jti": id, "htm": "GET", "htu": resourceURL + "?ignored=yes#fragment", "iat": time.Now().Unix(), "nonce": resourceNonce, "ath": ath}).Serialize()
 	}
 	raw, err = resourceProof("app-resource")
 	if err != nil {
