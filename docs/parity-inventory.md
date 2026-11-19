@@ -2,7 +2,7 @@
 
 The authoritative upstream pin is [v0.7.0 at b0b74cd4a198428ea9b82910c217259ffc62b65c](https://github.com/zitadel/nextgen/tree/b0b74cd4a198428ea9b82910c217259ffc62b65c). Generate this file with `node scripts/parity-inventory.mjs > docs/parity-inventory.md`. Run `node scripts/parity-inventory.mjs --check` to detect drift.
 
-The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; a separate account build mounts seven, including one also present in management; a separate passkey build mounts four and a self-service read build mounts five and a team-management build mounts five. Mounts alone do not establish public ingress or parity.
+The pinned OpenAPI document declares **107 operations**. The Go adapter mounts **14**. Optional management and events builds each mount two operations; a separate account build mounts seven, including one also present in management; a separate passkey build mounts four and a self-service read build mounts five a team-management build mounts five, and a user-deletion build mounts two (one shared with other builds). Mounts alone do not establish public ingress or parity.
 
 The coverage column describes evidence from the checked-in tests, rather than a claim that every status, permission, or response field has full parity. All entries retain a full-parity test gap until the operation has a comprehensive native-versus-Worker comparison.
 
@@ -14,9 +14,9 @@ The coverage column describes evidence from the checked-in tests, rather than a 
 | System | `getReady` | `GET /readyz` | adapter only, no public ingress | native/workerd adapter GET parity | partial behavior only |
 | Users | `createUser` | `POST /users` | not mounted | none | native-versus-Worker test needed |
 | Users | `queryUsers` | `POST /users/query` | experimental management build only | experimental native/workerd authorization checks | partial behavior only |
-| Users | `getUser` | `GET /users/{user_id}` | experimental management and account builds | experimental native/workerd authorization checks, experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
+| Users | `getUser` | `GET /users/{user_id}` | experimental management, account and user-deletion builds | experimental native/workerd authorization checks, experimental native/workerd account and authorization comparisons; foreign-credential status differs, experimental native/workerd user-deletion authorization, owner guard and audit checks; cross-object state unproven | partial behavior only |
 | Users | `updateUser` | `PATCH /users/{user_id}` | experimental account build only | experimental native/workerd account and authorization comparisons; foreign-credential status differs | partial behavior only |
-| Users | `deleteUser` | `DELETE /users/{user_id}` | not mounted | none | native-versus-Worker test needed |
+| Users | `deleteUser` | `DELETE /users/{user_id}` | experimental user-deletion build only | experimental native/workerd user-deletion authorization, owner guard and audit checks; cross-object state unproven | partial behavior only |
 | Users | `listUserIdentityLinks` | `GET /users/{user_id}/identity_links` | experimental self-service build only | experimental native/workerd paginated self-service authorization checks; foreign-credential status differs | partial behavior only |
 | Users | `listUserPasskeys` | `GET /users/{user_id}/passkeys` | experimental passkey build only | experimental native/workerd virtual authenticator checks; foreign-credential status differs | partial behavior only |
 | Users | `createUserPasskeyRegistration` | `POST /users/{user_id}/passkeys/registrations` | experimental passkey build only | experimental native/workerd virtual authenticator checks; foreign-credential status differs | partial behavior only |
