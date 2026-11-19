@@ -48,7 +48,13 @@ func (f FAPILogin) CreateSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return createFAPIPolicyBindings(ctx, f.Store)
+	if err = createFAPIPolicyBindings(ctx, f.Store); err != nil {
+		return err
+	}
+	if err = createFAPIPromptSchema(ctx, f.Store); err != nil {
+		return err
+	}
+	return createFAPIReloadSchema(ctx, f.Store)
 }
 
 // BeginInTransaction is called only from PARStore.Consume's callback. The
@@ -100,6 +106,9 @@ func (f FAPILogin) BeginInTransaction(ctx context.Context, request PushedAuthori
 	if err = bindFAPIPolicy(ctx, f.Store, "login", handleHash[:], request.ProjectID, request.ClientID, request.PolicyVersion, f.Store.Now().Add(f.LoginTTL)); err != nil {
 		return "", "", err
 	}
+	if err = putFAPIPrompt(ctx, f.Store, "login", handleHash[:], request.Prompt); err != nil {
+		return "", "", err
+	}
 	grant := AuthorizationCode{ProjectID: request.ProjectID, ClientID: request.ClientID, RedirectURI: request.RedirectURI, Scope: request.Scope, Nonce: request.Nonce, CodeChallenge: request.CodeChallenge, PolicyVersion: request.PolicyVersion}
 	if err = f.Audit(ctx, "login_started", grant, request.DPoPJKT); err != nil {
 		return "", "", err
@@ -128,6 +137,13 @@ func (f FAPILogin) validatedLogin(ctx context.Context, handle, binding, sessionC
 	if err := f.CheckClient(ctx, request.ProjectID, request.ClientID, request.RedirectURI, request.Scope); err != nil {
 		return request, LoginIdentity{}, err
 	}
+	request.Prompt, err = getFAPIPrompt(ctx, f.Store, "login", handleHash[:])
+	if errors.Is(err, ErrFAPIPolicyDenied) {
+		return request, LoginIdentity{}, ErrInvalidLogin
+	}
+	if err != nil {
+		return request, LoginIdentity{}, err
+	}
 	request.PolicyVersion, err = getFAPIPolicyBinding(ctx, f.Store, "login", handleHash[:], request.ProjectID, request.ClientID)
 	if errors.Is(err, ErrFAPIPolicyDenied) {
 		return request, LoginIdentity{}, ErrInvalidLogin
@@ -148,6 +164,9 @@ func (f FAPILogin) validatedLogin(ctx context.Context, handle, binding, sessionC
 	identity, err := f.Session(ctx, request.ProjectID, sessionCookie)
 	if err != nil || identity.ProjectID != request.ProjectID || identity.UserID == "" || identity.SessionID == "" {
 		return request, LoginIdentity{}, ErrInvalidLogin
+	}
+	if err = bindFAPIReloadSession(ctx, f.Store, request.ProjectID, handleHash[:], sessionCookie); err != nil {
+		return request, LoginIdentity{}, err
 	}
 	return request, identity, nil
 }
@@ -187,6 +206,15 @@ func (f FAPILogin) RedirectURI(ctx context.Context, handle, binding, sessionCook
 // adapter must enforce exact Origin and session-bound CSRF on its POST, and
 // must validate the stored binding before rendering any RP-specific CSP.
 func (f FAPILogin) Complete(ctx context.Context, handle, binding, sessionCookie string) (CompletedLogin, error) {
+	return f.complete(ctx, handle, binding, sessionCookie, false)
+}
+
+// CompleteWithConsent is reserved for a trusted, explicit same-origin,
+// session-CSRF-bound approval handler after showing the requested consent.
+func (f FAPILogin) CompleteWithConsent(ctx context.Context, handle, binding, sessionCookie string) (CompletedLogin, error) {
+	return f.complete(ctx, handle, binding, sessionCookie, true)
+}
+func (f FAPILogin) complete(ctx context.Context, handle, binding, sessionCookie string, consented bool) (CompletedLogin, error) {
 	if !f.configured() {
 		return CompletedLogin{}, errors.New("FAPI login not configured")
 	}
@@ -200,6 +228,9 @@ func (f FAPILogin) Complete(ctx context.Context, handle, binding, sessionCookie 
 		if err != nil {
 			return err
 		}
+		if request.Prompt == "consent" && !consented {
+			return ErrInvalidLogin
+		}
 		grant := AuthorizationCode{ProjectID: request.ProjectID, ClientID: request.ClientID, RedirectURI: request.RedirectURI, UserID: identity.UserID, SessionID: identity.SessionID, Scope: request.Scope, Nonce: request.Nonce, CodeChallenge: request.CodeChallenge, ExpiresAt: f.Store.Now().Add(f.CodeTTL), PolicyVersion: request.PolicyVersion}
 		var deleted []byte
 		err = f.Store.DB.QueryRowContext(ctx, "DELETE FROM mapi_fapi_logins WHERE handle_hash=? RETURNING handle_hash", handleHash[:]).Scan(&deleted)
@@ -207,6 +238,12 @@ func (f FAPILogin) Complete(ctx context.Context, handle, binding, sessionCookie 
 			return ErrInvalidLogin
 		}
 		if err != nil {
+			return err
+		}
+		if _, err = f.Store.DB.ExecContext(ctx, `DELETE FROM mapi_fapi_reload WHERE project_id=? AND login_hash=?`, request.ProjectID, handleHash[:]); err != nil {
+			return err
+		}
+		if err = deleteFAPIPrompt(ctx, f.Store, "login", handleHash[:]); err != nil {
 			return err
 		}
 		if err = deleteFAPIPolicyBinding(ctx, f.Store, "login", handleHash[:]); err != nil {

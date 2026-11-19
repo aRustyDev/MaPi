@@ -171,4 +171,25 @@ func exerciseFAPINonceHTTP(t *testing.T, p *PrivatePAR, db *sql.DB, form url.Val
 	if w.Code != 200 {
 		t.Fatalf("token retry: %d %s", w.Code, w.Body.String())
 	}
+	var refresh string
+	if err = p.Store.Transaction(func() error {
+		var e error
+		refresh, e = p.Grants.IssueRefreshInTransaction(context.Background(), FAPIRefresh{RefreshGrant: RefreshGrant{ProjectID: p.Grants.ProjectID, ClientID: values.Get("client_id"), UserID: "user", SessionID: "session", Scope: "openid offline_access", ExpiresAt: p.Store.Now().Add(time.Hour)}, DPoPJKT: jkt, PolicyVersion: currentPolicy.Version})
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var mintedScope string
+	exchange.Mint = func(_ context.Context, g FAPIExchangeGrant) ([]byte, error) {
+		mintedScope = g.Scope
+		return []byte(`{"access_token":"synthetic","token_type":"DPoP"}`), nil
+	}
+	refreshForm := url.Values{"grant_type": {"refresh_token"}, "client_assertion_type": {privateKeyAssertionType}, "client_assertion": {assertion("http-refresh-scope-assertion")}, "refresh_token": {refresh}, "scope": {"openid payments.write"}}
+	if failed := post(FAPITokenHTTP{Exchange: exchange}, tokenEndpoint, refreshForm, tokenProof("http-refresh-scope-proof", n)); failed.Code != 400 || !strings.Contains(failed.Body.String(), "invalid_scope") {
+		t.Fatalf("expanded refresh scope status %d %s", failed.Code, failed.Body.String())
+	}
+	refreshForm.Set("scope", "offline_access openid")
+	if result := post(FAPITokenHTTP{Exchange: exchange}, tokenEndpoint, refreshForm, tokenProof("http-refresh-scope-proof", n)); result.Code != 200 || mintedScope != "openid offline_access" {
+		t.Fatalf("refresh scope retry %d %s", result.Code, result.Body.String())
+	}
 }

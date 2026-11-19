@@ -11,9 +11,11 @@ import (
 	"time"
 )
 
-// FAPIGrants is an unmounted, separate sender-constrained grant store. The
-// caller must authenticate the client, validate a live session, cryptographically
-// verify DPoP and write audit in the SAME outer transaction. It does not modify
+// FAPIGrants is an unmounted grant store for confidential clients. The caller
+// must authenticate the client, validate a live session, cryptographically
+// verify DPoP and write audit in the SAME outer transaction. Refresh tokens are
+// bound to client authentication, while each access token is bound to the
+// verified DPoP key of the request that creates it. It does not modify
 // the existing bearer authorization code or rotating refresh-token tables.
 type FAPIGrants struct {
 	Store     Store
@@ -26,6 +28,8 @@ type FAPICode struct {
 }
 type FAPIRefresh struct {
 	RefreshGrant
+	// DPoPJKT records the issue-time key on write and the newly verified
+	// request key on read; confidential refresh authority is client-bound.
 	DPoPJKT       string
 	PolicyVersion int64
 }
@@ -50,7 +54,10 @@ func (g FAPIGrants) CreateSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return createFAPIPolicyBindings(ctx, g.Store)
+	if err = createFAPIPolicyBindings(ctx, g.Store); err != nil {
+		return err
+	}
+	return createFAPIPromptSchema(ctx, g.Store)
 }
 func randomFAPIToken() (string, [32]byte, error) {
 	var raw [32]byte
@@ -136,8 +143,8 @@ func (g FAPIGrants) ConsumeCodeInTransaction(ctx context.Context, plain, clientI
 	return code, nil
 }
 
-// IssueRefreshInTransaction creates a sender-constrained, non-rotating
-// refresh token. FAPI 2.0 says ordinary refresh rotation must not be used
+// IssueRefreshInTransaction creates a client-authenticated, non-rotating
+// confidential-client refresh token. FAPI 2.0 says ordinary refresh rotation must not be used
 // except in extraordinary circumstances. Caller commits token and audit writes.
 func (g FAPIGrants) IssueRefreshInTransaction(ctx context.Context, grant FAPIRefresh) (string, error) {
 	if !g.valid() {
@@ -162,7 +169,10 @@ func (g FAPIGrants) IssueRefreshInTransaction(ctx context.Context, grant FAPIRef
 }
 
 // RefreshInTransaction requires a cryptographically verified fresh DPoP proof
-// by the same key as the grant. The token is deliberately not rotated here.
+// and prior confidential-client authentication in the same transaction. The
+// returned JKT is the current proof key, not the original token-issuance key.
+// RFC 9449 section 5 permits a confidential client to rotate its DPoP key.
+// The refresh token is deliberately not rotated in this private FAPI profile.
 func (g FAPIGrants) RefreshInTransaction(ctx context.Context, plain, clientID, verifiedJKT string) (FAPIRefresh, error) {
 	if !g.valid() {
 		return FAPIRefresh{}, errors.New("FAPI grant store not configured")
@@ -189,9 +199,10 @@ func (g FAPIGrants) RefreshInTransaction(ctx context.Context, plain, clientID, v
 	if err != nil {
 		return FAPIRefresh{}, err
 	}
-	if grant.ProjectID != g.ProjectID || grant.ClientID != clientID || revoked.Valid || !g.Store.Now().Before(grant.ExpiresAt) || subtle.ConstantTimeCompare([]byte(grant.DPoPJKT), []byte(verifiedJKT)) != 1 {
+	if grant.ProjectID != g.ProjectID || grant.ClientID != clientID || revoked.Valid || !g.Store.Now().Before(grant.ExpiresAt) {
 		return FAPIRefresh{}, ErrInvalidRefresh
 	}
+	grant.DPoPJKT = verifiedJKT
 	return grant, nil
 }
 

@@ -229,7 +229,7 @@ func fapiAppProbe() uint64 {
 		return failure(errors.New("failed login audit persisted"))
 	}
 	var count int
-	if err = db.QueryRowContext(ctx, "SELECT count(*) FROM mapi_fapi_logins").Scan(&count); err != nil || count != 0 {
+	if err = db.QueryRowContext(ctx, "SELECT count(*) FROM mapi_fapi_logins WHERE project_id=? AND client_id=?", args.ProjectID, client).Scan(&count); err != nil || count != 0 {
 		return failure(errors.New("partial login survived rollback"))
 	}
 	handle, binding, err := begin(login)
@@ -353,7 +353,7 @@ func fapiAppProbe() uint64 {
 		return failure(errors.New("code replay accepted"))
 	}
 	for _, eventType := range []string{"mapi.fapi.login_started", "mapi.fapi.code_issued", "mapi.fapi.token.exchanged"} {
-		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE project_id=? AND event_type=?`, args.ProjectID, eventType).Scan(&count); err != nil || count != 1 {
+		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE project_id=? AND event_type=? AND entity_id=?`, args.ProjectID, eventType, client).Scan(&count); err != nil || count != 1 {
 			return failure(fmt.Errorf("missing committed audit %s", eventType))
 		}
 	}
@@ -413,6 +413,116 @@ func fapiAppProbe() uint64 {
 	if _, err = composed.Tokens.ValidateResource(ctx, tokens.AccessToken, raw, "GET", resourceURL, client); err == nil {
 		return failure(errors.New("resource replay accepted"))
 	}
+	// Refresh accepts an equivalent or narrower scope but never expands it,
+	// rotates the refresh token or weakens sender binding.
+	refreshAssertion, err := assertion("refresh-scope-assertion")
+	if err != nil {
+		return failure(err)
+	}
+	refreshProof, err := proof("refresh-scope-proof", endpoint, nonce)
+	if err != nil {
+		return failure(err)
+	}
+	refreshValues := url.Values{"grant_type": {"refresh_token"}, "client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"}, "client_assertion": {refreshAssertion}, "refresh_token": {tokens.RefreshToken}, "scope": {"openid payments.write"}}
+	if response := post(tokenHandler, endpoint, refreshValues, refreshProof); response.Code != 400 || !strings.Contains(response.Body.String(), "invalid_scope") {
+		return failure(errors.New("expanded refresh scope accepted"))
+	}
+	refreshValues.Set("scope", "offline_access openid")
+	refreshResponse := post(tokenHandler, endpoint, refreshValues, refreshProof)
+	if refreshResponse.Code != 200 {
+		return failure(errors.New("equivalent refresh scope rejected"))
+	}
+	var refreshBody struct {
+		Scope   string `json:"scope"`
+		Refresh string `json:"refresh_token"`
+	}
+	if err = json.Unmarshal(refreshResponse.Body.Bytes(), &refreshBody); err != nil || refreshBody.Scope != "openid offline_access" || refreshBody.Refresh != "" {
+		return failure(errors.New("invalid refresh response scope"))
+	}
+	refreshAssertion, err = assertion("refresh-subset-assertion")
+	if err != nil {
+		return failure(err)
+	}
+	refreshProof, err = proof("refresh-subset-proof", endpoint, nonce)
+	if err != nil {
+		return failure(err)
+	}
+	refreshValues.Set("client_assertion", refreshAssertion)
+	refreshValues.Set("scope", "openid")
+	refreshResponse = post(tokenHandler, endpoint, refreshValues, refreshProof)
+	if refreshResponse.Code != 200 {
+		return failure(errors.New("narrowed refresh scope rejected"))
+	}
+	if err = json.Unmarshal(refreshResponse.Body.Bytes(), &refreshBody); err != nil || refreshBody.Scope != "openid" {
+		return failure(errors.New("refresh scope not narrowed"))
+	}
+	refreshAssertion, err = assertion("refresh-no-openid-assertion")
+	if err != nil {
+		return failure(err)
+	}
+	refreshProof, err = proof("refresh-no-openid-proof", endpoint, nonce)
+	if err != nil {
+		return failure(err)
+	}
+	refreshValues.Set("client_assertion", refreshAssertion)
+	refreshValues.Set("scope", "offline_access")
+	refreshResponse = post(tokenHandler, endpoint, refreshValues, refreshProof)
+	if refreshResponse.Code != 200 {
+		return failure(errors.New("refresh subset without openid rejected"))
+	}
+	if err = json.Unmarshal(refreshResponse.Body.Bytes(), &refreshBody); err != nil || refreshBody.Scope != "offline_access" {
+		return failure(errors.New("non-OIDC refresh subset incorrect"))
+	}
+	// RFC 9449 permits a confidential, client-authenticated refresh to use
+	// a new DPoP key; the new access token must bind to that verified key.
+	refreshAssertion, err = assertion("refresh-rotated-key-assertion")
+	if err != nil {
+		return failure(err)
+	}
+	rotatedProof, err := jwt.Signed(wrongSigner).Claims(map[string]any{"jti": "refresh-rotated-key-proof", "htm": "POST", "htu": endpoint, "iat": time.Now().Unix(), "nonce": nonce}).Serialize()
+	if err != nil {
+		return failure(err)
+	}
+	refreshValues.Set("client_assertion", refreshAssertion)
+	refreshValues.Del("scope")
+	refreshResponse = post(tokenHandler, endpoint, refreshValues, rotatedProof)
+	if refreshResponse.Code != 200 {
+		return failure(errors.New("confidential refresh key rotation rejected"))
+	}
+	var rotatedBody struct {
+		Access string `json:"access_token"`
+	}
+	if err = json.Unmarshal(refreshResponse.Body.Bytes(), &rotatedBody); err != nil || rotatedBody.Access == "" {
+		return failure(errors.New("rotated-key access token missing"))
+	}
+	rotatedJWT, err := jwt.ParseSigned(rotatedBody.Access, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		return failure(err)
+	}
+	rotatedKeys, err := composed.Keys.PublicKeys(ctx)
+	if err != nil {
+		return failure(err)
+	}
+	rotatedMatches := rotatedKeys.Key(rotatedJWT.Headers[0].KeyID)
+	if len(rotatedMatches) != 1 {
+		return failure(errors.New("rotated token signing key missing"))
+	}
+	var rotatedClaims struct {
+		Confirmation struct {
+			JKT string `json:"jkt"`
+		} `json:"cnf"`
+	}
+	if err = rotatedJWT.Claims(rotatedMatches[0].Key, &rotatedClaims); err != nil {
+		return failure(err)
+	}
+	rotatedJWK := jose.JSONWebKey{Key: &wrongKey.PublicKey}
+	rotatedThumb, err := rotatedJWK.Thumbprint(crypto.SHA256)
+	if err != nil {
+		return failure(err)
+	}
+	if rotatedClaims.Confirmation.JKT != base64.RawURLEncoding.EncodeToString(rotatedThumb) || rotatedClaims.Confirmation.JKT == jkt {
+		return failure(errors.New("access token not bound to rotated key"))
+	}
 	// Pending state and tokens retain the policy generation in which they
 	// were authorized; a disable/regrant must not revive any of them.
 	makePAR := func(id string) (string, error) {
@@ -461,11 +571,11 @@ func fapiAppProbe() uint64 {
 	if e != nil {
 		return failure(e)
 	}
-	refreshAssertion, e := assertion("generation-refresh-assertion")
+	refreshAssertion, e = assertion("generation-refresh-assertion")
 	if e != nil {
 		return failure(e)
 	}
-	refreshProof, e := proof("generation-refresh-proof", endpoint, generationNonce)
+	refreshProof, e = proof("generation-refresh-proof", endpoint, generationNonce)
 	if e != nil {
 		return failure(e)
 	}

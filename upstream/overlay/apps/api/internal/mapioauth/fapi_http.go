@@ -104,7 +104,7 @@ func (h FAPITokenHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	for _, name := range []string{"client_secret", "resource", "authorization_details", "scope"} {
+	for _, name := range []string{"client_secret", "resource", "authorization_details"} {
 		if _, exists := form[name]; exists {
 			fapiError(w, http.StatusBadRequest, "invalid_request")
 			return
@@ -120,8 +120,10 @@ func (h FAPITokenHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fapiError(w, http.StatusBadRequest, "invalid_client")
 		return
 	}
+	_, req.ScopeProvided = form["scope"]
+	req.Scope = form.Get("scope")
 	grant := form.Get("grant_type")
-	if (grant == "authorization_code" && (req.Code == "" || req.RedirectURI == "" || req.RefreshToken != "")) || (grant == "refresh_token" && (req.RefreshToken == "" || req.Code != "" || req.RedirectURI != "" || req.Verifier != "")) || (grant != "authorization_code" && grant != "refresh_token") {
+	if (grant == "authorization_code" && (req.Code == "" || req.RedirectURI == "" || req.RefreshToken != "" || req.ScopeProvided)) || (grant == "refresh_token" && (req.RefreshToken == "" || req.Code != "" || req.RedirectURI != "" || req.Verifier != "")) || (grant != "authorization_code" && grant != "refresh_token") {
 		fapiError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -161,6 +163,8 @@ func (h FAPITokenHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fapiError(w, http.StatusBadRequest, "invalid_client")
 	case errors.Is(err, ErrInvalidDPoP):
 		fapiError(w, http.StatusBadRequest, "invalid_dpop_proof")
+	case errors.Is(err, ErrInvalidRefreshScope):
+		fapiError(w, http.StatusBadRequest, "invalid_scope")
 	case errors.Is(err, ErrInvalidCode), errors.Is(err, ErrInvalidRefresh):
 		fapiError(w, http.StatusBadRequest, "invalid_grant")
 	case err != nil:

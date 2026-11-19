@@ -46,8 +46,12 @@ func TestFAPIRefreshBindingAndRollback(t *testing.T) {
 	for _, tc := range []struct {
 		client, jkt string
 		valid       bool
-	}{{c.ClientID, jkt, true}, {c.ClientID, jkt, true}, {c.ClientID, other, false}, {c.ClientID, "", false}, {"another-client", jkt, false}} {
-		err = s.Transaction(func() error { _, err := g.RefreshInTransaction(ctx, token, tc.client, tc.jkt); return err })
+	}{{c.ClientID, jkt, true}, {c.ClientID, jkt, true}, {c.ClientID, other, true}, {c.ClientID, "", false}, {"another-client", jkt, false}} {
+		var actual FAPIRefresh
+		err = s.Transaction(func() error { var e error; actual, e = g.RefreshInTransaction(ctx, token, tc.client, tc.jkt); return e })
+		if err == nil && actual.DPoPJKT != tc.jkt {
+			t.Fatal("refreshed grant did not carry current proof key")
+		}
 		if (err == nil) != tc.valid {
 			t.Fatalf("refresh valid=%v err=%v", tc.valid, err)
 		}
@@ -107,7 +111,7 @@ func TestPrivateFAPISchemaUpgradeIsAtomic(t *testing.T) {
 	if err := p.InitializeSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []int{1, 2, 3, 4, 5, 6} {
+	for _, version := range []int{1, 2, 3, 4, 5, 6, 7} {
 		for _, q := range []string{"DROP TABLE mapi_fapi_logins", "DROP TABLE mapi_fapi_codes", "DROP TABLE mapi_fapi_refresh_tokens"} {
 			if _, err := s.DB.Exec(q); err != nil {
 				t.Fatal(err)
@@ -136,7 +140,7 @@ func TestPrivateFAPISchemaUpgradeIsAtomic(t *testing.T) {
 		if err := p.InitializeSchema(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.DB.QueryRow("SELECT version FROM mapi_private_par_schema").Scan(&got); err != nil || got != 7 {
+		if err := s.DB.QueryRow("SELECT version FROM mapi_private_par_schema").Scan(&got); err != nil || got != 8 {
 			t.Fatalf("successful migration version = %d, %v", got, err)
 		}
 	}

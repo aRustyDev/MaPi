@@ -14,4 +14,8 @@ func TestFAPIResourceScopesAreClientScoped(t *testing.T) {
 			t.Errorf("scope %q got %q err %v", tc.input, got, err)
 		}
 	}
+	if got, err := canonicalFAPIRefreshScopes("payments.read offline_access"); err != nil || got != "offline_access payments.read" {
+		t.Fatal("refresh scope subset without openid rejected")
+	}
+
 }

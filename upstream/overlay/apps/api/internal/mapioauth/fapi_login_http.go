@@ -35,8 +35,48 @@ func (h FAPILoginHTTP) Authorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+	requestURI := values.Get("request_uri")
+	if !strings.HasPrefix(requestURI, parPrefix) || !validLoginSecret(strings.TrimPrefix(requestURI, parPrefix)) {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	optionalCookie := func(name string) (string, bool) {
+		var value string
+		count := 0
+		for _, cookie := range r.Cookies() {
+			if cookie.Name == name {
+				value = cookie.Value
+				count++
+			}
+		}
+		return value, count <= 1
+	}
+	session, unique := optionalCookie("__Host-zitadel_session")
+	if !unique || len(session) > 8192 {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	reloadName := parReloadCookieName(requestURI)
+	reloadHandle, unique := optionalCookie(reloadName)
+	if !unique {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	if reloadHandle != "" {
+		if !validLoginSecret(reloadHandle) {
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+		binding, ok := uniqueCookie(r, loginBindingName(reloadHandle))
+		if !ok || resumeFAPIReload(r.Context(), h.Login, requestURI, values.Get("client_id"), reloadHandle, binding, session) != nil {
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, h.Origin+"/login?mapi_oauth="+url.QueryEscape(reloadHandle), http.StatusSeeOther)
+		return
+	}
 	var handle, binding string
-	err := h.Private.PAR.Consume(r.Context(), h.Private.PAR.ProjectID, values.Get("client_id"), values.Get("request_uri"), func(ctx context.Context, req PushedAuthorizationRequest) error {
+	err := h.Private.PAR.Consume(r.Context(), h.Private.PAR.ProjectID, values.Get("client_id"), requestURI, func(ctx context.Context, req PushedAuthorizationRequest) error {
 		redirect, err := url.Parse(req.RedirectURI)
 		if err != nil || redirect.Query().Has("iss") {
 			return errors.New("invalid redirect")
@@ -46,13 +86,17 @@ func (h FAPILoginHTTP) Authorize(w http.ResponseWriter, r *http.Request) {
 		}
 		var beginErr error
 		handle, binding, beginErr = h.Login.BeginInTransaction(ctx, req)
-		return beginErr
+		if beginErr != nil {
+			return beginErr
+		}
+		return recordFAPIReload(ctx, h.Login, requestURI, handle, binding, session, req)
 	})
 	if err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: loginBindingName(handle), Value: binding, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(h.Login.LoginTTL.Seconds())})
+	http.SetCookie(w, &http.Cookie{Name: reloadName, Value: handle, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(h.Private.PAR.TTL.Seconds())})
 	http.Redirect(w, r, h.Origin+"/login?mapi_oauth="+url.QueryEscape(handle), http.StatusSeeOther)
 }
 

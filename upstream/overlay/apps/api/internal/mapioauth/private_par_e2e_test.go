@@ -338,6 +338,7 @@ func TestPrivatePARRealClientAndDPoP(t *testing.T) {
 	exerciseJKTOnly(t, private, db, &now, client, jkt, assertion, proofSigner)
 	exerciseFAPIPolicies(t, private, db, client)
 	exerciseFAPIGenerationFence(t, private, db, now, client, jkt, assertion, proofSigner)
+	exerciseFAPIReload(t, private, db, &now, client, assertion)
 	badRedirect := url.Values{"client_id": {client}, "client_assertion_type": {privateKeyAssertionType}, "client_assertion": {assertion("invalid-redirect-assertion")}, "response_type": {"code"}, "redirect_uri": {"https://unregistered.example/callback"}, "scope": {"openid"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
 	if w := request(badRedirect, ""); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_request") {
 		t.Fatalf("unregistered redirect error: %d %s", w.Code, w.Body.String())

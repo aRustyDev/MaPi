@@ -18,7 +18,9 @@ func validFAPIScopeToken(s string) bool {
 	}
 	return true
 }
-func canonicalFAPIScopes(raw string) (string, error) {
+func canonicalFAPIScopes(raw string) (string, error)        { return canonicalFAPIScopeSet(raw, true) }
+func canonicalFAPIRefreshScopes(raw string) (string, error) { return canonicalFAPIScopeSet(raw, false) }
+func canonicalFAPIScopeSet(raw string, requireOpenID bool) (string, error) {
 	if len(raw) > 2048 {
 		return "", ErrInvalidPAR
 	}
@@ -42,11 +44,14 @@ func canonicalFAPIScopes(raw string) (string, error) {
 			extras = append(extras, scope)
 		}
 	}
-	if !seen["openid"] {
+	if requireOpenID && !seen["openid"] {
 		return "", ErrInvalidPAR
 	}
 	slices.Sort(extras)
-	result := []string{"openid"}
+	result := []string{}
+	if seen["openid"] {
+		result = append(result, "openid")
+	}
 	if seen["offline_access"] {
 		result = append(result, "offline_access")
 	}

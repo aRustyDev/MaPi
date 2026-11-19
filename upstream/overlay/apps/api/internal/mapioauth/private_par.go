@@ -130,10 +130,10 @@ func (p *PrivatePAR) InitializeSchema(ctx context.Context) error {
 		var version int
 		err := p.Store.DB.QueryRowContext(ctx, `SELECT version FROM mapi_private_par_schema WHERE singleton=1`).Scan(&version)
 		if err == nil {
-			if version < 1 || version > 7 {
+			if version < 1 || version > 8 {
 				return errors.New("unsupported private PAR schema version")
 			}
-			if version == 7 {
+			if version == 8 {
 				return nil
 			}
 			if version == 1 {
@@ -159,7 +159,13 @@ func (p *PrivatePAR) InitializeSchema(ctx context.Context) error {
 			if err := createFAPIPolicyBindings(ctx, p.Store); err != nil {
 				return err
 			}
-			_, err := p.Store.DB.ExecContext(ctx, `UPDATE mapi_private_par_schema SET version=7 WHERE singleton=1 AND version=?`, version)
+			if err = createFAPIPromptSchema(ctx, p.Store); err != nil {
+				return err
+			}
+			if err = createFAPIReloadSchema(ctx, p.Store); err != nil {
+				return err
+			}
+			_, err := p.Store.DB.ExecContext(ctx, `UPDATE mapi_private_par_schema SET version=8 WHERE singleton=1 AND version=?`, version)
 			return err
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -195,7 +201,13 @@ func (p *PrivatePAR) InitializeSchema(ctx context.Context) error {
 		if err = createFAPIPolicyBindings(ctx, p.Store); err != nil {
 			return err
 		}
-		_, err = p.Store.DB.ExecContext(ctx, `INSERT INTO mapi_private_par_schema(singleton,version) VALUES(1,7)`)
+		if err = createFAPIPromptSchema(ctx, p.Store); err != nil {
+			return err
+		}
+		if err = createFAPIReloadSchema(ctx, p.Store); err != nil {
+			return err
+		}
+		_, err = p.Store.DB.ExecContext(ctx, `INSERT INTO mapi_private_par_schema(singleton,version) VALUES(1,8)`)
 		return err
 	})
 }

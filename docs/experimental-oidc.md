@@ -228,7 +228,10 @@ rollback followed by a valid retry, replay rejection for both credentials,
 atomic PAR consumption and preservation of the DPoP thumbprint. The test-only
 probe uses a server-issued nonce scoped to the project, authenticated client,
 and PAR purpose. A separate, unmounted grant store preserves optional PAR
-code binding and requires a verified thumbprint for code exchange and refresh.
+code binding and requires a verified DPoP proof for code exchange and refresh.
+For these confidential clients, the refresh grant is bound to authenticated
+client identity and policy generation; a refresh may use a new DPoP key, and
+the resulting access token is bound to that newly verified key.
 `FAPIExchange` composes assertion and token-purpose nonce verification with a
 fresh DPoP proof, grant consumption, and required transactional session, mint
 and audit callbacks. Local composition tests use synthetic session and mint
@@ -236,14 +239,17 @@ callbacks. The separate `ComposePrivateFAPI` binds that exchange to Nextgen's
 transaction-scoped session and client reads, encrypted project key service and
 audit emitter. Code exchange signs an ES256 ID token containing the session,
 authentication time, optional request nonce and access-token hash; refresh
-responses omit it. Its experimental ES256 access token has a `cnf.jkt`, and its
+responses omit it. Refresh requests may request an equal or narrower scope,
+without changing or rotating the original refresh grant. Its experimental ES256
+access token has a `cnf.jkt`, and its
 resource validator checks issuer, audience, session, client, DPoP key and
 `ath` together with a server-issued resource nonce. A private revoker stores
 project-scoped token hashes and commits authenticated client revocation
 with its audit record. Its unmounted RFC 7009 adapter accepts access and refresh
 token revocation without a DPoP header; if a proof is provided it validates the
-nonce, replay and sender key without requiring `ath`. Resource use and refresh
-redemption still require DPoP.
+nonce and replay without requiring `ath`; for an access-token target, it also
+checks the token's sender key. Resource use and refresh redemption still require
+DPoP.
 The isolated native and
 workerd tests seed synthetic session records and exercise real session reads;
 they do not represent a complete browser login or a hosted measurement. The
@@ -257,11 +263,18 @@ pending login, authorization codes, access tokens and refresh tokens to the
 policy version at authorization. Any policy update invalidates those existing
 artifacts, including after a disable/regrant. Older pre-v7 artifacts lack the
 binding and fail closed; clients must authenticate again after upgrading. ID
-tokens are validated against the live session and client separately. An authenticated
+tokens are validated against the live session and client separately. Private schema v8 also requires
+persisted prompt state and a browser-bound reload mapping; pre-v8 pending PAR
+and login transactions fail closed. An authenticated
 operator interface for policy management is not implemented. `ValidateResource`
 validates identity and proof only and must not be treated as authorization.
 The private HTTP adapters are unmounted. Public ingress, an operator policy interface, key retirement, a
 full-stack hosted memory and CPU gate, and
 full protocol conformance remain unimplemented or unverified, so this is not an
-advertised FAPI profile. The existing production
-bearer profile remains separate and unchanged.
+advertised FAPI profile.
+
+The private FAPI profile intentionally keeps refresh tokens non-rotating, as
+required by FAPI 2.0 for ordinary use. The separate experimental bearer issuer
+retains rotation and reuse detection, as required by the MVP roadmap. Separate
+issuer/profile routing and conformance review remain a blocker before deployment;
+this FAPI experiment does not replace the requested rotating bearer default.

@@ -21,7 +21,7 @@ func ComposePrivateFAPILogin(p *PrivatePAR, pool *service.DB, tokens service.Tok
 	stmts := pool.Statements()
 	login := FAPILogin{Store: p.Store, ProjectID: p.PAR.ProjectID, LoginTTL: 5 * time.Minute, CodeTTL: time.Minute, Codes: p.Grants, CheckClient: p.PAR.CheckClient, PolicyVersion: p.PAR.PolicyVersion, Session: NextgenSessionValidator(tokens, sessions, p.Store.Now)}
 	login.Audit = func(ctx context.Context, operation string, g AuthorizationCode, _ string) error {
-		if operation != "login_started" && operation != "code_issued" {
+		if operation != "login_started" && operation != "code_issued" && operation != "login_denied" {
 			return errors.New("unknown FAPI login audit event")
 		}
 		spec := audit.EmitSpec{Type: domain.EventType("mapi.fapi." + operation), Category: domain.EventCategoryAuth, ProjectID: g.ProjectID, EntityType: "oauth_client", EntityID: g.ClientID, UserID: g.UserID}

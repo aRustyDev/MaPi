@@ -23,6 +23,8 @@ var (
 type PushedAuthorizationRequest struct {
 	ProjectID, ClientID, RedirectURI, Scope, State, Nonce, CodeChallenge, DPoPJKT string
 	PolicyVersion                                                                 int64
+	Prompt                                                                        string
+	ExpiresAt                                                                     time.Time
 }
 
 // PARStore is a private FAPI-oriented building block. All hooks must use the
@@ -66,7 +68,10 @@ func (p PARStore) CreatePARSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return createFAPIPolicyBindings(ctx, p.Store)
+	if err = createFAPIPolicyBindings(ctx, p.Store); err != nil {
+		return err
+	}
+	return createFAPIPromptSchema(ctx, p.Store)
 }
 
 // Push performs client authentication, request validation, DPoP binding and
@@ -83,11 +88,11 @@ func (p PARStore) Push(ctx context.Context, r *http.Request, form url.Values) (s
 	if r.Host != endpoint.Host || r.URL.Path != endpoint.Path || r.URL.RawQuery != "" || (r.TLS == nil && r.URL.Scheme != "https") {
 		return "", ErrInvalidPAR
 	}
-	allowed := map[string]bool{"client_id": true, "client_assertion_type": true, "client_assertion": true, "response_type": true, "redirect_uri": true, "scope": true, "state": true, "nonce": true, "code_challenge": true, "code_challenge_method": true, "dpop_jkt": true}
+	allowed := map[string]bool{"client_id": true, "client_assertion_type": true, "client_assertion": true, "response_type": true, "redirect_uri": true, "scope": true, "state": true, "nonce": true, "code_challenge": true, "code_challenge_method": true, "dpop_jkt": true, "prompt": true}
 	// Unknown OAuth parameters are ignored. Recognized parameters with
 	// semantics this narrow profile does not implement are rejected explicitly,
 	// rather than silently treating e.g. prompt=none as an interactive request.
-	unsupported := map[string]bool{"request_uri": true, "request": true, "client_secret": true, "prompt": true, "max_age": true, "claims": true, "authorization_details": true, "resource": true, "response_mode": true, "login_hint": true, "id_token_hint": true}
+	unsupported := map[string]bool{"request_uri": true, "request": true, "client_secret": true, "max_age": true, "claims": true, "authorization_details": true, "resource": true, "response_mode": true, "login_hint": true, "id_token_hint": true}
 	for name, values := range form {
 		if len(values) != 1 || (!allowed[name] && unsupported[name]) {
 			return "", ErrInvalidPAR
@@ -101,6 +106,10 @@ func (p PARStore) Push(ctx context.Context, r *http.Request, form url.Values) (s
 	}
 	scope, err := canonicalFAPIScopes(form.Get("scope"))
 	if err != nil {
+		return "", ErrInvalidPAR
+	}
+	prompt := form.Get("prompt")
+	if values, present := form["prompt"]; present && (len(values) != 1 || values[0] != "consent") {
 		return "", ErrInvalidPAR
 	}
 	requestedJKT := form.Get("dpop_jkt")
@@ -118,7 +127,7 @@ func (p PARStore) Push(ctx context.Context, r *http.Request, form url.Values) (s
 		return "", err
 	}
 	hash := sha256.Sum256([]byte(handle))
-	request := PushedAuthorizationRequest{ProjectID: p.ProjectID, ClientID: form.Get("client_id"), RedirectURI: form.Get("redirect_uri"), Scope: scope, State: form.Get("state"), Nonce: form.Get("nonce"), CodeChallenge: form.Get("code_challenge")}
+	request := PushedAuthorizationRequest{ProjectID: p.ProjectID, ClientID: form.Get("client_id"), RedirectURI: form.Get("redirect_uri"), Scope: scope, State: form.Get("state"), Nonce: form.Get("nonce"), CodeChallenge: form.Get("code_challenge"), Prompt: prompt}
 	err = p.Store.Transaction(func() error {
 		clientID, err := p.Authenticate(ctx, r, form)
 		if err != nil {
@@ -163,6 +172,9 @@ func (p PARStore) Push(ctx context.Context, r *http.Request, form url.Values) (s
 		if err = bindFAPIPolicy(ctx, p.Store, "par", hash[:], request.ProjectID, clientID, request.PolicyVersion, p.Store.Now().Add(p.TTL)); err != nil {
 			return err
 		}
+		if err = putFAPIPrompt(ctx, p.Store, "par", hash[:], request.Prompt); err != nil {
+			return err
+		}
 		return p.Audit(ctx, "pushed", request)
 	})
 	if err != nil {
@@ -203,6 +215,14 @@ func (p PARStore) Consume(ctx context.Context, projectID, clientID, requestURI s
 		if err := p.CheckClient(ctx, projectID, clientID, request.RedirectURI, request.Scope); err != nil {
 			return err
 		}
+		request.ExpiresAt = time.UnixMilli(expires)
+		request.Prompt, err = getFAPIPrompt(ctx, p.Store, "par", hash[:])
+		if errors.Is(err, ErrFAPIPolicyDenied) {
+			return ErrInvalidPAR
+		}
+		if err != nil {
+			return err
+		}
 		request.PolicyVersion, err = getFAPIPolicyBinding(ctx, p.Store, "par", hash[:], projectID, clientID)
 		if errors.Is(err, ErrFAPIPolicyDenied) {
 			return ErrInvalidPAR
@@ -219,6 +239,9 @@ func (p PARStore) Consume(ctx context.Context, projectID, clientID, requestURI s
 		}
 		if current != request.PolicyVersion {
 			return ErrInvalidPAR
+		}
+		if err = deleteFAPIPrompt(ctx, p.Store, "par", hash[:]); err != nil {
+			return err
 		}
 		if err = deleteFAPIPolicyBinding(ctx, p.Store, "par", hash[:]); err != nil {
 			return err

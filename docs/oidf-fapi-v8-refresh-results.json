@@ -1,0 +1,64 @@
+{
+  "plan": "fapi2-security-profile-final-test-plan",
+  "variant": {
+    "fapi_profile": "plain_fapi",
+    "authorization_request_type": "simple",
+    "client_auth_type": "private_key_jwt",
+    "openid": "openid_connect",
+    "sender_constrain": "dpop",
+    "grant_management": "disabled"
+  },
+  "configuredModules": 53,
+  "attempted": 3,
+  "outcomes": [
+    {
+      "module": "fapi2-security-profile-final-user-rejects-authentication",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 2,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-refresh-token",
+      "status": "INTERRUPTED",
+      "result": "FAILED",
+      "failures": [
+        "CheckTokenEndpointHttpStatus200",
+        "CheckIfTokenEndpointResponseError"
+      ],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "continued": true
+      }
+    },
+    {
+      "module": "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds",
+      "status": "FINISHED",
+      "result": "PASSED",
+      "failures": [],
+      "browserInfo": {
+        "visits": 1,
+        "http": 200,
+        "path": "/login",
+        "queryKeys": [
+          "mapi_oauth"
+        ],
+        "reloaded": true,
+        "continued": true
+      }
+    }
+  ]
+}

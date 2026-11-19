@@ -141,7 +141,7 @@ func (p FAPIResourcePolicies) require(ctx context.Context, clientID, scope strin
 	if !value.Enabled {
 		return FAPIClientPolicy{}, ErrFAPIPolicyDenied
 	}
-	canonical, err := canonicalFAPIScopes(scope)
+	canonical, err := canonicalFAPIRefreshScopes(scope)
 	if err != nil || canonical != scope {
 		return FAPIClientPolicy{}, ErrFAPIPolicyDenied
 	}

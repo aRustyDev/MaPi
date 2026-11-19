@@ -100,17 +100,15 @@ func (r FAPIRevoker) RevokeAccess(ctx context.Context, req FAPIRevokeRequest) er
 		// foreign tokens take the same successful response without audit or change.
 		hash := sha256.Sum256([]byte(req.Token))
 		var id AccessIdentity
-		var jkt string
-		err := p.Store.DB.QueryRowContext(ctx, `SELECT client_id,user_id,session_id,scope,dpop_jkt FROM mapi_fapi_refresh_tokens WHERE token_hash=? AND project_id=? AND client_id=? AND revoked_at IS NULL`, hash[:], i.Keys.ProjectID, req.ClientID).Scan(&id.ClientID, &id.Subject, &id.SessionID, &id.Scope, &jkt)
+		err := p.Store.DB.QueryRowContext(ctx, `SELECT client_id,user_id,session_id,scope FROM mapi_fapi_refresh_tokens WHERE token_hash=? AND project_id=? AND client_id=? AND revoked_at IS NULL`, hash[:], i.Keys.ProjectID, req.ClientID).Scan(&id.ClientID, &id.Subject, &id.SessionID, &id.Scope)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if proofJKT != "" && subtle.ConstantTimeCompare([]byte(proofJKT), []byte(jkt)) != 1 {
-			return nil
-		}
+		// Confidential refresh tokens are bound to the authenticated client,
+		// not to its current DPoP key; a verified key may rotate.
 		changed, err := p.Grants.RevokeRefreshInTransaction(ctx, req.Token, req.ClientID)
 		if err != nil || !changed {
 			return err

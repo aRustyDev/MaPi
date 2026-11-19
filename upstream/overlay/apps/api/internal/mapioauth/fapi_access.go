@@ -44,6 +44,7 @@ type fapiAccessResponse struct {
 	AccessToken  string `json:"access_token"`
 	IDToken      string `json:"id_token,omitempty"`
 	TokenType    string `json:"token_type"`
+	Scope        string `json:"scope"`
 	ExpiresIn    int64  `json:"expires_in"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 }
@@ -89,7 +90,7 @@ func (i FAPIAccessIssuer) Mint(ctx context.Context, g FAPIExchangeGrant) ([]byte
 	if !i.valid() {
 		return nil, errors.New("FAPI access issuer not configured")
 	}
-	if g.ProjectID != i.Keys.ProjectID || g.ClientID == "" || g.UserID == "" || g.SessionID == "" || !validLoginSecret(g.DPoPJKT) || !strings.Contains(" "+g.Scope+" ", " openid ") {
+	if g.ProjectID != i.Keys.ProjectID || g.ClientID == "" || g.UserID == "" || g.SessionID == "" || !validLoginSecret(g.DPoPJKT) || (!g.FromRefresh && !strings.Contains(" "+g.Scope+" ", " openid ")) {
 		return nil, ErrInvalidCode
 	}
 	if err := i.client(ctx, g.ClientID); err != nil {
@@ -137,7 +138,7 @@ func (i FAPIAccessIssuer) Mint(ctx context.Context, g FAPIExchangeGrant) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	response := fapiAccessResponse{AccessToken: token, TokenType: "DPoP", ExpiresIn: int64(end.Sub(now).Seconds())}
+	response := fapiAccessResponse{AccessToken: token, TokenType: "DPoP", Scope: g.Scope, ExpiresIn: int64(end.Sub(now).Seconds())}
 	if !g.FromRefresh {
 		response.IDToken, err = i.mintID(ctx, g, token, now, end, authTime)
 		if err != nil {
@@ -317,12 +318,15 @@ func (i FAPIAccessIssuer) signedAccess(ctx context.Context, token, audience stri
 		return fapiAccessClaims{}, ErrInvalidAccess
 	}
 	now := i.Private.Store.Now()
-	if now.IsZero() || claims.Expiry == nil || claims.IssuedAt == nil || claims.Subject == "" || claims.ID == "" || claims.SessionID == "" || claims.ClientID == "" || len(claims.Audience) != 1 || claims.Audience[0] == "" || (audience != "" && claims.Audience[0] != audience) || !validLoginSecret(claims.Confirmation.JKT) || !strings.Contains(" "+claims.Scope+" ", " openid ") {
+	if now.IsZero() || claims.Expiry == nil || claims.IssuedAt == nil || claims.Subject == "" || claims.ID == "" || claims.SessionID == "" || claims.ClientID == "" || len(claims.Audience) != 1 || claims.Audience[0] == "" || (audience != "" && claims.Audience[0] != audience) || !validLoginSecret(claims.Confirmation.JKT) {
 		return fapiAccessClaims{}, ErrInvalidAccess
 	}
 	expected := jwt.Expected{Issuer: i.Private.Assertions.Issuer, Time: now}
 	if audience != "" {
 		expected.AnyAudience = jwt.Audience{audience}
+	}
+	if canonical, scopeErr := canonicalFAPIRefreshScopes(claims.Scope); scopeErr != nil || canonical != claims.Scope {
+		return fapiAccessClaims{}, ErrInvalidAccess
 	}
 	if err = claims.ValidateWithLeeway(expected, 0); err != nil || !claims.Expiry.Time().After(now) || claims.IssuedAt.Time().After(now) {
 		return fapiAccessClaims{}, ErrInvalidAccess

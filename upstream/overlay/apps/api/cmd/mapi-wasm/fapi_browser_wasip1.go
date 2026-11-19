@@ -138,7 +138,7 @@ func fapiBrowserRequest() uint64 {
 	case "/oauth/" + args.ProjectID + "/authorize":
 		loginHTTP.Authorize(w, r)
 	case "/oauth/continue":
-		loginHTTP.ServeHTTP(w, r)
+		mapioauth.FAPIConsentHTTP{Login: login, Origin: args.Origin, Issuer: issuer}.ServeHTTP(w, r)
 	case "/oauth/" + args.ProjectID + "/token":
 		mapioauth.FAPITokenHTTP{Exchange: c.Exchange}.ServeHTTP(w, r)
 	case "/oauth/" + args.ProjectID + "/resource":

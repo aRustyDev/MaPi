@@ -23,6 +23,9 @@ func bindFAPIPolicy(ctx context.Context, s Store, kind string, hash []byte, proj
 	if s.DB == nil || s.Now == nil || kind == "" || len(hash) != 32 || project == "" || client == "" || version <= 0 || expiry.IsZero() || s.Now().IsZero() || !expiry.After(s.Now()) {
 		return errors.New("invalid FAPI policy binding")
 	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM mapi_fapi_prompts WHERE (kind,token_hash) IN (SELECT kind,token_hash FROM mapi_fapi_policy_bindings WHERE project_id=? AND expires_at<=? ORDER BY expires_at LIMIT 100)`, project, s.Now().UnixMilli()); err != nil {
+		return err
+	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM mapi_fapi_policy_bindings WHERE rowid IN (SELECT rowid FROM mapi_fapi_policy_bindings WHERE project_id=? AND expires_at<=? ORDER BY expires_at LIMIT 100)`, project, s.Now().UnixMilli()); err != nil {
 		return err
 	}

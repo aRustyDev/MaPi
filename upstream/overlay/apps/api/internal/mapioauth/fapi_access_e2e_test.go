@@ -4,6 +4,7 @@ package mapioauth
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -182,13 +183,108 @@ func exerciseFAPIAccess(t *testing.T, p *PrivatePAR, pool *service.DB, db *sql.D
 	refreshReq.Assertion = assertion("fapi-id-refresh-assertion")
 	refreshReq.Proof = freshProof("fapi-id-refresh-proof")
 	refreshReq.RefreshToken = response.RefreshToken
+	refreshReq.ScopeProvided = true
+	refreshReq.Scope = "openid payments.write"
+	if _, err = exchange.ExchangeRefresh(ctx, refreshReq); !errors.Is(err, ErrInvalidRefreshScope) {
+		t.Fatalf("expanded refresh scope accepted: %v", err)
+	}
+	// The rejected expansion rolls back assertion and proof replay records.
+	refreshReq.Scope = "offline_access openid"
 	refreshRaw, err := exchange.ExchangeRefresh(ctx, refreshReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var refreshed fapiAccessResponse
-	if err = json.Unmarshal(refreshRaw, &refreshed); err != nil || refreshed.IDToken != "" || refreshed.RefreshToken != "" {
+	if err = json.Unmarshal(refreshRaw, &refreshed); err != nil || refreshed.IDToken != "" || refreshed.RefreshToken != "" || refreshed.Scope != "openid offline_access" {
 		t.Fatalf("refresh returned an unexpected ID or replacement refresh token: %v", err)
+	}
+	refreshReq.Assertion = assertion("fapi-id-refresh-subset-assertion")
+	refreshReq.Proof = freshProof("fapi-id-refresh-subset-proof")
+	refreshReq.Scope = "openid"
+	subsetRaw, err := exchange.ExchangeRefresh(ctx, refreshReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var subset fapiAccessResponse
+	if err = json.Unmarshal(subsetRaw, &subset); err != nil || subset.Scope != "openid" || subset.RefreshToken != "" {
+		t.Fatal("refresh scope was not narrowed")
+	}
+	refreshReq.Assertion = assertion("fapi-refresh-without-openid-assertion")
+	refreshReq.Proof = freshProof("fapi-refresh-without-openid-proof")
+	refreshReq.Scope = "offline_access"
+	withoutOpenID, err := exchange.ExchangeRefresh(ctx, refreshReq)
+	if err != nil {
+		t.Fatalf("refresh subset without openid: %v", err)
+	}
+	var noOIDC fapiAccessResponse
+	if err = json.Unmarshal(withoutOpenID, &noOIDC); err != nil || noOIDC.Scope != "offline_access" || noOIDC.IDToken != "" {
+		t.Fatal("non-OIDC refresh subset incorrect")
+	}
+	// Narrowing one response does not narrow or rotate the original grant.
+	refreshReq.Assertion = assertion("fapi-id-refresh-full-assertion")
+	refreshReq.Proof = freshProof("fapi-id-refresh-full-proof")
+	refreshReq.Scope = "openid offline_access"
+	if _, err = exchange.ExchangeRefresh(ctx, refreshReq); err != nil {
+		t.Fatalf("original refresh grant changed: %v", err)
+	}
+	// A confidential client can use a new DPoP key at refresh. Its private
+	// client assertion authenticates the grant, and the new access token must
+	// bind to the new proof key, not the original authorization-code key.
+	rotatedKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedJWK := jose.JSONWebKey{Key: &rotatedKey.PublicKey}
+	rotatedThumb, err := rotatedJWK.Thumbprint(crypto.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedJKT := base64.RawURLEncoding.EncodeToString(rotatedThumb)
+	rotatedSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: rotatedKey}, (&jose.SignerOptions{}).WithHeader("typ", "dpop+jwt").WithHeader("jwk", rotatedJWK))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedProof, err := jwt.Signed(rotatedSigner).Claims(map[string]any{"jti": "fapi-rotated-refresh-proof", "htm": "POST", "htu": p.Assertions.Issuer + "/token", "iat": now.Unix(), "nonce": tokenNonce}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshReq.Assertion = assertion("fapi-rotated-refresh-assertion")
+	refreshReq.Proof = rotatedProof
+	refreshReq.ScopeProvided = false
+	refreshReq.Scope = ""
+	unauthenticated := refreshReq
+	unauthenticated.Assertion = "invalid"
+	if _, err = exchange.ExchangeRefresh(ctx, unauthenticated); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("unauthenticated refresh accepted: %v", err)
+	}
+	missingProof := refreshReq
+	missingProof.Proof = ""
+	if _, err = exchange.ExchangeRefresh(ctx, missingProof); !errors.Is(err, ErrInvalidDPoP) {
+		t.Fatalf("refresh without proof accepted: %v", err)
+	}
+	rotatedRaw, err := exchange.ExchangeRefresh(ctx, refreshReq)
+	if err != nil {
+		t.Fatalf("confidential DPoP key rotation: %v", err)
+	}
+	var rotatedResponse fapiAccessResponse
+	if err = json.Unmarshal(rotatedRaw, &rotatedResponse); err != nil {
+		t.Fatal(err)
+	}
+	rotatedJWT, err := jwt.ParseSigned(rotatedResponse.AccessToken, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedKeys, err := keys.PublicKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedMatches := rotatedKeys.Key(rotatedJWT.Headers[0].KeyID)
+	if len(rotatedMatches) != 1 {
+		t.Fatal("rotated access signer missing")
+	}
+	var rotatedClaims fapiAccessClaims
+	if err = rotatedJWT.Claims(rotatedMatches[0].Key, &rotatedClaims); err != nil || rotatedClaims.Confirmation.JKT != rotatedJKT || rotatedJKT == jkt {
+		t.Fatal("new access token not bound to refreshed DPoP key")
 	}
 	emptyNonceGrant := grant
 	emptyNonceGrant.Nonce = ""
@@ -221,6 +317,16 @@ func exerciseFAPIAccess(t *testing.T, p *PrivatePAR, pool *service.DB, db *sql.D
 	resNonce, err := p.Nonces.Issue(ctx, mapidpop.NonceScope{ProjectID: project, ClientID: client, Purpose: "resource"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	rotatedResourceHash := sha256.Sum256([]byte(rotatedResponse.AccessToken))
+	rotatedATH := base64.RawURLEncoding.EncodeToString(rotatedResourceHash[:])
+	rotatedResourceURL := "https://api.example/resource"
+	rotatedResourceProof, err := jwt.Signed(rotatedSigner).Claims(map[string]any{"jti": "fapi-rotated-resource", "htm": "GET", "htu": rotatedResourceURL, "iat": now.Unix(), "nonce": resNonce, "ath": rotatedATH}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = issuer.ValidateResource(ctx, rotatedResponse.AccessToken, rotatedResourceProof, "GET", rotatedResourceURL, client); err != nil {
+		t.Fatalf("new DPoP key could not use refreshed access token: %v", err)
 	}
 	tokenHash := sha256.Sum256([]byte(response.AccessToken))
 	ath := base64.RawURLEncoding.EncodeToString(tokenHash[:])

@@ -39,6 +39,7 @@ export class FAPIAppTest extends DurableObject {
   const session=upstream('POST',`/sessions/exchange?project_id=${encodeURIComponent(project)}`,{handoff_token:flow.handoff_token},true);
   const cookie=session.headers['Set-Cookie']?.[0]?.split(';')[0];if(!cookie||!cookie.includes('='))throw Error('missing upstream session cookie');
   const credential=decodeURIComponent(cookie.slice(cookie.indexOf('=')+1));
+  const reload=call('mapi_fapi_reload_probe',{projectId:project,origin,sessionCredential:credential});if(!reload.ok)throw Error('private FAPI reload probe failed');
   const result=call('mapi_fapi_app_probe',{projectId:project,origin,sessionCredential:credential,userId:session.data.session.user_id,sessionId:session.data.session.session_id});
   if(!result.ok||result.tokenType!=='DPoP')throw Error('private FAPI journey failed');
   return {ok:true,memoryBytes:memory().byteLength,elapsedMs:Date.now()-started};

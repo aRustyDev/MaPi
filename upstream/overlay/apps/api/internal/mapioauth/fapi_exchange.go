@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/zitadel/nextgen/internal/mapidpop"
@@ -29,9 +30,13 @@ type FAPIExchangeGrant struct {
 	PolicyVersion                                                 int64
 }
 
+var ErrInvalidRefreshScope = errors.New("invalid refresh scope")
+
 type FAPIExchangeRequest struct {
 	ClientID, AssertionType, Assertion, Proof string
 	Code, RedirectURI, Verifier, RefreshToken string
+	Scope                                     string
+	ScopeProvided                             bool
 }
 
 func (x FAPIExchange) exchange(ctx context.Context, req FAPIExchangeRequest, refresh bool) ([]byte, error) {
@@ -77,6 +82,19 @@ func (x FAPIExchange) exchange(ctx context.Context, req FAPIExchangeRequest, ref
 				return err
 			}
 			g = FAPIExchangeGrant{ProjectID: v.ProjectID, ClientID: v.ClientID, UserID: v.UserID, SessionID: v.SessionID, Scope: v.Scope, DPoPJKT: v.DPoPJKT, FromRefresh: true, PolicyVersion: v.PolicyVersion}
+			if req.ScopeProvided {
+				requested, err := canonicalFAPIRefreshScopes(req.Scope)
+				if err != nil {
+					return ErrInvalidRefreshScope
+				}
+				original := strings.Fields(v.Scope)
+				for _, scope := range strings.Fields(requested) {
+					if !slices.Contains(original, scope) {
+						return ErrInvalidRefreshScope
+					}
+				}
+				g.Scope = requested
+			}
 		} else {
 			v, err := p.Grants.ConsumeCodeInTransaction(ctx, req.Code, req.ClientID, req.RedirectURI, req.Verifier, proof.Thumbprint)
 			if err != nil {
@@ -129,8 +147,9 @@ func (x FAPIExchange) ExchangeCode(ctx context.Context, req FAPIExchangeRequest)
 	return x.exchange(ctx, req, false)
 }
 
-// ExchangeRefresh verifies a fresh proof bound to the non-rotating grant and
-// repeats session, mint and audit checks in the same transaction.
+// ExchangeRefresh authenticates the confidential client and verifies a fresh
+// DPoP proof. It binds the new access token to that proof key and repeats the
+// session, policy-generation, mint and audit checks in one transaction.
 func (x FAPIExchange) ExchangeRefresh(ctx context.Context, req FAPIExchangeRequest) ([]byte, error) {
 	return x.exchange(ctx, req, true)
 }
