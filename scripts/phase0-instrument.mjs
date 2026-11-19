@@ -1,0 +1,29 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+const path = 'worker/app.js';
+let src = readFileSync(path, 'utf8');
+const before = '  testRecovery(email, password) {';
+const method = `  // Phase 0 isolated rehearsal only; never deploy as an application endpoint.
+  phase0Proof(args) {
+    if (this.env.MAPI_PHASE0_PROOF !== "1") throw new Error("Proof disabled");
+    if (args.action === "mint") return this.#mintHandoff(args.email, args.password);
+    if (args.action === "exchange") return { status: this.#exchangeHandoff(args.handoff).status };
+    if (args.action === "counts") {
+      const sql = this.ctx.storage.sql;
+      return { users: sql.exec("SELECT COUNT(*) AS n FROM users").one().n, events: sql.exec("SELECT COUNT(*) AS n FROM events").one().n, recoveryEvents: sql.exec("SELECT COUNT(*) AS n FROM events WHERE event_type = ?", "mapi.recovery.completed").one().n };
+    }
+    throw new Error("Unknown proof action");
+  }
+
+`;
+if (!src.includes(before)) throw Error('method insertion point missing');
+src = src.replace(before, method + before);
+const route = '    if (["/_mapi/admin/status",';
+const proof = `    if (url.pathname === "/_mapi/phase0-proof" && request.method === "POST" && env.MAPI_PHASE0_PROOF === "1") {
+      if (!env.MAPI_OPERATOR_TOKEN || !sameKey(request.headers.get("authorization"), "Bearer " + env.MAPI_OPERATOR_TOKEN)) return new Response(null, {status: 404});
+      try { return Response.json(await object.phase0Proof(JSON.parse(await readLimited(request, 4096))), {headers: noStore}); }
+      catch { return new Response(null, {status: 503, headers: noStore}); }
+    }
+`;
+if (!src.includes(route)) throw Error('route insertion point missing');
+src = src.replace(route, proof + route);
+writeFileSync(path, src);
