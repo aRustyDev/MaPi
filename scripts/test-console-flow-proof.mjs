@@ -64,8 +64,15 @@ try{
  assert.equal((await send(origin,sessionPath,{headers:{cookie:cookieHeader,origin:other}})).status,403);
  assert.equal((await send(origin,`/api/v1/sessions/me?project_id=${foreignProject}`,{headers:{cookie:cookieHeader}})).status,403);
  assert.equal((await send(other,`/api/v1/sessions/me?project_id=${foreignProject}`,{headers:{cookie:cookieHeader}})).status,401);
- assert.equal((await send(origin,sessionPath,{method:'DELETE',headers:{cookie:cookieHeader}})).status,405);
+ assert.equal((await send(origin,sessionPath,{method:'DELETE',headers:{cookie:cookieHeader}})).status,403);
  assert.equal((await send(origin,sessionPath+'&project_id='+project,{headers:{cookie:cookieHeader}})).status,403);
+ const csrfPath=`/api/v1/sessions/me/csrf?project_id=${encodeURIComponent(project)}`;
+ const csrfResponse=await send(origin,csrfPath,{headers:{cookie:cookieHeader}});assert.equal(csrfResponse.status,200);const csrf=(await csrfResponse.json()).csrf_token;assert.ok(csrf);
+ assert.equal((await send(origin,sessionPath,{method:'DELETE',headers:{cookie:cookieHeader,origin:other,'x-zitadel-csrf':csrf}})).status,403);
+ assert.equal((await send(origin,sessionPath,{method:'DELETE',headers:{cookie:cookieHeader,origin}})).status,403);
+ assert.equal((await send(origin,sessionPath,{method:'DELETE',headers:{cookie:cookieHeader,origin,'x-zitadel-csrf':'invalid'}})).status,403);
+ const logout=await send(origin,sessionPath,{method:'DELETE',headers:{cookie:cookieHeader,origin,'x-zitadel-csrf':csrf}});assert.equal(logout.status,204);const clearing=logout.headers.get('set-cookie')??'';assert.match(clearing,/zitadel_session=/);assert.match(clearing,/max-age=0/i);
+ assert.equal((await send(origin,sessionPath,{headers:{cookie:cookieHeader}})).status,401,'revoked cookie remained valid');
  assert.deepEqual(errors,[]);assert.equal(external.length,0,'browser contacted an external origin');
- console.log('Real local Console: official component password flow, session exchange, wrong password and project/origin fencing passed.');
+ console.log('Real local Console: official password flow, session exchange, CSRF logout, replay rejection and project/origin fencing passed.');
 }catch(e){if(logs)console.error(logs);throw e;}finally{await browser?.close();if(server&&server.exitCode===null&&server.signalCode===null){const done=once(server,'exit');server.kill('SIGTERM');await done;}await rm(dir,{recursive:true,force:true});}
