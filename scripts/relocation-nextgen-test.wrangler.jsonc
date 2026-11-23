@@ -1,0 +1,10 @@
+{
+  "name": "mapi-relocation-nextgen-test",
+  "main": "relocation-nextgen-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": {
+    "bindings": [{ "name": "PROJECT", "class_name": "NextgenRelocation" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenRelocation"] }]
+}

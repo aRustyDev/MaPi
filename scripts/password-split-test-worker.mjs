@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { verifySplit, SplitBusy, SplitStale, SplitUnavailable } from './password-split-protocol.mjs';
+import { verifySplitUnsafeForTest as verifySplit, SplitBusy, SplitStale, SplitUnavailable } from './password-split-protocol.mjs';
 
 export class PasswordSplitTest extends DurableObject {
  async run(){
@@ -47,9 +47,21 @@ export class PasswordSplitTest extends DurableObject {
   }
   reset();const first=deferred(),pending=run(()=>first.promise);await expect(run(async()=>({verified:true})),SplitBusy);first.resolve({verified:true});if(!await pending||count('audit')!==1)throw Error('concurrent exchange');
   reset();const expiry=deferred(),expired=run(()=>expiry.promise);clock=2000;expiry.resolve({verified:true});await expect(expired,SplitStale);clock=1000;
+  // Counterexample only: the protocol observes a frozen clock throughout the
+  // last transaction while an independent test oracle advances past expiry
+  // immediately before the success mutation. This models a possible elapsed
+  // interval; the oracle is not an actual workerd wall-clock measurement.
+  reset();let oracle=1000;
+  const late=await verifySplit({...args,verify:async()=>({verified:true}),success:()=>{
+   if(clock!==1000||oracle!==1000)throw Error('invalid frozen-clock fixture');
+   oracle=2001;success();
+  }});
+  if(!late||oracle<=row().expires_at||clock>=row().expires_at||row().factor!==1||count('audit')!==1||count('split_jobs')!==0)throw Error('frozen-clock counterexample changed');
+  await expect(run(async()=>({verified:true})),SplitStale);
+  if(row().factor!==1||count('audit')!==1||count('split_jobs')!==0)throw Error('late proof replay changed state');
   reset();const old=deferred(),oldJob=run(()=>old.promise);clock=2000;await expect(run(async()=>({verified:true})),SplitStale);clock=1000;old.resolve({verified:true});await oldJob;
   reset();const lost=deferred(),firstLease=run(()=>lost.promise);clock=2000;sql.exec('UPDATE fixture SET expires_at=4000');const fresh=deferred(),second=run(()=>fresh.promise);lost.resolve({verified:true});await expect(firstLease,SplitStale);if(count('split_jobs')!==1)throw Error('old job removed newer lease');fresh.resolve({verified:true});if(!await second)throw Error('expired lease retry');clock=1000;
-  return {ok:true,races:calls};
+  return {ok:true,races:calls,frozenClockCounterexample:true};
  }
 }
 export default{async fetch(_request,env){try{return Response.json(await env.SPLIT.getByName('isolated').run());}catch(error){return Response.json({ok:false,error:String(error)},{status:500});}}};

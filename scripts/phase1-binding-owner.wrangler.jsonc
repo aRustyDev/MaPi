@@ -1,0 +1,11 @@
+{
+  "name": "mapi-phase1-owner-local",
+  "main": "phase1-binding-owner-worker.mjs",
+  "compatibility_date": "2026-11-19",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [
+    { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" },
+    { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "ProjectRegistry"] }]
+}

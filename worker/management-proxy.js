@@ -1,3 +1,5 @@
+import { logOverload } from './runtime-diagnostics.js';
+import { readBoundedBody } from './request-body.js';
 // Opt-in proxy for the experimental upstream user read/query adapter. It is
 // deliberately not mounted by app.js. Routing and credentials remain separate.
 const noStore = { 'cache-control': 'no-store' };
@@ -14,22 +16,16 @@ export function isManagementRoute(method, path) {
     (method === 'GET' && /^\/users\/user_[A-Za-z0-9_-]+$/.test(normalized));
 }
 
-async function boundedBody(request) {
-  if (!request.body) return new Uint8Array();
-  const reader = request.body.getReader();
-  const chunks = [];
-  let length = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    length += value.length;
-    if (length > maxBody) { await reader.cancel(); return null; }
-    chunks.push(value);
-  }
-  const body = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.length; }
-  return body;
+export function isValidManagementRoute(route, origin) {
+  return !!route && route.origin === origin &&
+    typeof route.object_name === 'string' && !!route.object_name &&
+    typeof route.project_id === 'string' && /^proj_[A-Za-z0-9_-]+$/.test(route.project_id);
+}
+
+// Existing projects under route maintenance return a retryable response;
+// absent, mismatched and pending routes retain their normal 404 behavior.
+export function isManagementRouteUnavailable(route) {
+  return ["moving", "recovering", "migrating"].includes(route?.state);
 }
 
 /**
@@ -42,11 +38,11 @@ export async function handleManagementIngress(request, registry, namespace) {
   if (!isManagementRoute(request.method, url.pathname)) return new Response(null, { status: 404, headers: noStore });
   try {
     const route = await registry.resolve(url.origin);
-    if (!route || route.state !== 'active' || route.origin !== url.origin ||
-        typeof route.object_name !== 'string' || !route.object_name ||
-        typeof route.project_id !== 'string' || !/^proj_[A-Za-z0-9_-]+$/.test(route.project_id)) {
+    if (!isValidManagementRoute(route, url.origin)) {
       return new Response(null, { status: 404, headers: noStore });
     }
+    if (isManagementRouteUnavailable(route)) return new Response(null, { status: 503, headers: noStore });
+    if (route.state !== 'active') return new Response(null, { status: 404, headers: noStore });
     const object = namespace.getByName(route.object_name);
     if (await object.identity() !== route.project_id) return new Response(null, { status: 503, headers: noStore });
     const origin = request.headers.get('origin');
@@ -58,7 +54,7 @@ export async function handleManagementIngress(request, registry, namespace) {
     if (projects.length > 1 || projects.some((project) => project !== route.project_id)) {
       return new Response(null, { status: 403, headers: noStore });
     }
-    const body = await boundedBody(request);
+    const body = await readBoundedBody(request, maxBody);
     if (body === null) return new Response(null, { status: 413, headers: noStore });
     const headers = {};
     for (const name of acceptedHeaders) if (request.headers.has(name)) headers[name] = [request.headers.get(name)];
@@ -68,6 +64,9 @@ export async function handleManagementIngress(request, registry, namespace) {
     const result = await object.handleRequest({
       method: request.method, url: target.toString(), headers,
       body: body.toBase64(), peer: request.headers.get('cf-connecting-ip') ?? '127.0.0.1',
+    }, {
+      projectId: route.project_id, origin: route.origin,
+      objectName: route.object_name, generation: route.generation,
     });
     const outgoing = new Headers(noStore);
     for (const [name, values] of Object.entries(result.headers ?? {})) {
@@ -75,7 +74,8 @@ export async function handleManagementIngress(request, registry, namespace) {
     }
     const responseBody = result.body && ![204, 205, 304].includes(result.status) ? Uint8Array.fromBase64(result.body) : null;
     return new Response(responseBody, { status: result.status, headers: outgoing });
-  } catch {
+  } catch (error) {
+    logOverload(error, 'management');
     // Do not log requests, user data, credentials, or upstream exceptions.
     return new Response(null, { status: 503, headers: noStore });
   }

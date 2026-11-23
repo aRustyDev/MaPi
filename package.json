@@ -30,6 +30,8 @@
     "build:management": "node scripts/build-management.mjs",
     "build:management-test": "node scripts/build-management-test.mjs",
     "build:combined": "node scripts/build-combined.mjs",
+    "build:phase1-owner": "node scripts/build-phase1-owner.mjs",
+    "benchmark:phase1": "node scripts/benchmark-phase1.mjs",
     "build:combined-test": "node scripts/build-combined-test.mjs",
     "test:management-e2e": "node scripts/test-management-e2e.mjs",
     "test:management-parity": "node scripts/test-management-parity.mjs",
@@ -49,9 +51,11 @@
     "test:official-projects": "node scripts/test-official-projects.mjs",
     "test:relocation": "node scripts/test-relocation.mjs",
     "test:relocation-chunks": "node scripts/test-relocation-chunks.mjs",
+    "test:relocation-nextgen": "node scripts/test-relocation-nextgen.mjs",
     "build:egress-spike": "node scripts/build-egress-spike.mjs",
     "test:egress-spike": "node scripts/test-egress-spike.mjs",
     "test:sql-bind": "node scripts/test-sql-bind.mjs",
+    "test:sql-limits": "node scripts/test-sql-limits.mjs",
     "test:sqlite-bridge": "node scripts/test-sqlite-bridge.mjs",
     "test:system-parity": "node scripts/test-system-parity.mjs",
     "inventory": "node scripts/parity-inventory.mjs",
@@ -62,13 +66,15 @@
     "benchmark:cold": "node scripts/cold-app.mjs",
     "dev": "wrangler dev --env-file .dev.vars.poc",
     "prepare:staging": "node scripts/staging-secrets.mjs",
-    "deploy:staging": "wrangler deploy --env staging --secrets-file .mapi/staging-secrets.json"
+    "deploy:staging": "wrangler deploy --env staging --secrets-file .mapi/staging-secrets.json",
+    "test:sql-returning-exact": "node scripts/test-sql-returning-exact.mjs"
   },
   "devDependencies": {
     "@zitadel/api": "0.7.0",
     "@zitadel/cli": "0.7.0",
     "@zitadel/components": "0.7.0",
     "@zitadel/testing": "0.7.0",
+    "esbuild": "0.28.2",
     "playwright": "^1.65.1",
     "wrangler": "4.165.0"
   }

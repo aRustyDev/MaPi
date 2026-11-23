@@ -1,0 +1,15 @@
+import { writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { requireEnabledProof } from './relocation-rehearsal-enabled-proof.mjs';
+const directory = process.argv[2], secret = process.env.MAPI_REHEARSAL_OPERATOR_TOKEN;
+if (!directory || !secret) throw Error('Supply the verified rehearsal directory and control operator token');
+await requireEnabledProof(directory);
+const endpoint = new URL(process.env.MAPI_REHEARSAL_CONTROL_URL ?? '');
+if (endpoint.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(endpoint.hostname) || endpoint.username || endpoint.password) throw Error('A loopback control caller is required');
+endpoint.pathname = '/management-token'; endpoint.search = '';
+const response = await fetch(endpoint, { method: 'POST', headers: { authorization: `Bearer ${secret}` }, redirect: 'error', signal: AbortSignal.timeout(60000) });
+if (!response.ok) throw Error(`Synthetic management token request returned HTTP ${response.status}`);
+const { token } = await response.json();
+if (typeof token !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(token)) throw Error('Invalid synthetic management token');
+await writeFile(resolve(directory, 'secrets/management.env'), `MAPI_REHEARSAL_OTHER_MANAGEMENT_TOKEN=${token}\n`, { mode: 0o600, flag: 'wx' });
+console.log('Stored the synthetic second-project management credential in the private secrets directory.');

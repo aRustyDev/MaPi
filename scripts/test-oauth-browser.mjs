@@ -16,6 +16,9 @@ import { chromium } from "playwright";
 const temp=await mkdtemp(resolve(tmpdir(),"mapi-oauth-browser-"));
 const realApp=process.env.MAPI_TEST_REAL_APP==="1";
 let worker,rp,browser;
+let workerOutput = "";
+const flowDiagnostics = process.env.MAPI_TEST_FLOW_DIAGNOSTICS === "1";
+if (flowDiagnostics && !realApp) throw Error("Flow diagnostics require the real app ingress");
 try {
   execFileSync(process.execPath,["scripts/build-login-assets.mjs"],{stdio:"inherit"});
   // Also builds the two-tag test reactor from the pinned source.
@@ -31,11 +34,12 @@ try {
   const variables=resolve(temp,"worker.env");
   if(realApp) await copyFile("worker/generated/oauth-composition-test.wasm","worker/generated/nextgen-oidc.wasm");
   const envText=realApp
-    ? `MAPI_APP_ORIGIN=${origin}\nMAPI_OPERATOR_TOKEN=${operator}\nMAPI_MASTER_KEY=${Buffer.from(JSON.stringify({id:"master-test",pem:privateKey})).toString("base64")}\nMAPI_LOCAL_TEST=1\n`
+    ? `MAPI_APP_ORIGIN=${origin}\nMAPI_OPERATOR_TOKEN=${operator}\nMAPI_MASTER_KEY=${Buffer.from(JSON.stringify({id:"master-test",pem:privateKey})).toString("base64")}\nMAPI_LOCAL_TEST=1\n${flowDiagnostics ? "MAPI_RUNTIME_DIAGNOSTICS=1\n" : ""}`
     : `TEST_ORIGIN=${origin}\nTEST_AUTH=${operator}\nTEST_MASTER_KEY=${JSON.stringify(privateKey)}\n`;
   await writeFile(variables,envText,{mode:0o600});
   const inspectorServer=createServer().listen(0,"127.0.0.1");await once(inspectorServer,"listening");const inspector=inspectorServer.address().port;await new Promise(done=>inspectorServer.close(done));
-  worker=spawn(process.execPath,[resolve("node_modules/wrangler/bin/wrangler.js"),"dev","--local","--config",realApp?"wrangler.oidc-local.jsonc":"scripts/oauth-browser-test.wrangler.jsonc","--env-file",variables,"--ip","127.0.0.1","--port",String(port),"--inspector-port",String(inspector),"--local-protocol","https","--https-key-path",key,"--https-cert-path",cert,"--persist-to",resolve(temp,"storage")],{stdio:["ignore","ignore","inherit"],env:{...process.env,WRANGLER_LOG_PATH:resolve(temp,"wrangler.log"),WRANGLER_SEND_METRICS:"false"}});
+  worker=spawn(process.execPath,[resolve("node_modules/wrangler/bin/wrangler.js"),"dev","--local","--config",realApp?"wrangler.oidc-local.jsonc":"scripts/oauth-browser-test.wrangler.jsonc","--env-file",variables,"--ip","127.0.0.1","--port",String(port),"--inspector-port",String(inspector),"--local-protocol","https","--https-key-path",key,"--https-cert-path",cert,"--persist-to",resolve(temp,"storage")],{stdio:["ignore",flowDiagnostics ? "pipe" : "ignore","inherit"],env:{...process.env,WRANGLER_LOG_PATH:resolve(temp,"wrangler.log"),WRANGLER_SEND_METRICS:"false"}});
+  if (flowDiagnostics) worker.stdout.on("data", chunk => { workerOutput += chunk.toString(); });
   function issuerRequest(path,{method="GET",headers={},body=""}={}) {
     return new Promise((done,fail)=>{const req=https.request({hostname:"127.0.0.1",port,path,method,headers:{host:`localhost:${port}`,...headers},rejectUnauthorized:false},res=>{const chunks=[];res.on("data",c=>chunks.push(c));res.on("end",()=>done({status:res.statusCode,body:Buffer.concat(chunks).toString()}));});req.on("error",fail);req.end(body);});
   }
@@ -119,6 +123,12 @@ try {
   assert.ok(tokenReplayStatus>=400);assert.deepEqual(unexpected,[]);
   assert.equal(continuationOrigin,origin);assert.equal(continuationReferer,origin+"/");
   await context.close();
+  if (flowDiagnostics) {
+    assert.ok(workerOutput.includes('"event":"mapi.flow.submit","kind":"identifier"'), "missing identifier attribution");
+    assert.ok(workerOutput.includes('"event":"mapi.flow.submit","kind":"password"'), "missing password attribution");
+    assert.ok(!workerOutput.includes(password), "diagnostics exposed a password");
+    assert.ok(!workerOutput.includes(email), "diagnostics exposed an email");
+  }
   const memoryAfterFirst=realApp?await memoryUsage():null;
   console.log(`Local HTTPS ${realApp?"real app ingress":"private harness"}: official login -> independent RP callback, verified ID token and code replay rejection passed; no external backend requests.`);
   if(process.env.MAPI_TEST_BURST==="1"){

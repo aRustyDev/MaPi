@@ -1,0 +1,9 @@
+{
+  "name": "mapi-relocation-manifest-test",
+  "main": "relocation-manifest-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "vars": { "MAPI_LOCAL_TEST": "1" },
+  "durable_objects": { "bindings": [{ "name": "PROJECT", "class_name": "ManifestProject" }, { "name": "NEXTGEN_APPLICATION", "class_name": "ManifestProject" }, { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ManifestProject", "ProjectRegistry"] }]
+}

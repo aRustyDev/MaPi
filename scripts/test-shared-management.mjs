@@ -80,6 +80,12 @@ try {
  management = start('wrangler.shared-management.jsonc', managementPort, inspector2, managementVars); await wait(managementPort, management);
  assert.equal((await query(a, tokenA, projectA)).status, 404, 'disabled management ingress');
  assert.equal((await admin(a, '/_mapi/admin/status')).status, 200, 'owner remains online');
+ for (const operatorSetting of ['', 'MAPI_OPERATOR_TOKEN=\n']) {
+  const stoppedOwner = once(owner, 'exit'); owner.kill('SIGTERM'); await stoppedOwner;
+  await writeFile(ownerVars, `MAPI_MASTER_KEY=${master}\n${operatorSetting}MAPI_APP_ORIGIN=${a}\nMAPI_LOCAL_TEST=1\nMAPI_OFFICIAL_LOGIN=1\n`, { mode: 0o600 });
+  owner = start('scripts/shared-owner-test.wrangler.jsonc', ownerPort, inspector1, ownerVars); await wait(ownerPort, owner);
+  for (const token of ['undefined', '']) assert.equal((await request(ownerPort, a, '/_mapi/test/management-token', { headers: { authorization: `Bearer ${token}` } })).status, 404);
+ }
  console.log('Separate management Worker observed authoritative owner mutations and session revocation through cross-script Durable Object bindings.');
 } catch (error) { if (diagnostics) console.error(diagnostics); throw error; }
 finally { for (const child of [management, owner]) if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; } await rm(dir, { recursive: true, force: true }); }

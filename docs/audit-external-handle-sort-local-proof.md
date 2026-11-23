@@ -1,0 +1,27 @@
+# Audit external handle-sort diagnostic
+
+The retained code in `experiments/audit-snapshot/` is unmounted and is not used by a production Worker. The existing bounded top-k diagnostic discards candidates before sorting. That cannot generally reproduce the pinned `slices.SortFunc` tie permutation: the Go sort is unstable and can choose different equal-key handles based on the complete input. A SQLite TEXT value and a BLOB value may be distinct on storage but scan to the same Go string; whether such values occur in real data has not been established.
+
+`DiagnosticExternalHandleSort` retains the complete sequence as opaque handles in a caller-supplied indexed store, using `sort.Sort` to access and swap individual handles and a caller-supplied comparator. The adapter itself holds no list of keys or handles. A store or comparator error stops sorting and is returned; an unrelated panic propagates. A caller must roll back any partial permutation after a failure. This is not yet an implementation of a protected spool or snapshot.
+
+Source inspection of the pinned Go 1.26.9 toolchain found that `src/sort/gen_sort_variants.go` generates the `sort.Interface` and `slices.SortFunc` implementations from the same template, substituting `Less`/`Swap` for the interface and `cmp(x,y) < 0`/slice swaps for the generic implementation. Both public entry points initialize the algorithm with the same sequence length and `bits.Len(uint(n))` for `n > 1`; the interface entry point returns immediately for `n <= 1`. This explains the observed equivalence under a deterministic, unchanged comparator and correct atomic store swaps. It is a source-specific observation, not a guarantee across Go upgrades, alternate toolchains, store corruption or concurrent changes.
+
+In the disposable pinned Nextgen tree, `TestDiagnosticExternalSortAgainstSlicesSortFunc` compared the full handle permutation from `sort.Sort` with the pinned `slices.SortFunc` on 2,000 deterministic small in-memory inputs, including identical keys, repeated-key patterns, sorted and reverse-sorted data, shuffled data and ascending/descending comparators. `TestDiagnosticExternalSortFailurePropagation` checked store-read, store-swap and comparator errors and unexpected panic propagation. Session 75221 passed (`0.223s`). The full permutation check specifically detects different ordering of distinct equal-key handles on those inputs.
+
+The distinct `TestDiagnosticExternalSortNativeSQLite` used a 113-handle SQLite temporary table and a caller-owned transaction. It matched the full pinned tie permutation and verified rollback after an injected comparison failure following swaps. The related `TestDiagnosticNativeSortSpoolSwapFailures` checks same-slot swaps, missing and out-of-range slots, and an injected trigger that suppresses one of two updated rows. The affected-row check detects this partial update and caller rollback restores the old values. Review found that two affected rows alone do not prove correct new values, so the test spool now rereads both slots and checks their exact swapped values. `TestDiagnosticNativeSortSpoolSwapPostcondition` injects an AFTER UPDATE trigger that changes a slot while the outer update still reports two affected rows; the postcondition rejects the swap and rollback restores both original values. All three native tests passed together in session 92805 (`0.266s`); earlier SQLite passes were sessions 1439 (`0.366s`) and 49089 (`0.284s`). These checks do not validate the complete spool schema or detect a trigger that corrupts unrelated rows. They use small synthetic integer handles and in-memory comparison keys; they do not exercise the Cloudflare bridge, fragmented keys, authentication or persistent crash recovery.
+
+From `/private/tmp/mapi-management-build-c4k7gq/nextgen/apps/api`, after copying the retained diagnostic files into their matching paths, the tests used the pinned Go 1.26.9 toolchain and offline dependency cache:
+
+```sh
+env -i PATH=/usr/bin:/bin GOENV=off GOWORK=off \
+  GOPROXY=file:///Users/asmith/go/pkg/mod/cache/download \
+  GOSUMDB=sum.golang.org GOTOOLCHAIN=local \
+  GOCACHE=/private/tmp/mapi-management-build-c4k7gq/gocache \
+  GOMODCACHE=/private/tmp/mapi-management-build-c4k7gq/gomod-verified \
+  /Users/asmith/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.9.darwin-arm64/bin/go \
+  test -count=1 -run '^TestDiagnosticExternalSort' ./internal/storage/events
+```
+
+The latest SQLite command used the same environment and toolchain with `test -count=1 -tags sqlite_integration -run '^TestDiagnostic(ExternalSortNativeSQLite|NativeSortSpoolSwapFailures|NativeSortSpoolSwapPostcondition)$' ./internal/storage/dialect/sqlite`.
+
+Both public Go sorting APIs are unstable, and neither API promises that they choose the same permutation of equal elements. The tests do not prove full algorithm equivalence, behavior under another Go version, or correct event-selection semantics. This approach also replaces count-bounded top-k state with storage proportional to all input candidates and random-access sort work. It does not bound total CPU, SQLite's internal memory or storage, individual key sizes, range count, or invocation duration. A real implementation needs protected spool quotas, transaction and failure handling, exact comparator conversions and source-version controls, as well as full audit, authorization, retention, and Workerd differential evidence. The earlier interrupted normalization, exact-size, nonfinite, malformed-TEXT, cursor and SQL-limit actions have not been rerun.

@@ -1,0 +1,279 @@
+import { DurableObject } from 'cloudflare:workers';
+import { execute } from '../worker/sql.js';
+
+const encode = new TextEncoder();
+const bytes = value => encode.encode(value).length;
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+const rejects = (action, match) => {
+  try { action(); } catch (error) {
+    if (match && !String(error).includes(match)) throw error;
+    return String(error);
+  }
+  throw new Error('Expected rejected SQL');
+};
+const sizedSQL = (prefix, suffix, size) => {
+  const missing = size - bytes(prefix) - bytes(suffix);
+  assert(missing >= 0, 'Invalid SQL test length');
+  return prefix + 'x'.repeat(missing) + suffix;
+};
+const request = (statement, args = [], query = true) => ({ statement, args, query });
+
+export class SQLLimitProbe extends DurableObject {
+  runPinnedReturningExact() {
+    const storage = this.ctx.storage, sql = storage.sql;
+    sql.exec('CREATE TABLE IF NOT EXISTS pinned_json_shape(project_id TEXT NOT NULL, url TEXT NOT NULL, object_type TEXT, kind TEXT NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(project_id,url))');
+    sql.exec('CREATE TABLE IF NOT EXISTS pinned_json_audit(count INTEGER NOT NULL)');
+    sql.exec('DELETE FROM pinned_json_shape'); sql.exec('DELETE FROM pinned_json_audit'); sql.exec('INSERT INTO pinned_json_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_json_delete_audit AFTER DELETE ON pinned_json_shape BEGIN UPDATE pinned_json_audit SET count=count+1; END');
+    const payloadBytes=8388602, n=payloadBytes-2;
+    const insert = () => sql.exec(`INSERT INTO pinned_json_shape VALUES ('p','u',NULL,'user-schema',1, '"'||substr(hex(zeroblob((?+1)/2)),1,?)||'"')`,n,n);
+    const statement = "DELETE FROM pinned_json_shape WHERE project_id='p' AND url='u' RETURNING project_id,url,object_type,kind,created_at,payload";
+    const abort='rollback boundary proof';
+    let directLength;
+    try { storage.transactionSync(() => { insert(); const row=sql.exec(statement).raw().toArray()[0]; directLength=row[5].length; assert(sql.exec('SELECT count FROM pinned_json_audit').one().count===1,'Direct delete audit missing'); throw Error(abort); }); }
+    catch(e) { if(e.message!==abort) throw e; }
+    assert(directLength===payloadBytes,'Direct JSON payload length changed');
+    let bridgeError;
+    try { storage.transactionSync(() => { insert(); const result=execute(storage,request(statement)); assert(result.rows.length===1 && result.rows[0][5].length===payloadBytes,'Bridge JSON payload changed'); assert(sql.exec('SELECT count FROM pinned_json_audit').one().count===1,'Bridge delete audit missing'); throw Error(abort); }); }
+    catch(e) { if(e.message!==abort) bridgeError=String(e); }
+    const rows=sql.exec('SELECT count(*) AS n FROM pinned_json_shape').one().n;
+    const audit=sql.exec('SELECT count FROM pinned_json_audit').one().count;
+    assert(rows===0 && audit===0,'Boundary probe did not roll back business and audit rows');
+    return {ok:!bridgeError, error:bridgeError || null, directLength, rows, audit};
+  }
+  run() {
+    const storage = this.ctx.storage, sql = storage.sql;
+    storage.transactionSync(() => {
+      sql.exec('CREATE TABLE IF NOT EXISTS limit_probe_business (id INTEGER PRIMARY KEY)');
+      sql.exec('CREATE TABLE IF NOT EXISTS limit_probe_audit (id INTEGER PRIMARY KEY)');
+      sql.exec('DELETE FROM limit_probe_business');
+      sql.exec('DELETE FROM limit_probe_audit');
+    });
+    // Cursor implementations must not leak internal staging writes into
+    // SQLite connection-local state, either between source rows or afterward.
+    sql.exec('CREATE TABLE IF NOT EXISTS limit_probe_connection (id INTEGER PRIMARY KEY)');
+    sql.exec('DELETE FROM limit_probe_connection');
+    sql.exec('INSERT INTO limit_probe_connection VALUES (123456789),(123456790),(123456791)');
+    const connectionState = () => sql.exec('SELECT changes() AS changes, last_insert_rowid() AS rowid').one();
+    const before = connectionState();
+    assert(before.changes === 3 && before.rowid === 123456791, 'Connection-state fixture failed');
+    const stateQuery = 'SELECT id, changes() AS changes, last_insert_rowid() AS rowid FROM limit_probe_connection ORDER BY id';
+    const directStateRows = sql.exec(stateQuery).raw().toArray();
+    assert(JSON.stringify(directStateRows) === JSON.stringify([123456789, 123456790, 123456791].map(id => [id, 3, 123456791])), 'Direct SQLite connection-state oracle changed');
+    const afterDirect = connectionState();
+    const bridgedStateRows = execute(storage, request(stateQuery)).rows;
+    const afterBridge = connectionState();
+    const expectedStateRows = directStateRows.map(row => row.map(value => ({ integer: String(value) })));
+    assert(JSON.stringify(bridgedStateRows) === JSON.stringify(expectedStateRows), 'Bridge changed connection-local state between SELECT rows');
+    assert(JSON.stringify(afterDirect) === JSON.stringify(before) && JSON.stringify(afterBridge) === JSON.stringify(before), 'Bridge SELECT changed connection-local state');
+    const wideNames = Array.from({ length: 100 }, (_, index) => `c${index}`);
+    const wideSchema = wideNames.map((name, index) => `${name} ${index === 0 || index === 5 ? 'INTEGER' : index === 1 ? 'BLOB' : index === 3 ? 'REAL' : 'TEXT'}`).join(',');
+    sql.exec(`CREATE TABLE IF NOT EXISTS limit_probe_wide (${wideSchema})`);
+    sql.exec('DELETE FROM limit_probe_wide');
+    sql.exec('CREATE TABLE IF NOT EXISTS limit_probe_trigger (count INTEGER NOT NULL)');
+    sql.exec('DELETE FROM limit_probe_trigger');
+    sql.exec('INSERT INTO limit_probe_trigger VALUES (0)');
+    sql.exec('CREATE TRIGGER IF NOT EXISTS limit_probe_after_insert AFTER INSERT ON limit_probe_wide BEGIN UPDATE limit_probe_trigger SET count = count + 1; END');
+    sql.exec('CREATE TRIGGER IF NOT EXISTS limit_probe_after_business AFTER INSERT ON limit_probe_business BEGIN INSERT INTO limit_probe_audit VALUES (new.id + 1000); END');
+    rejects(() => sql.exec(`CREATE TABLE limit_probe_invalid (${Array.from({ length: 101 }, (_, index) => `c${index} TEXT`).join(',')})`), 'too many columns');
+    const wideValues = wideNames.map((_name, index) => index === 0 ? "CAST('-9223372036854775808' AS INTEGER)" : index === 1 ? "x'00FF'" : index === 2 ? "'text' || char(0) || 'tail'" : index === 3 ? '0.25' : index === 4 ? "'9007199254740993'" : index === 5 ? "CAST('9223372036854775807' AS INTEGER)" : index === 6 ? "'🙂 𐀀'" : index === 7 ? "'{not-valid-json: [}'" : 'NULL').join(',');
+    const names = wideNames.join(',');
+    const inserted = execute(storage, request(`INSERT INTO limit_probe_wide (${names}) VALUES (${wideValues}) RETURNING ${names}`));
+    assert(inserted.columns.length === 100 && inserted.rows.length === 1, 'Wide RETURNING shape changed');
+    const expected = [{ integer: '-9223372036854775808' }, { blob: 'AP8=' }, 'text\0tail', 0.25, '9007199254740993', { integer: '9223372036854775807' }, '🙂 𐀀', '{not-valid-json: [}', null];
+    assert(JSON.stringify(inserted.rows[0].slice(0, 9)) === JSON.stringify(expected), 'Wide RETURNING types changed');
+    const selected = execute(storage, request(`SELECT ${names} FROM limit_probe_wide`));
+    assert(JSON.stringify(selected.rows) === JSON.stringify(inserted.rows), 'Wide SELECT types differ from RETURNING');
+    assert(sql.exec('SELECT count(*) AS n FROM limit_probe_wide').one().n === 1, 'RETURNING write ran more than once');
+    assert(sql.exec('SELECT count FROM limit_probe_trigger').one().count === 1, 'RETURNING triggered more than one write');
+    const duplicates = execute(storage, request(`SELECT ${wideNames.map(name => `${name} AS repeated`).join(',')} FROM limit_probe_wide`));
+    assert(duplicates.columns.length === 100 && duplicates.columns.every(name => name === 'repeated'), 'Duplicate column names changed');
+    assert(JSON.stringify(duplicates.rows) === JSON.stringify(inserted.rows), 'Duplicate-name result values changed');
+    const largeBlob = execute(storage, request('SELECT ' + Array.from({ length: 51 }, (_, index) => index === 0 ? 'zeroblob(8000000) AS c0' : `${index} AS c${index}`).join(',')));
+    assert(largeBlob.rows[0][0]?.blob?.length === 10666668, 'Wide BLOB was not preserved');
+    const largeText = execute(storage, request('SELECT ' + Array.from({ length: 51 }, (_, index) => index === 0 ? 'CAST(zeroblob(8000000) AS TEXT) AS c0' : `${index} AS c${index}`).join(',')));
+    assert(largeText.rows[0][0].length === 8000000 && largeText.rows[0][0][7999999] === '\0', 'Wide text was not preserved');
+    rejects(() => execute(storage, request('SELECT ' + Array.from({ length: 101 }, (_, index) => `${index} AS c${index}`).join(','))), 'too many columns');
+
+    const raw100k = sizedSQL('SELECT 1 AS value /*é', '*/', 100000);
+    assert(sql.exec(raw100k).one().value === 1, 'Direct 100,000-byte SQL failed');
+    rejects(() => sql.exec(sizedSQL('SELECT 1 AS value /*é', '*/', 100001)).toArray(), 'statement too long');
+    const calls = [];
+    const observed = { sql: { exec(statement, ...args) { calls.push(bytes(statement)); return sql.exec(statement, ...args); } } };
+    const mkSelect = size => sizedSQL('SELECT ?1 AS value /*é', '*/', size);
+    const intArg = [{ kind: 'int', value: '9007199254740993' }];
+    const initialSize = 90000;
+    assert(execute(observed, request(mkSelect(initialSize), intArg)).rows[0][0].integer === '9007199254740993', 'SQL binding precision changed');
+    assert(calls.length === 2, 'SELECT metadata and result statements were not both observed');
+    const overhead = calls[1] - initialSize;
+    calls.length = 0;
+    const boundary = 100000 - overhead;
+    assert(execute(observed, request(mkSelect(boundary), intArg)).rows[0][0].integer === '9007199254740993', 'Rewritten 100,000-byte SELECT failed');
+    assert(calls[1] === 100000, 'Rewritten SELECT byte limit not reached');
+    calls.length = 0;
+    rejects(() => execute(observed, request(mkSelect(boundary + 1), intArg)), 'statement too long');
+    assert(calls[1] === 100001, 'Rewritten rejected SELECT byte limit differed');
+
+    const mkWrite = (id, size) => sizedSQL(`INSERT INTO limit_probe_audit VALUES (${id}) /*é`, '*/ RETURNING id', size);
+    calls.length = 0;
+    execute(observed, request(mkWrite(1, 90000)));
+    const writeOverhead = calls[0] - 90000;
+    const writeBoundary = 100000 - writeOverhead;
+    calls.length = 0;
+    execute(observed, request(mkWrite(2, writeBoundary)));
+    assert(calls[0] === 100000, 'Rewritten RETURNING boundary differed');
+    const priorAudits = sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n;
+    calls.length = 0;
+    rejects(() => storage.transactionSync(() => {
+      sql.exec('INSERT INTO limit_probe_business VALUES (1)');
+      execute(observed, request(mkWrite(3, writeBoundary + 1)));
+    }), 'statement too long');
+    assert(calls[0] === 100001, 'Rejected RETURNING statement was not 100,001 bytes');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0, 'Rejected write left a business row');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'Rejected write left an audit row');
+
+    // Query-mode must not execute a write hidden in a comment or second SQL
+    // statement. The trigger makes accidental writes visible in audit too.
+    const hiddenWrites = [
+      'INSERT INTO limit_probe_business VALUES (11) -- RETURNING id',
+      'INSERT INTO limit_probe_business VALUES (12) /* RETURNING id */',
+      'INSERT INTO limit_probe_business VALUES (13) /* RETURNING id',
+      'SELECT 1; INSERT INTO limit_probe_business VALUES (14)',
+      'WITH x AS (SELECT 1) SELECT * FROM x; INSERT INTO limit_probe_business VALUES (15)',
+    ];
+    for (const statement of hiddenWrites) rejects(() => execute(storage, request(statement)));
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0, 'Query-mode executed a hidden write');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'Query-mode left hidden audit rows');
+    const harmless = execute(storage, request("SELECT 'RETURNING id; SELECT 2' AS quoted -- RETURNING id"));
+    assert(harmless.rows[0][0] === 'RETURNING id; SELECT 2', 'Quoted/comment SQL changed');
+
+    // A CTE-backed write is row-producing but must never be run once for
+    // metadata and again for data. Check both the successful path and an
+    // enclosing transaction rollback with the real trigger-backed audit row.
+    const cteWrite = 'WITH source(id) AS (SELECT ?1) INSERT INTO limit_probe_business SELECT id FROM source RETURNING id';
+    const cteArg = [{ kind: 'int', value: '-9223372036854775808' }];
+    let cteCalls = 0;
+    const cteObserved = { sql: { exec(statement, ...args) { cteCalls++; return sql.exec(statement, ...args); } } };
+    const assertCteResult = () => {
+      const result = execute(cteObserved, request(cteWrite, cteArg));
+      assert(cteCalls === 1 && result.columns.length === 1 && result.columns[0] === 'id' && result.rows.length === 1 && result.rows[0][0]?.integer === '-9223372036854775808', 'CTE RETURNING executed twice or lost int64 precision');
+      assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 1, 'CTE write count changed');
+      assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits + 1, 'CTE audit count changed');
+    };
+    rejects(() => storage.transactionSync(() => { assertCteResult(); throw Error('CTE rollback probe'); }), 'CTE rollback probe');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0, 'CTE rollback left a business row');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'CTE rollback left an audit row');
+    cteCalls = 0;
+    storage.transactionSync(assertCteResult);
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 1, 'Committed CTE business row missing');
+    assert(sql.exec("SELECT printf('%lld', id) AS id FROM limit_probe_business").one().id === '-9223372036854775808', 'Committed CTE business value changed');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits + 1, 'Committed CTE audit row missing');
+    assert(sql.exec("SELECT printf('%lld', id) AS id FROM limit_probe_audit WHERE id < 0").one().id === '-9223372036854774808', 'Committed CTE audit value changed');
+    sql.exec('DELETE FROM limit_probe_business');
+    sql.exec('DELETE FROM limit_probe_audit WHERE id < 0');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'CTE cleanup altered prior audits');
+
+    // SQLite accepts an unterminated trailing block comment. Its apparent
+    // placeholders and semicolons are comment text, and wrappers must not be
+    // appended inside it. Include a write to catch accidental double execution.
+    const commented = execute(storage, request('SELECT ?1 AS value; /* ?2 ;', [{ kind: 'int', value: '9223372036854775807' }]));
+    assert(commented.rows.length === 1 && commented.rows[0][0]?.integer === '9223372036854775807', 'Trailing comment changed a query or parameter');
+    const commentLiteral = execute(storage, request("SELECT '/* ?2' AS value /* ?1"));
+    assert(commentLiteral.rows[0][0] === '/* ?2', 'Comment-like text in a string changed');
+    assert(execute(storage, request('SELECT 7 AS value /*/')).rows[0][0]?.integer === '7', 'Overlapping block-comment delimiter changed a query');
+    assert(execute(storage, request('SELECT 8 AS value /**/')).rows[0][0]?.integer === '8', 'Closed empty block comment changed a query');
+    let commentedCalls = 0;
+    const commentedStorage = { sql: { exec(statement, ...args) { commentedCalls++; return sql.exec(statement, ...args); } } };
+    const commentedWrite = () => execute(commentedStorage, request('INSERT INTO limit_probe_business VALUES (?1) RETURNING id /* ?2 ;', [{ kind: 'int', value: '42' }]));
+    rejects(() => storage.transactionSync(() => { commentedWrite(); throw Error('Commented write rollback'); }), 'Commented write rollback');
+    assert(commentedCalls === 1 && sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0 && sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'Commented write rollback changed business or audit rows');
+    commentedCalls = 0;
+    const committedCommentedWrite = storage.transactionSync(commentedWrite);
+    assert(commentedCalls === 1 && committedCommentedWrite.rows[0][0]?.integer === '42', 'Trailing comment changed or repeated a RETURNING write');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 1 && sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits + 1, 'Commented write or audit count changed');
+    sql.exec('DELETE FROM limit_probe_business');
+    sql.exec('DELETE FROM limit_probe_audit WHERE id = 1042');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'Commented write cleanup altered prior audits');
+
+    // Closed comments, including line comments, are whitespace in a simple
+    // RETURNING projection. Preserve duplicate result names and execute once.
+    const closedWrite = () => execute(commentedStorage, request('INSERT INTO limit_probe_business VALUES (?1) RETURNING /* ignored ?2 */ id /* middle */, -- next\n id /**/', [{ kind: 'int', value: '43' }]));
+    commentedCalls = 0;
+    rejects(() => storage.transactionSync(() => { closedWrite(); throw Error('Closed comment rollback'); }), 'Closed comment rollback');
+    assert(commentedCalls === 1 && sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0 && sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'Closed-comment rollback changed business or audit rows');
+    commentedCalls = 0;
+    const closedResult = storage.transactionSync(closedWrite);
+    assert(commentedCalls === 1 && JSON.stringify(closedResult.columns) === JSON.stringify(['id', 'id']) && closedResult.rows[0][0]?.integer === '43' && closedResult.rows[0][1]?.integer === '43', 'Closed comments changed or repeated a RETURNING write');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 1 && sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits + 1, 'Closed-comment write or audit count changed');
+    sql.exec('DELETE FROM limit_probe_business');
+    sql.exec('DELETE FROM limit_probe_audit WHERE id = 1043');
+    commentedCalls = 0;
+    rejects(() => execute(commentedStorage, request('INSERT INTO limit_probe_business VALUES (44) RETURNING id /**/; INSERT INTO limit_probe_business VALUES (45)')));
+    assert(commentedCalls === 0 && sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0 && sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'Closed comment hid a second write');
+
+    // sql.exec steps a first row before columnNames is read. The metadata
+    // statement must therefore have an effective zero limit, and the real
+    // query must be materialized before type encoding inspects each value.
+    const statements = [];
+    let metadataRowsRead;
+    const checked = { sql: { exec(statement, ...args) {
+      statements.push(statement);
+      const cursor = sql.exec(statement, ...args);
+      if (statements.length === 1) metadataRowsRead = cursor.rowsRead;
+      return cursor;
+    } } };
+    const randomQuery = `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 500)
+      SELECT CASE WHEN random() & 1 THEN CAST('9223372036854775807' AS INTEGER) ELSE 'not-an-integer' END AS value FROM n`;
+    const randomRows = execute(checked, request(randomQuery)).rows;
+    assert(metadataRowsRead === 0 && randomRows.length === 500, 'Metadata probe evaluated source rows');
+    assert(randomRows.every(row => row[0] === 'not-an-integer' || row[0]?.integer === '9223372036854775807'), 'Volatile result was evaluated inconsistently');
+    const plan = sql.exec('EXPLAIN QUERY PLAN ' + statements[1]).toArray();
+    assert(plan.some(row => /MATERIALIZE mapi_rows/i.test(row.detail)), 'Typed query did not materialize source rows');
+    const twoArgs = [{ kind: 'int', value: '1' }, { kind: 'int', value: '2' }];
+    const limited = execute(storage, request('SELECT c0 AS repeated,c5 AS repeated FROM limit_probe_wide LIMIT ?2 OFFSET ?1', twoArgs));
+    assert(limited.rows.length === 0 && limited.columns[0] === 'repeated' && limited.columns[1] === 'repeated', 'LIMIT/OFFSET metadata changed');
+    const commaLimit = execute(storage, request('SELECT c0 AS first FROM limit_probe_wide LIMIT ?1, ?2', [{ kind: 'int', value: '0' }, { kind: 'int', value: '1' }]));
+    assert(commaLimit.rows[0][0]?.integer === '-9223372036854775808', 'Comma LIMIT bindings changed');
+    sql.exec('CREATE TABLE IF NOT EXISTS mapi_rows (id INTEGER PRIMARY KEY)');
+    sql.exec('INSERT OR IGNORE INTO mapi_rows VALUES (17)');
+    assert(execute(storage, request('SELECT id FROM mapi_rows')).rows[0][0]?.integer === '17', 'Bridge CTE shadowed a source table');
+    assert(execute(storage, request('WITH mapi_rows(id) AS (SELECT 19) SELECT id FROM mapi_rows')).rows[0][0]?.integer === '19', 'Bridge CTE shadowed a source CTE');
+    assert(execute(storage, request('WITH replace AS (SELECT 1 AS n) SELECT n FROM replace')).rows[0][0]?.integer === '1', 'CTE named replace was misclassified as a write');
+    assert(execute(storage, request('WITH replaceé AS (SELECT 3 AS n) SELECT n FROM replaceé')).rows[0][0]?.integer === '3', 'Unicode keyword-prefix CTE was misclassified');
+    assert(execute(storage, request('WITH aſ(x) AS (SELECT 5) SELECT x FROM aſ')).rows[0][0]?.integer === '5', 'Unicode case folding misclassified a CTE identifier');
+    assert(execute(storage, request('WITH "replace"(id) AS NOT MATERIALIZED (SELECT 2), q AS MATERIALIZED (SELECT id FROM "replace") SELECT id FROM q')).rows[0][0]?.integer === '2', 'Quoted or multi-CTE query was misclassified');
+    assert(execute(storage, request('SELECT 4 AS limité')).rows[0][0]?.integer === '4', 'Unicode keyword-prefix alias was misclassified');
+    assert(execute(storage, request('SELECT 6 AS lımıt')).rows[0][0]?.integer === '6', 'Unicode case folding misclassified a LIMIT identifier');
+
+    const p50 = 'a'.repeat(50), p51 = 'a'.repeat(51);
+    assert(sql.exec('SELECT ? LIKE ? AS result', p50, p50).one().result === 1, '50-byte LIKE pattern failed');
+    rejects(() => sql.exec('SELECT ? LIKE ? AS result', p51, p51).one(), 'pattern too complex');
+    assert(sql.exec('SELECT ? GLOB ? AS result', p50, p50).one().result === 1, '50-byte GLOB pattern failed');
+    rejects(() => sql.exec('SELECT ? GLOB ? AS result', p51, p51).one(), 'pattern too complex');
+    const sqlFunction = n => `SELECT printf(${Array.from({ length: n }, (_, index) => index === 0 ? "'%s'" : "'x'").join(',')}) AS value`;
+    assert(sql.exec(sqlFunction(32)).one().value === 'x', '32-argument SQL function failed');
+    let function33 = 'accepted';
+    try { sql.exec(sqlFunction(33)).one(); } catch { function33 = 'rejected'; }
+    sql.exec('CREATE TABLE IF NOT EXISTS limit_probe_large (value BLOB)');
+    const largeRows = [];
+    for (const size of [1_000_000, 8_000_000, 8_388_638]) {
+      try {
+        sql.exec('DELETE FROM limit_probe_large');
+        sql.exec('INSERT INTO limit_probe_large VALUES (zeroblob(?))', size);
+        largeRows.push({ size, accepted: sql.exec('SELECT length(value) AS n FROM limit_probe_large').one().n === size });
+      } catch { largeRows.push({ size, accepted: false }); }
+    }
+    assert(largeRows[0].accepted, 'Representative 1 MB BLOB failed');
+    assert(!largeRows[2].accepted, 'Expected local row-size rejection did not occur');
+    const auditBeforeLarge = sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n;
+    rejects(() => storage.transactionSync(() => {
+      sql.exec('INSERT INTO limit_probe_business VALUES (2)');
+      sql.exec('INSERT INTO limit_probe_audit VALUES (9)');
+      sql.exec('INSERT INTO limit_probe_large VALUES (zeroblob(8388638))');
+    }), 'too big');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0, 'Oversized row left a business row');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === auditBeforeLarge, 'Oversized row left an audit row');
+    return { ok: true, wideColumns: 100, directSQLBytes: 100000, rewrittenSelectBytes: 100000, rewrittenReturningBytes: 100000, rejectedBytes: 100001, function33, largeRows };
+  }
+}
+export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()); return Response.json(new URL(request.url).searchParams.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };

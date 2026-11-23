@@ -5,7 +5,7 @@ import fixture from '../worker/generated/fixture.json';
 import { instantiateReactor } from '../worker/wasi.js';
 import { execute, sqliteError } from '../worker/sql.js';
 import { installMutationGeneration, mutationGeneration, missingGenerationCoverage } from './mutation-generation.mjs';
-import { verifySplit, SplitBusy, SplitStale } from './password-split-protocol.mjs';
+import { verifySplitUnsafeForTest as verifySplit, SplitBusy, SplitStale } from './password-split-protocol.mjs';
 
 const enc = new TextEncoder(), dec = new TextDecoder(), rollback = Symbol('rollback');
 const check = (value, message) => { if (!value) throw new Error(message); };

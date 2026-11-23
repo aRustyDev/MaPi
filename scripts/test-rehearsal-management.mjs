@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import { rehearsalManagementRead, validateRehearsalManagementResult } from './rehearsal-management.mjs';
+const id = 'a'.repeat(32), fixture = { state: 'prepared', rehearsalId: id, otherOrigin: `https://mapi-p1-rehearsal-${id}-router.synthetic.workers.dev`, otherProjectId: 'project-2', userId: 'user-1', otherUserId: 'user-2' };
+const calls = [];
+const fetcher = async (url, options) => { calls.push({ url: String(url), method: options.method }); assert.equal(options.headers.authorization, 'Bearer token'); assert.equal(options.redirect, 'error'); return Response.json(options.method === 'GET' ? { id: 'user-2' } : { users: [{ id: 'user-2' }] }); };
+await rehearsalManagementRead(fixture, 'token', 0, fetcher);
+await rehearsalManagementRead(fixture, 'token', 1, fetcher);
+assert.equal(calls[0].method, 'GET'); assert.ok(calls[0].url.endsWith('/api/v1/users/user-2'));
+assert.equal(calls[1].method, 'POST'); assert.ok(calls[1].url.includes('/api/v1/users/query?project_id=project-2'));
+await assert.rejects(rehearsalManagementRead({ ...fixture, otherOrigin: 'https://existing.workers.dev' }, 'token', 0, fetcher));
+await assert.rejects(rehearsalManagementRead(fixture, 'token', 0, async () => new Response(null, { status: 503 })));
+await assert.rejects(rehearsalManagementRead(fixture, 'token', 0, async () => Response.json({ id: 'user-1' })), /management user result/);
+await assert.rejects(rehearsalManagementRead(fixture, 'token', 1, async () => Response.json({ users: [] })), /management query result/);
+await assert.rejects(rehearsalManagementRead(fixture, 'token', 1, async () => Response.json({ users: [{ id: 'user-2' }, { id: 'user-1' }] })), /management query result/);
+await assert.rejects(rehearsalManagementRead(fixture, 'token', 1, async () => Response.json({ users: [{ id: 'user-2' }], next_page_token: 'more' })), /management query result/);
+await assert.rejects(rehearsalManagementRead(fixture, 'token', 0, async () => new Response('not json')), SyntaxError);
+assert.throws(() => validateRehearsalManagementResult({ id: 'user-2' }, { ...fixture, userId: 'user-2' }, false), /identities/);
+console.log('Verified concurrent synthetic management request shapes and failure handling.');

@@ -1,0 +1,17 @@
+# Experimental audit snapshot components
+
+These files preserve local-only experiments. They are not wired into a Worker, build script, route, or production overlay. They do not implement a snapshot, authorize requests, fence a route, bound total query work or prove end-to-end parity. Do not deploy them.
+
+For a future authorized local investigation, use a separate disposable Nextgen source tree at the recorded pin and MaPi overlay, and copy only the files under `nextgen-overlay/` into their corresponding paths in that tree. Run the focused commands recorded in [the local proof](../../docs/audit-snapshot-metadata-local-proof.md) from that tree's `apps/api`. The original experiment used Go 1.26.9, a task-specific module/build cache and an offline module proxy. Preparing a tree or fetching dependencies may require separate authorization; these retained files do not run either action.
+
+The handle merge retains a bounded number of opaque handles. It does not bound key bytes, scan range count, SQL work, snapshot storage, or CPU. It detects only some equal-key cases; distinct SQLite values may scan to equal Go keys. The row validator is an incomplete native diagnostic; it does not implement Workerd driver semantics or complete error equivalence. See the proof for tested cases and open gates.
+
+The separate `staged-frames/` experiment stores scoped fragments in a test SQLite database; it is not wired to a Worker or event handler. Its replay restrictions, trusted-schema and authority assumptions, experimental identifier bounds, missing cleanup and other limitations are recorded in [the staged-frame proof](../../docs/audit-staged-frames-local-proof.md).
+
+The separate external handle-sort diagnostic retains every opaque handle in an indexed store and uses Go's `sort.Sort` through constant-size adapter state. It is an alternative investigation for equal keys, not a replacement for the merge or a proven bounded snapshot. A small native SQLite test uses a temporary table and a caller-owned transaction; it does not provide a production spool. Both sort APIs are unstable and their contracts do not guarantee matching tie permutations. See [the external-sort proof](../../docs/audit-external-handle-sort-local-proof.md).
+
+The separate local Workerd integration connects the pinned Go storage statements, the experimental shadow and reader lease, the real SQL host and a detached diagnostic frame. It uses small synthetic rows and trusted fake authorization; the Go reader still materializes its result. It does not establish the audit API, bounded memory, production isolation or hosted readiness. See [the integration evidence](../../docs/audit-shadow-workerd-integration-local-proof.md).
+
+The separate unmounted `event_shadow_reader_diagnostic.go` delegates pinned Go event read statements to the shadow view and adds a trusted project restriction. Its focused native comparison does not authenticate a caller or bound the materialized result, and its added project predicate may add a SQL bind. See [the Go reader proof](../../docs/audit-shadow-go-reader-local-proof.md).
+
+`staged-frames/` contains a separate fragment spool and bounded historical-replay diagnostics. They assume externally protected checkpoint keys, an authenticated pinned head, a monotonic authority and immutable previously verified frames; the local tests use a fake authority. They are not an authorization boundary, a production retry protocol or a safe publication mechanism. See [the staged-frames proof](../../docs/audit-staged-frames-local-proof.md).

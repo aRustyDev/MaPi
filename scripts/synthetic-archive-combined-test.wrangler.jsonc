@@ -1,0 +1,8 @@
+{
+  "name": "mapi-local-synthetic-archive-combined-test",
+  "main": "synthetic-archive-combined-test-worker.mjs",
+  "compatibility_date": "2026-01-01",
+  "r2_buckets": [{"binding":"ARCHIVE","bucket_name":"local-synthetic-archive"}],
+  "durable_objects": {"bindings": [{"name":"TARGET","class_name":"SyntheticArchiveStagedDestination"}]},
+  "migrations": [{"tag":"v1","new_sqlite_classes":["SyntheticArchiveStagedDestination"]}]
+}

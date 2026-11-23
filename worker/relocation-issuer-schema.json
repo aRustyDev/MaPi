@@ -1,0 +1,236 @@
+[
+  {
+    "type": "index",
+    "name": "mapi_dpop_nonces_expiry",
+    "tbl_name": "mapi_dpop_nonces",
+    "sql": "CREATE INDEX mapi_dpop_nonces_expiry ON mapi_dpop_nonces (project_id, expires_at)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_dpop_replay_expiry",
+    "tbl_name": "mapi_dpop_replay",
+    "sql": "CREATE INDEX mapi_dpop_replay_expiry ON mapi_dpop_replay (project_id, expires_at)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_fapi_family_expiry",
+    "tbl_name": "mapi_fapi_code_family",
+    "sql": "CREATE INDEX mapi_fapi_family_expiry ON mapi_fapi_code_family(project_id,expires_at)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_fapi_one_active_signing_key",
+    "tbl_name": "mapi_fapi_signing_keys",
+    "sql": "CREATE UNIQUE INDEX mapi_fapi_one_active_signing_key ON mapi_fapi_signing_keys(project_id) WHERE active = 1"
+  },
+  {
+    "type": "index",
+    "name": "mapi_fapi_policy_bindings_expiry",
+    "tbl_name": "mapi_fapi_policy_bindings",
+    "sql": "CREATE INDEX mapi_fapi_policy_bindings_expiry ON mapi_fapi_policy_bindings(project_id,expires_at)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_fapi_refresh_client",
+    "tbl_name": "mapi_fapi_refresh_tokens",
+    "sql": "CREATE INDEX mapi_fapi_refresh_client ON mapi_fapi_refresh_tokens(project_id,client_id)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_fapi_refresh_family_expiry",
+    "tbl_name": "mapi_fapi_refresh_family",
+    "sql": "CREATE INDEX mapi_fapi_refresh_family_expiry ON mapi_fapi_refresh_family(project_id,expires_at)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_fapi_reload_expiry",
+    "tbl_name": "mapi_fapi_reload",
+    "sql": "CREATE INDEX mapi_fapi_reload_expiry ON mapi_fapi_reload(project_id,login_expires)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_fapi_revoked_access_expiry",
+    "tbl_name": "mapi_fapi_revoked_access",
+    "sql": "CREATE INDEX mapi_fapi_revoked_access_expiry ON mapi_fapi_revoked_access(project_id,expires_at)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_oauth_assertion_jti_expiry",
+    "tbl_name": "mapi_oauth_client_assertion_jtis",
+    "sql": "CREATE INDEX mapi_oauth_assertion_jti_expiry ON mapi_oauth_client_assertion_jtis(project_id,expires_at)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_oauth_one_active_signing_key",
+    "tbl_name": "mapi_oauth_signing_keys",
+    "sql": "CREATE UNIQUE INDEX mapi_oauth_one_active_signing_key ON mapi_oauth_signing_keys(project_id) WHERE active = 1"
+  },
+  {
+    "type": "index",
+    "name": "mapi_oauth_refresh_families",
+    "tbl_name": "mapi_oauth_refresh_tokens",
+    "sql": "CREATE INDEX mapi_oauth_refresh_families ON mapi_oauth_refresh_tokens (project_id, family_id)"
+  },
+  {
+    "type": "index",
+    "name": "mapi_oauth_revoked_access_expiry",
+    "tbl_name": "mapi_oauth_revoked_access",
+    "sql": "CREATE INDEX mapi_oauth_revoked_access_expiry ON mapi_oauth_revoked_access(project_id, expires_at)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_dpop_nonces",
+    "tbl_name": "mapi_dpop_nonces",
+    "sql": "CREATE TABLE mapi_dpop_nonces (\n nonce_hash BLOB PRIMARY KEY, project_id TEXT NOT NULL, client_id TEXT NOT NULL,\n purpose TEXT NOT NULL, expires_at INTEGER NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_dpop_replay",
+    "tbl_name": "mapi_dpop_replay",
+    "sql": "CREATE TABLE mapi_dpop_replay (\n  project_id TEXT NOT NULL, jkt TEXT NOT NULL, jti_hash BLOB NOT NULL, expires_at INTEGER NOT NULL,\n  PRIMARY KEY(project_id,jkt,jti_hash))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_client_policy",
+    "tbl_name": "mapi_fapi_client_policy",
+    "sql": "CREATE TABLE mapi_fapi_client_policy (project_id TEXT NOT NULL,client_id TEXT NOT NULL,audience TEXT NOT NULL,scopes TEXT NOT NULL,enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),version INTEGER NOT NULL CHECK(version>0),PRIMARY KEY(project_id,client_id))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_code_family",
+    "tbl_name": "mapi_fapi_code_family",
+    "sql": "CREATE TABLE mapi_fapi_code_family (code_hash BLOB PRIMARY KEY,project_id TEXT NOT NULL,client_id TEXT NOT NULL,redirect_uri TEXT NOT NULL,challenge TEXT NOT NULL,dpop_jkt TEXT NOT NULL,user_id TEXT NOT NULL,session_id TEXT NOT NULL,scope TEXT NOT NULL,expires_at INTEGER NOT NULL,revoked_at INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_codes",
+    "tbl_name": "mapi_fapi_codes",
+    "sql": "CREATE TABLE mapi_fapi_codes (\n code_hash BLOB PRIMARY KEY, project_id TEXT NOT NULL,client_id TEXT NOT NULL,redirect_uri TEXT NOT NULL,\n user_id TEXT NOT NULL,session_id TEXT NOT NULL,scope TEXT NOT NULL,nonce TEXT NOT NULL,\n code_challenge TEXT NOT NULL,dpop_jkt TEXT NOT NULL,expires_at INTEGER NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_logins",
+    "tbl_name": "mapi_fapi_logins",
+    "sql": "CREATE TABLE mapi_fapi_logins (\n\t\thandle_hash BLOB PRIMARY KEY, browser_hash BLOB NOT NULL,\n\t\tproject_id TEXT NOT NULL, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL,\n\t\tscope TEXT NOT NULL, state TEXT NOT NULL, nonce TEXT NOT NULL,\n\t\tcode_challenge TEXT NOT NULL, dpop_jkt TEXT NOT NULL, expires_at INTEGER NOT NULL\n\t)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_policy_bindings",
+    "tbl_name": "mapi_fapi_policy_bindings",
+    "sql": "CREATE TABLE mapi_fapi_policy_bindings (kind TEXT NOT NULL,token_hash BLOB NOT NULL,project_id TEXT NOT NULL,client_id TEXT NOT NULL,policy_version INTEGER NOT NULL CHECK(policy_version>0),expires_at INTEGER NOT NULL,PRIMARY KEY(kind,token_hash))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_prompts",
+    "tbl_name": "mapi_fapi_prompts",
+    "sql": "CREATE TABLE mapi_fapi_prompts (kind TEXT NOT NULL,token_hash BLOB NOT NULL,prompt TEXT NOT NULL CHECK(prompt IN ('','consent')),PRIMARY KEY(kind,token_hash))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_refresh_family",
+    "tbl_name": "mapi_fapi_refresh_family",
+    "sql": "CREATE TABLE mapi_fapi_refresh_family (token_hash BLOB PRIMARY KEY,project_id TEXT NOT NULL,client_id TEXT NOT NULL,family_hash BLOB NOT NULL,expires_at INTEGER NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_refresh_tokens",
+    "tbl_name": "mapi_fapi_refresh_tokens",
+    "sql": "CREATE TABLE mapi_fapi_refresh_tokens (\n token_hash BLOB PRIMARY KEY,project_id TEXT NOT NULL,client_id TEXT NOT NULL,user_id TEXT NOT NULL,\n session_id TEXT NOT NULL,scope TEXT NOT NULL,dpop_jkt TEXT NOT NULL,expires_at INTEGER NOT NULL,revoked_at INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_reload",
+    "tbl_name": "mapi_fapi_reload",
+    "sql": "CREATE TABLE mapi_fapi_reload (par_hash BLOB PRIMARY KEY,project_id TEXT NOT NULL,client_id TEXT NOT NULL,login_hash BLOB NOT NULL,browser_hash BLOB NOT NULL,session_hash BLOB,par_expires INTEGER NOT NULL,login_expires INTEGER NOT NULL,UNIQUE(project_id,login_hash))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_revoked_access",
+    "tbl_name": "mapi_fapi_revoked_access",
+    "sql": "CREATE TABLE mapi_fapi_revoked_access (project_id TEXT NOT NULL,token_hash BLOB NOT NULL,expires_at INTEGER NOT NULL,PRIMARY KEY(project_id,token_hash))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_fapi_signing_keys",
+    "tbl_name": "mapi_fapi_signing_keys",
+    "sql": "CREATE TABLE mapi_fapi_signing_keys (\n project_id TEXT NOT NULL, key_id TEXT NOT NULL, public_key BLOB NOT NULL,\n private_key_jwe TEXT NOT NULL, active INTEGER NOT NULL CHECK(active IN (0,1)),\n created_at INTEGER NOT NULL, PRIMARY KEY(project_id,key_id))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_isolated_profile_clients",
+    "tbl_name": "mapi_isolated_profile_clients",
+    "sql": "CREATE TABLE mapi_isolated_profile_clients (project_id TEXT NOT NULL,client_id TEXT NOT NULL,profile TEXT NOT NULL CHECK(profile IN ('bearer','fapi')),PRIMARY KEY(project_id,client_id))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_client_assertion_jtis",
+    "tbl_name": "mapi_oauth_client_assertion_jtis",
+    "sql": "CREATE TABLE mapi_oauth_client_assertion_jtis (\n project_id TEXT NOT NULL, client_id TEXT NOT NULL, jti_hash BLOB NOT NULL, expires_at INTEGER NOT NULL,\n PRIMARY KEY(project_id,client_id,jti_hash))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_client_assertion_keys",
+    "tbl_name": "mapi_oauth_client_assertion_keys",
+    "sql": "CREATE TABLE mapi_oauth_client_assertion_keys (\n project_id TEXT NOT NULL, client_id TEXT NOT NULL, key_id TEXT NOT NULL,\n algorithm TEXT NOT NULL, public_jwk TEXT NOT NULL, active INTEGER NOT NULL CHECK(active IN (0,1)),\n PRIMARY KEY(project_id,client_id,key_id))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_client_epochs",
+    "tbl_name": "mapi_oauth_client_epochs",
+    "sql": "CREATE TABLE mapi_oauth_client_epochs (project_id TEXT NOT NULL, client_id TEXT NOT NULL, epoch INTEGER NOT NULL CHECK(epoch >= 0), PRIMARY KEY(project_id,client_id))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_codes",
+    "tbl_name": "mapi_oauth_codes",
+    "sql": "CREATE TABLE mapi_oauth_codes (\n\t\tcode_hash BLOB PRIMARY KEY,\n\t\tproject_id TEXT NOT NULL,\n\t\tclient_id TEXT NOT NULL,\n\t\tredirect_uri TEXT NOT NULL,\n\t\tuser_id TEXT NOT NULL,\n\t\tsession_id TEXT NOT NULL,\n\t\tscope TEXT NOT NULL,\n\t\tnonce TEXT NOT NULL,\n\t\tcode_challenge TEXT NOT NULL,\n\t\texpires_at INTEGER NOT NULL\n\t)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_logins",
+    "tbl_name": "mapi_oauth_logins",
+    "sql": "CREATE TABLE mapi_oauth_logins (\n\t\thandle_hash BLOB PRIMARY KEY, browser_hash BLOB NOT NULL,\n\t\tproject_id TEXT NOT NULL, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL,\n\t\tscope TEXT NOT NULL, state TEXT NOT NULL, nonce TEXT NOT NULL,\n\t\tcode_challenge TEXT NOT NULL, expires_at INTEGER NOT NULL\n\t)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_logout_uris",
+    "tbl_name": "mapi_oauth_logout_uris",
+    "sql": "CREATE TABLE mapi_oauth_logout_uris (project_id TEXT NOT NULL, client_id TEXT NOT NULL, uri TEXT NOT NULL, PRIMARY KEY(project_id,client_id,uri))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_par",
+    "tbl_name": "mapi_oauth_par",
+    "sql": "CREATE TABLE mapi_oauth_par (\n\t\thandle_hash BLOB PRIMARY KEY, project_id TEXT NOT NULL, client_id TEXT NOT NULL,\n\t\tredirect_uri TEXT NOT NULL, scope TEXT NOT NULL, state TEXT NOT NULL, nonce TEXT NOT NULL,\n\t\tcode_challenge TEXT NOT NULL, dpop_jkt TEXT NOT NULL, expires_at INTEGER NOT NULL\n\t)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_refresh_tokens",
+    "tbl_name": "mapi_oauth_refresh_tokens",
+    "sql": "CREATE TABLE mapi_oauth_refresh_tokens (\n\t\ttoken_hash BLOB PRIMARY KEY,\n\t\tfamily_id BLOB NOT NULL,\n\t\tproject_id TEXT NOT NULL,\n\t\tclient_id TEXT NOT NULL,\n\t\tuser_id TEXT NOT NULL,\n\t\tsession_id TEXT NOT NULL,\n\t\tscope TEXT NOT NULL,\n\t\texpires_at INTEGER NOT NULL,\n\t\tused_at INTEGER,\n\t\trevoked_at INTEGER\n\t)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_revoked_access",
+    "tbl_name": "mapi_oauth_revoked_access",
+    "sql": "CREATE TABLE mapi_oauth_revoked_access (\n  project_id TEXT NOT NULL, token_hash BLOB NOT NULL, expires_at INTEGER NOT NULL,\n  PRIMARY KEY(project_id, token_hash))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_schema",
+    "tbl_name": "mapi_oauth_schema",
+    "sql": "CREATE TABLE mapi_oauth_schema (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "mapi_oauth_signing_keys",
+    "tbl_name": "mapi_oauth_signing_keys",
+    "sql": "CREATE TABLE mapi_oauth_signing_keys (\n project_id TEXT NOT NULL, key_id TEXT NOT NULL, public_key BLOB NOT NULL,\n private_key_jwe TEXT NOT NULL, active INTEGER NOT NULL CHECK(active IN (0,1)),\n created_at INTEGER NOT NULL, PRIMARY KEY(project_id,key_id))"
+  },
+  {
+    "type": "table",
+    "name": "mapi_private_par_schema",
+    "tbl_name": "mapi_private_par_schema",
+    "sql": "CREATE TABLE mapi_private_par_schema (singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL)"
+  }
+]

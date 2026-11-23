@@ -1,12 +1,16 @@
 // Test-only direct owner RPC probes. Never deployed.
 import app, { NextgenApplication } from "../worker/app.js";
+import { ProjectRegistry } from "../worker/registry.js";
 
-export { NextgenApplication };
+export class MainRegistry extends ProjectRegistry { constructor(ctx, env) { super(ctx, { ...env, NEXTGEN_APPLICATION: env.TEST_MAIN }); } }
+export class MaintenanceRegistry extends ProjectRegistry { constructor(ctx, env) { super(ctx, { ...env, NEXTGEN_APPLICATION: env.TEST_MAINTENANCE }); } }
+export class RecoveryRegistry extends ProjectRegistry { constructor(ctx, env) { super(ctx, { ...env, NEXTGEN_APPLICATION: env.TEST_RECOVERY }); } }
+export class MainOwner extends NextgenApplication { constructor(ctx, env) { super(ctx, { ...env, PROJECT_REGISTRY: env.MAIN_REGISTRY, NEXTGEN_APPLICATION: env.TEST_MAIN }); } }
 export class MaintenanceOwner extends NextgenApplication {
-  constructor(ctx, env) { super(ctx, { ...env, MAPI_MAINTENANCE: "1" }); }
+  constructor(ctx, env) { super(ctx, { ...env, PROJECT_REGISTRY: env.MAINTENANCE_REGISTRY, NEXTGEN_APPLICATION: env.TEST_MAINTENANCE, MAPI_MAINTENANCE: "1" }); }
 }
 export class RecoveryOwner extends NextgenApplication {
-  constructor(ctx, env) { super(ctx, { ...env, MAPI_RECOVERY_EPOCH: "1" }); }
+  constructor(ctx, env) { super(ctx, { ...env, PROJECT_REGISTRY: env.RECOVERY_REGISTRY, NEXTGEN_APPLICATION: env.TEST_RECOVERY, MAPI_RECOVERY_EPOCH: "1" }); }
 }
 
 export default {
@@ -26,8 +30,11 @@ export default {
     }
     const origin = "https://issuer.example";
     const main = env.TEST_MAIN.getByName("main");
-    const { projectId } = await main.provision("Guard race test", origin);
-    const route = { projectId, origin };
+    const registry = env.MAIN_REGISTRY.getByName("projects");
+    await registry.reserve(origin, "main");
+    const { projectId } = await main.provision("Guard race test", origin, { projectId: null, origin, objectName: "main", generation: 1 });
+    await registry.activate(origin, "main", projectId);
+    const route = { projectId, origin, objectName: "main", generation: 1 };
     const request = { method: "POST", url: `${origin}/api/v1/flows/flow_wrong/submit`, headers: { origin: [origin], "content-type": ["application/json"] }, body: new TextEncoder().encode("{}").toBase64(), peer: "192.0.2.1" };
     const check = async (stub, argument, expected) => {
       const result = await stub.flowRequest(request, argument);
@@ -43,20 +50,28 @@ export default {
     if ((await main.flowRequest(wrongOrigin, route)).status !== 403) throw new Error("cross-origin owner request accepted");
 
     const maintenance = env.TEST_MAINTENANCE.getByName("maintenance");
-    const maintenanceProject = (await maintenance.provision("Maintenance test", origin)).projectId;
-    await check(maintenance, { projectId: maintenanceProject, origin }, 503);
-    if (await maintenance.admitLogin({ projectId: maintenanceProject, origin })) throw new Error("maintenance login admitted");
+    const maintenanceRegistry = env.MAINTENANCE_REGISTRY.getByName("projects");
+    await maintenanceRegistry.reserve(origin, "maintenance");
+    const maintenanceProject = (await maintenance.provision("Maintenance test", origin, { projectId: null, origin, objectName: "maintenance", generation: 1 })).projectId;
+    await maintenanceRegistry.activate(origin, "maintenance", maintenanceProject);
+    const maintenanceRoute = { projectId: maintenanceProject, origin, objectName: "maintenance", generation: 1 };
+    await check(maintenance, maintenanceRoute, 503);
+    if (await maintenance.admitLogin(maintenanceRoute)) throw new Error("maintenance login admitted");
     const recovery = env.TEST_RECOVERY.getByName("recovery");
-    const recoveryProject = (await recovery.provision("Recovery test", origin)).projectId;
-    await check(recovery, { projectId: recoveryProject, origin }, 503);
-    if (await recovery.admitLogin({ projectId: recoveryProject, origin })) throw new Error("recovery login admitted");
+    const recoveryRegistry = env.RECOVERY_REGISTRY.getByName("projects");
+    await recoveryRegistry.reserve(origin, "recovery");
+    const recoveryProject = (await recovery.provision("Recovery test", origin, { projectId: null, origin, objectName: "recovery", generation: 1 })).projectId;
+    await recoveryRegistry.activate(origin, "recovery", recoveryProject);
+    const recoveryRoute = { projectId: recoveryProject, origin, objectName: "recovery", generation: 1 };
+    await check(recovery, recoveryRoute, 503);
+    if (await recovery.admitLogin(recoveryRoute)) throw new Error("recovery login admitted");
 
     // The earlier valid probe consumed one password slot. The rest race on one
     // object's synchronous owner turn; exactly 59 may pass before the bound.
     const results = await Promise.all(Array.from({ length: 65 }, () => main.flowRequest(request, route)));
     const allowed = results.filter(r => r.status !== 429).length;
     if (allowed !== 59 || results.filter(r => r.status === 429).length !== 6) throw new Error(`password throttle race: ${allowed} admitted`);
-    await main.oauthAdmin("initialize");
+    await main.oauthAdmin("initialize", {}, route);
     const oauth = await main.oauthRequest({ method: "GET", url: `${origin}/oauth/${projectId}/jwks`, headers: {}, body: "", peer: request.peer }, route);
     if (oauth.status === 429) throw new Error("password throttle exhausted OAuth budget");
     return Response.json({ ok: true, allowed, rejected: 6, oauthStatus: oauth.status });

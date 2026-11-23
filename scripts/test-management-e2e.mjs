@@ -35,7 +35,13 @@ try {
  const email = `e2e-${randomUUID()}@example.test`, password = `Test-${randomUUID()}!`;
  const createdA = await admin(originA, '/_mapi/admin/users', { email, password }); const createdB = await admin(originB, '/_mapi/admin/users', { email, password }); assert.equal(createdA.status, 200); assert.equal(createdB.status, 200);
  const userA = createdA.data.userId, userB = createdB.data.userId; assert.notEqual(userA, userB);
- const tokenA = (await admin(originA, '/_mapi/test/management-token')).data.token, tokenB = (await admin(originB, '/_mapi/test/management-token')).data.token;
+ assert.equal((await request(originA, '/_mapi/test/management-token-fence')).status, 404);
+ for (const origin of [originA, originB]) assert.equal((await admin(origin, '/_mapi/test/management-token-fence')).status, 204, 'armed owner must reject missing and stale token authority');
+ assert.equal((await request(originA, '/_mapi/test/management-token')).status, 404);
+ assert.equal((await request(originA, '/_mapi/test/management-token', { token: 'invalid' })).status, 404);
+ const tokenResponseA = await admin(originA, '/_mapi/test/management-token'); assert.equal(tokenResponseA.status, 200, 'project A token request'); assert.ok(tokenResponseA.data?.token);
+ const tokenResponseB = await admin(originB, '/_mapi/test/management-token'); assert.equal(tokenResponseB.status, 200, 'project B token request'); assert.ok(tokenResponseB.data?.token);
+ const tokenA = tokenResponseA.data.token, tokenB = tokenResponseB.data.token;
  const query = (origin, token, project, extra = {}) => request(origin, `/api/v1/users/query?project_id=${project}`, { method: 'POST', body: '{}', token, headers: { 'content-type': 'application/json', ...extra.headers }, cookie: extra.cookie });
  const ownA = await query(originA, tokenA, projectA), ownB = await query(originB, tokenB, projectB); assert.equal(ownA.status, 200); assert.equal(ownB.status, 200); assert.equal(ownA.headers['cache-control'], 'no-store'); assert.ok(ownA.text.includes(userA) && !ownA.text.includes(userB)); assert.ok(ownB.text.includes(userB) && !ownB.text.includes(userA));
  assert.equal((await request(originA, `/api/v1/users/${userA}`, { token: tokenA })).status, 200);
@@ -75,6 +81,17 @@ try {
   server = spawn(process.execPath, [resolve('node_modules/wrangler/bin/wrangler.js'), 'dev', '--local', '--config', 'scripts/management-e2e.wrangler.jsonc', '--env-file', envPath, '--ip', '127.0.0.1', '--port', String(p), '--inspector-port', String(inspector), '--persist-to', resolve(dir, 'state')], { stdio: ['ignore', 'ignore', 'ignore'], env: { ...process.env, WRANGLER_LOG_PATH: resolve(dir, 'wrangler.log'), WRANGLER_SEND_METRICS: 'false' } });
   for (let attempt = 0; ; attempt++) { if (server.exitCode !== null || attempt === 100) throw Error('Workerd restart failed'); try { await request(originA, '/_mapi/admin/status'); break; } catch { await setTimeout(200); } }
   assert.equal((await request(originA, `/users/${userA}`, { token: tokenA })).status, expected);
+ }
+ for (const operatorSetting of ['', 'MAPI_OPERATOR_TOKEN=\n']) {
+  const stopped = once(server, 'exit'); server.kill('SIGTERM'); await stopped;
+  await writeFile(envPath, `MAPI_MASTER_KEY=${master}\n${operatorSetting}MAPI_APP_ORIGIN=${originA}\nMAPI_LOCAL_TEST=1\nMAPI_MANAGEMENT_ENABLED=1\n`, { mode: 0o600 });
+  server = spawn(process.execPath, [resolve('node_modules/wrangler/bin/wrangler.js'), 'dev', '--local', '--config', 'scripts/management-e2e.wrangler.jsonc', '--env-file', envPath, '--ip', '127.0.0.1', '--port', String(p), '--inspector-port', String(inspector), '--persist-to', resolve(dir, 'state')], { stdio: ['ignore', 'ignore', 'ignore'], env: { ...process.env, WRANGLER_LOG_PATH: resolve(dir, 'wrangler.log'), WRANGLER_SEND_METRICS: 'false' } });
+  for (let attempt = 0; ; attempt++) { if (server.exitCode !== null || attempt === 100) throw Error('Workerd restart failed'); try { await request(originA, '/_mapi/admin/status'); break; } catch { await setTimeout(200); } }
+  for (const token of ['undefined', '']) {
+   assert.equal((await request(originA, '/_mapi/test/management-token', { headers: { authorization: `Bearer ${token}` } })).status, 404);
+   assert.equal((await request(originA, '/_mapi/test/management-token-fence', { headers: { authorization: `Bearer ${token}` } })).status, 404);
+   assert.equal((await request(originA, '/_mapi/test/management-route', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ origin: `http://localhost:${p + 4}`, object: 'denied-test' }) })).status, 404);
+  }
  }
  console.log('Real registry, two application objects and Go management adapter passed Bearer, session, origin, CSRF and isolation checks.');
 } finally { if (server && server.exitCode === null && server.signalCode === null) { const exit = once(server, 'exit'); server.kill('SIGTERM'); await exit; } await rm(dir, { recursive: true, force: true }); }

@@ -1,0 +1,9 @@
+{
+  "name": "mapi-app-owner-fence-test",
+  "main": "app-owner-fence-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "OWNER", "class_name": "AppOwnerFenceTest" }, { "name": "NEXTGEN_APPLICATION", "class_name": "AppOwnerFenceTest" }, { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }, { "name": "MAINTENANCE_OWNER", "class_name": "MaintenanceOwner" }, { "name": "MAINTENANCE_REGISTRY", "class_name": "MaintenanceRegistry" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AppOwnerFenceTest", "MaintenanceOwner", "ProjectRegistry", "MaintenanceRegistry"] }],
+  "vars": { "MAPI_LOCAL_TEST": "1", "MAPI_APP_ORIGIN": "https://owner.example" }
+}

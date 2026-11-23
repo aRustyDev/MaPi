@@ -3,39 +3,11 @@ import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { startLocalZitadel, bootstrapProject } from "@zitadel/testing";
 import { runParity } from "./parity.mjs";
+import { exportFixture } from "./sqlite-schema-export.mjs";
 
 const dir = resolve(".mapi", "fixtures", Date.now().toString());
 const output = resolve(".mapi", "fixture.json");
 const generated = resolve("worker", "generated");
-
-function identifier(name) {
-  return '"' + name.replaceAll('"', '""') + '"';
-}
-
-function literal(value) {
-  if (value === null) return "NULL";
-  if (typeof value === "bigint" || typeof value === "number") return String(value);
-  if (value instanceof Uint8Array) return "X'" + Buffer.from(value).toString("hex") + "'";
-  if (value.includes("\0")) return "CAST(X'" + Buffer.from(value).toString("hex") + "' AS TEXT)";
-  return "'" + value.replaceAll("'", "''") + "'";
-}
-
-function exportFixture(db) {
-  const schema = db.prepare("SELECT name, type, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid").all();
-  const tables = schema.filter(({ type }) => type === "table");
-  const statements = tables.map(({ sql }) => sql);
-  for (const { name } of tables) {
-    const table = identifier(name);
-    const columns = db.prepare("PRAGMA table_xinfo(" + table + ")").all()
-      .filter(({ hidden }) => hidden === 0).map(({ name }) => identifier(name)).join(", ");
-    const values = db.prepare("SELECT " + columns + " FROM " + table);
-    values.setReadBigInts(true);
-    for (const row of values.iterate()) {
-      statements.push("INSERT INTO " + table + " (" + columns + ") VALUES (" + Object.values(row).map(literal).join(", ") + ")");
-    }
-  }
-  return statements.concat(schema.filter(({ type }) => type !== "table").map(({ sql }) => sql));
-}
 
 await mkdir(dir, { recursive: true, mode: 0o700 });
 await mkdir(generated, { recursive: true });

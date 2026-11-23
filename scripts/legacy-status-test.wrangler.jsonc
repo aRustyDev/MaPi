@@ -1,0 +1,12 @@
+{
+  "name": "mapi-legacy-status-local-test",
+  "main": "legacy-status-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "vars": { "MAPI_LOCAL_TEST": "1", "MAPI_APP_ORIGIN": "https://legacy.example", "MAPI_OPERATOR_TOKEN": "operator-secret" },
+  "durable_objects": { "bindings": [
+    { "name": "PROJECT_REGISTRY", "class_name": "TestRegistry" },
+    { "name": "NEXTGEN_APPLICATION", "class_name": "TestOwner" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestRegistry", "TestOwner"] }]
+}

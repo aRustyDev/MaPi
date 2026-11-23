@@ -1,0 +1,12 @@
+{
+  "name": "mapi-relocation-prefreeze-test",
+  "main": "relocation-prefreeze-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "vars": { "MAPI_LOCAL_TEST": "1", "MAPI_RELOCATION_ENABLED": "1", "MAPI_RELOCATION_CONTROL_TOKEN": "move-secret", "MAPI_FENCE_WRITERS_DRAINED": "1", "MAPI_APP_ORIGIN": "https://source.example", "MAPI_OPERATOR_TOKEN": "operator-secret", "MAPI_OIDC_EXPERIMENTAL": "1" },
+  "durable_objects": { "bindings": [
+    { "name": "PROJECT_REGISTRY", "class_name": "TestRegistry" },
+    { "name": "NEXTGEN_APPLICATION", "class_name": "TestOwner" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestRegistry", "TestOwner"] }]
+}

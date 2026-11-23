@@ -1,0 +1,6 @@
+{
+  "name": "mapi-pending-owner-test", "main": "pending-owner-test-worker.mjs", "compatibility_date": "2026-11-18", "workers_dev": false,
+  "vars": { "MAPI_LOCAL_TEST": "1", "MAPI_RELOCATION_ENABLED": "1", "MAPI_RELOCATION_CONTROL_TOKEN": "move-secret", "MAPI_FENCE_WRITERS_DRAINED": "1" },
+  "durable_objects": { "bindings": [ { "name": "PROJECT_REGISTRY", "class_name": "PendingRegistry" }, { "name": "NEXTGEN_APPLICATION", "class_name": "PendingOwner" }, { "name": "LEGACY_TARGET", "class_name": "LegacyTargetOwner" } ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PendingRegistry", "PendingOwner", "LegacyTargetOwner"] }]
+}

@@ -1,0 +1,9 @@
+# Owner fence JavaScript text validation
+
+The owner-fence helpers now reject unpaired UTF-16 surrogates in incoming project IDs, origins, object names and move IDs before entering storage. Well-formed supplementary characters are accepted. `withOwnerFence` validates the route before opening its synchronous transaction and still checks the active tuple inside that transaction. The same nonempty-string and generation requirements remain in force; this does not introduce a new identifier-length or URL policy.
+
+`node scripts/test-owner-fence-text.mjs` checks high/low unpaired surrogates and malformed combinations across initialization, direct assertion, fenced mutation, freeze and destination reservation. A storage spy proves these malformed inputs never reach storage or the mutation callback. It also checks that valid supplementary Unicode passes the JavaScript validator. Before the change, the first malformed input reached the spy instead of being rejected.
+
+`node scripts/test-owner-fence.mjs` passed in disposable local workerd with approved loopback access. The fixture additionally initializes and writes an owner with valid supplementary characters, freezes it, rejects a stale write, and preserves the exact valid project ID, owner name and move ID in the frozen fence and an idempotent destination reservation. The suite exercises its existing rollback and eviction cases and emits expected error traces for rejected calls. No malformed SQLite text is sent by these tests.
+
+This is an incoming JavaScript input check, not validation or repair of pre-existing SQLite values, a policy for malformed SQLite TEXT, a proof that all registry or owner entry paths use these helpers, a real-project migration, or hosted evidence. Existing malformed legacy tuples may now fail closed and require separate reconciliation. The existing Woven deployments were not touched.

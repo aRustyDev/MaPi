@@ -1,0 +1,14 @@
+{
+  "name": "mapi-relocation-coordinator-test",
+  "main": "relocation-coordinator-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "vars": { "COORDINATOR_SECRET": "secret" },
+  "durable_objects": { "bindings": [
+    { "name": "REGISTRY", "class_name": "RehearsalRegistry" },
+    { "name": "OWNER", "class_name": "RehearsalOwner" },
+    { "name": "NEXTGEN_APPLICATION", "class_name": "RehearsalOwner" },
+    { "name": "COORDINATOR", "class_name": "RehearsalCoordinator" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RehearsalRegistry", "RehearsalOwner", "RehearsalCoordinator"] }]
+}
