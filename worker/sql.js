@@ -29,7 +29,7 @@ function decodePacked(encoded) {
 // can push a platform-valid returned row over SQLite's record-size limit.
 // Integers use a minimal-width signed big-endian BLOB (zero uses an empty
 // BLOB). Escape actual BLOBs only when their marker pattern can be confused
-// with those reserved widths. Marker runs with up to four trailing bytes use
+// with those reserved widths. Marker runs with zero through four or six trailing bytes use
 // a compact, collision-safe tag. TEXT is unchanged; other marker-heavy BLOBs
 // can still exceed the limit.
 function returningColumn(column) {
@@ -40,7 +40,7 @@ function returningColumn(column) {
   const width = `CASE WHEN (${column}>>7) IN(-1,0) THEN 1 WHEN (${column}>>15) IN(-1,0) THEN 2 WHEN (${column}>>23) IN(-1,0) THEN 3 WHEN (${column}>>31) IN(-1,0) THEN 4 WHEN (${column}>>47) IN(-1,0) THEN 6 ELSE 8 END`;
   return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN zeroblob(0) ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
     ` WHEN 'blob' THEN CASE WHEN ${length} IN ${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN ${widths}) THEN` +
-    ` CASE WHEN ${length}/9<=8388607 AND ${length}%9<5 AND substr(${column},-9-${length}%9,9)=${marker} THEN CAST(${marker}||unhex(printf('%06x',${length}/9+8388608*(${length}%9 IN(2,4))))||${marker}||substr(${column},-${length}%9,${length}%9)||CASE WHEN ${length}%9 IN(2,4) THEN X'53' ELSE X'' END AS BLOB) ELSE CAST(${marker}||${column} AS BLOB) END` +
+    ` CASE WHEN ${length}/9<=8388607 AND ${length}%9 IN(0,1,2,3,4,6) AND substr(${column},-9-${length}%9,9)=${marker} THEN CAST(${marker}||unhex(printf('%04x',(${length}/9)&65535))||unhex(replace(hex(zeroblob(1+2*(${length}/9>>16)+(${length}%9=3))),'00','FF0000000000000000'))||substr(${column},-${length}%9,${length}%9)||CASE WHEN ${length}%9=3 THEN X'53' ELSE X'' END AS BLOB) ELSE CAST(${marker}||${column} AS BLOB) END` +
     ` ELSE ${column} END ELSE ${column} END`;
 }
 
@@ -59,21 +59,25 @@ function decodeReturning(value) {
     for (let i = 1; i < 9; i++) if (blob[index + i] !== 0) return false;
     return true;
   };
-  // The bytes after the first marker cannot themselves begin with a marker:
-  // if the first count byte is FF, the second marker puts FF in byte four.
-  // Two- and four-byte tails use a count flag and a padding byte to keep
-  // the remainder at a reserved width; three-byte tails use no flag or pad.
-  // Real BLOBs shaped like any tag are escaped as data.
-  const tagged = blob.length === 21 || blob.length === 22 || blob.length === 24 || blob.length === 26;
-  if (tagged && markerAt(0) && markerAt(12)) {
-    const encodedCount = blob[9] * 65536 + blob[10] * 256 + blob[11];
-    const flagged = (encodedCount & 8388608) !== 0;
-    const count = encodedCount & 8388607;
-    const tail = blob.length === 24 ? (flagged ? 2 : 3) : blob.length === 26 ? 4 : blob.length - 21;
-    if (count > 0 && (!flagged || (blob.length >= 24 && blob[blob.length - 1] === 83)) && (blob.length !== 26 || flagged)) {
+  // A compact tag is marker + two low count bytes + one or more markers
+  // encoding the high count and padding flag, followed by the tail. After
+  // the first marker the count bytes cannot begin a marker: FF 00 would be
+  // followed by the FF at the start of the next marker. A source BLOB shaped
+  // like this tag is escaped as data because its remainder has a reserved
+  // integer width.
+  if (markerAt(0) && markerAt(11)) {
+    let position = 11, markers = 0;
+    while (markerAt(position) && markers < 257) { markers++; position += 9; }
+    // Odd marker counts carry a normal tail; even counts carry a padded
+    // three-byte tail. Limit the encoded high count to 23 bits.
+    const tailBytes = blob.length - position;
+    const flag = (markers - 1) % 2;
+    const count = Math.floor((markers - 1) / 2) * 65536 + blob[9] * 256 + blob[10];
+    if (markers <= 256 && count > 0 && ((tailBytes === 4 && (!flag || blob[blob.length - 1] === 83)) || (!flag && [0,1,2,6].includes(tailBytes)))) {
+      const tail = tailBytes - flag;
       const repeated = new Uint8Array(count * 9 + tail);
       for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
-      repeated.set(blob.subarray(21, 21 + tail), count * 9);
+      repeated.set(blob.subarray(position, position + tail), count * 9);
       return { blob: repeated.toBase64() };
     }
   }
