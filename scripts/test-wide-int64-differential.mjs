@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { readFile } from 'node:fs/promises';
 import { execute } from '../worker/sql.js';
 
 // Exercise the real wide RETURNING rewrite against native SQLite while using
@@ -30,6 +31,8 @@ for (let row = 0; row < 1961; row++) {
 }
 db.exec('COMMIT');
 const useTerse = process.env.MAPI_TEST_TERSE === '1';
+const useShared = process.env.MAPI_TEST_SHARED === '1';
+assert.ok(!(useTerse && useShared));
 let selectedSQL;
 const storage = { sql: { exec(statement, ...args) {
   selectedSQL = statement;
@@ -37,9 +40,23 @@ const storage = { sql: { exec(statement, ...args) {
   prepared.setReturnArrays(true);
   return { raw: () => ({ toArray: () => prepared.all(...args) }) };
 } } };
-const padding = useTerse ? `/*${'x'.repeat(60000)}*/` : '';
-const result = execute(storage, { statement: `DELETE FROM values_to_delete ${padding} RETURNING id,${names.join(',')}`, args: [], query: true });
-assert.equal(selectedSQL.includes("X'4D615069233921403F'"), useTerse, 'Unexpected wide codec selected');
+let result;
+if (useTerse) {
+  // The shared rewrite normally wins before this older fallback. Exercise the
+  // production fallback codec directly without adding a runtime test switch.
+  const source = await readFile(new URL('../worker/sql.js', import.meta.url), 'utf8');
+  const moduleUrl = 'data:text/javascript;base64,' + Buffer.from(source + '\nexport { terseReturningColumn, decodeReturning };').toString('base64');
+  const { terseReturningColumn, decodeReturning } = await import(moduleUrl);
+  const columns = ['id', ...names];
+  const statement = `DELETE FROM values_to_delete RETURNING ${columns.map(terseReturningColumn).join(',')}`;
+  const raw = storage.sql.exec(statement).raw().toArray();
+  result = { columns, rows: raw.map(row => row.map(value => decodeReturning(value, false, true))) };
+  assert.ok(selectedSQL.includes("X'4D615069233921403F'"), 'Terse codec was not selected');
+} else {
+  const padding = useShared ? `/*${'x'.repeat(60000)}*/` : '';
+  result = execute(storage, { statement: `DELETE FROM values_to_delete ${padding} RETURNING id,${names.join(',')}`, args: [], query: true });
+  assert.equal(selectedSQL.startsWith('WITH mapi_shared_value'), useShared, 'Unexpected wide codec selected');
+}
 assert.equal(result.columns.length, 52);
 assert.equal(result.rows.length, expected.length);
 const seen = new Set();
@@ -53,5 +70,5 @@ for (const row of result.rows) {
 }
 assert.equal(seen.size, expected.length);
 assert.equal(db.prepare('SELECT COUNT(*) AS n FROM values_to_delete').get().n, 0);
-console.log(`Native SQLite ${useTerse ? 'terse' : 'compact'} wide RETURNING int64 differential passed ${expected.length * names.length} values.`);
+console.log(`Native SQLite ${useTerse ? 'terse codec' : useShared ? 'shared' : 'compact'} wide RETURNING int64 differential passed ${expected.length * names.length} values.`);
 db.close();

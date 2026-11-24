@@ -86,6 +86,26 @@ function compactReturningColumn(column) {
   return direct.length <= nested.length ? direct : nested;
 }
 
+// Reference one correlated encoder CTE from each result expression instead
+// of repeating the full encoder. The name avoids all identifier-like tokens
+// in the caller's SQL, including those in quoted text or comments.
+function sharedReturningRewrite(sql, tokens, returningToken, columns) {
+  const used = new Set((sql.match(/[a-zA-Z_][a-zA-Z_0-9$]*/g) || []).map(token => token.toLowerCase()));
+  let name = 'mapi_shared_value';
+  while (used.has(name)) name += '_';
+  const helper = `${name} AS NOT MATERIALIZED (SELECT ${compactValueExpression('v', 'l', 'm')} AS e FROM (SELECT v,length(v) AS l,X'FF0000000000000000' AS m))`;
+  const first = tokens.find(token => /^[A-Z_]/.test(token.word));
+  let prefix;
+  if (first?.word === 'WITH') {
+    const next = tokens[tokens.indexOf(first) + 1];
+    const position = next?.word === 'RECURSIVE' ? next.end : first.end;
+    prefix = sql.slice(0, position) + ' ' + helper + ',' + sql.slice(position, returningToken.start) + 'RETURNING ';
+  } else {
+    prefix = 'WITH ' + helper + ' ' + sql.slice(0, returningToken.start) + 'RETURNING ';
+  }
+  return prefix + columns.map(column => `(SELECT (SELECT e FROM ${name}) FROM (SELECT ${column} AS v))`).join(', ');
+}
+
 // Last-resort wide codec: keep large non-colliding BLOBs unchanged and
 // escape only values that collide with the reserved integer-width grammar.
 function terseReturningColumn(column) {
@@ -364,6 +384,13 @@ export function execute(storage, { statement, args, query }) {
       if (new TextEncoder().encode(shorter).length < new TextEncoder().encode(prepared).length) {
         unified = false;
         prepared = shorter;
+      }
+    }
+    if (wide && new TextEncoder().encode(prepared).length > 100000) {
+      const candidate = sharedReturningRewrite(sql, tokens, returningToken, columns);
+      if (new TextEncoder().encode(candidate).length < new TextEncoder().encode(prepared).length) {
+        unified = true;
+        prepared = candidate;
       }
     }
     if (wide && new TextEncoder().encode(prepared).length > 100000) {

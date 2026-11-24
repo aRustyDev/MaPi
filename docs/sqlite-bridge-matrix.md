@@ -459,25 +459,28 @@ and result reconstruction can scan or allocate large values; the wide tag can
 itself reach 592,145 bytes. Hosted CPU and total isolate memory are unverified.
 
 `npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme` and
-its `-ff`, `-zero` and `-last` variants pass an 8,388,530-byte BLOB with 99
-NULL columns whose identifiers are extended by 512 bytes. When both earlier
-wide rewrites exceed the SQL limit, a shorter fallback uses a distinct
-self-non-overlapping marker and the existing reserved-integer-width escape
-grammar. Its decoder is selected only for that rewrite. Local Workerd checks
-cover compact-to-fallback and final 100,000-byte SQL boundaries, all byte
-values in short and marker-prefixed BLOBs, nested markers, integer extrema,
-REAL, TEXT, NULL, multi-row UPDATE and DELETE, rollback and trigger effects.
-`npm run test:terse-int64-differential` compares 100,011 independently
-generated signed values through the actual fallback using a native SQLite
-adapter. These are selected local cases; hosted resource limits remain open.
+its `-ff`, `-zero`, `-last` and `-terse-marker` variants pass an
+8,388,530-byte BLOB with 99 NULL columns whose identifiers are extended by
+512 bytes. When the previous wide rewrites exceed the SQL-size limit, the
+bridge tries a shared correlated `NOT MATERIALIZED` CTE using the compact
+codec before the shorter distinct-marker fallback. The terse-marker value no
+longer needs escaping in the shared codec. The shared rewrite also passed
+plain and recursive caller CTE variants, colliding CTE and trigger-table names,
+bound UPSERT, multi-row UPDATE and DELETE, same-row AFTER trigger semantics,
+rollback and audit counts, mixed values, and the 100,000/100,001-byte SQL
+boundary in local Workerd. `npm run test:shared-int64-differential` compares
+100,011 signed values through the shared rewrite against a native BigInt
+oracle; `npm run test:terse-int64-differential` exercises the production terse
+codec directly rather than its selection. `NOT MATERIALIZED` is a SQLite
+planner hint; these cases do not prove every query shape or bound hosted CPU
+and isolate memory.
 
-`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-terse-marker`
-is a **failing regression**: direct DELETE returns the 8,388,530-byte BLOB
-when it is composed of the fallback's own repeated marker and an eight-byte
-tail, while the fallback escape exceeds SQLite's result-size limit. Both
-attempts roll back business and audit changes. Other marker-heavy shapes and
-wide SELECT materialization may also exceed the limit. General exact-size
-compatibility remains an open Phase 1 gate.
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-interspersed`
+is a **failing regression**: a near-limit BLOB with a non-marker byte inserted
+inside a run of the compact marker exceeds SQLite's result-size limit when
+escaped. Direct DELETE succeeds and both attempts roll back business and audit
+changes. Other marker-heavy shapes and wide SELECT materialization may also
+exceed the limit. General exact-size compatibility remains an open Phase 1 gate.
 
 The checks for this change ran in a disposable checkout with a copied pinned
 upstream tree and dependencies symlinked to the original checkout's installed

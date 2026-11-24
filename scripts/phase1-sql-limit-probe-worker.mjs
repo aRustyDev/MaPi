@@ -44,7 +44,7 @@ export class SQLLimitProbe extends DurableObject {
     }
     return {ok:!bridgeError,error:bridgeError||null,directLength,rows,audit};
   }
-  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630, tailBytes = 0, wide = false, tailValue = -1, longNames = false, blobAtEnd = false, markerPattern = 'normal') {
+  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630, tailBytes = 0, wide = false, tailValue = -1, longNames = false, blobAtEnd = false, markerPattern = 'normal', withCte = false, interspersed = false) {
     const storage=this.ctx.storage, sql=storage.sql, abort='rollback boundary proof';
     const extra = wide ? Array.from({length:wide === true ? 50 : wide - 1}, (_, i) => longNames ? `column_identifier_for_test_${i}${longNames === 'extreme' ? '_'.repeat(512) : longNames === 'very' ? '_'.repeat(80) : ''}` : `c${i}`) : [];
     sql.exec(`CREATE TABLE IF NOT EXISTS pinned_blob_shape(value BLOB${extra.map(name => `, ${name}`).join('')})`);
@@ -53,11 +53,14 @@ export class SQLLimitProbe extends DurableObject {
     sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_blob_delete_audit AFTER DELETE ON pinned_blob_shape BEGIN UPDATE pinned_blob_audit SET count=count+1; END');
     const repeated = repeatedMarker ? new Uint8Array(blobBytes) : null;
     const marker = markerPattern === 'terse' ? [77,97,80,105,35,57,33,64,63] : [255,0,0,0,0,0,0,0,0];
-    if (repeated) { for (let i=0;i<repeated.length-tailBytes;i+=9) repeated.set(marker,i); for (let i=0;i<tailBytes;i++) repeated[repeated.length-tailBytes+i]=tailValue < 0 ? i+1 : tailValue; }
+    if (repeated) { let position=0; const count=(repeated.length-tailBytes)/9; for (let i=0;i<count;i++) { if(interspersed && i===Math.floor(count/2)) repeated[position++]=1; repeated.set(marker,position); position+=9; } for (let i=interspersed ? 1 : 0;i<tailBytes;i++) repeated[position++]=tailValue < 0 ? i+1 : tailValue; }
     const valueColumn=blobAtEnd ? extra[extra.length-1] : 'value', valueIndex=blobAtEnd ? extra.length : 0;
     const insert=()=>repeated ? sql.exec(`INSERT INTO pinned_blob_shape(${valueColumn}) VALUES (?)`, repeated.buffer) : sql.exec(`INSERT INTO pinned_blob_shape(${valueColumn}) VALUES (CAST(X'FF0000000000000000'||zeroblob(${blobBytes-9}) AS BLOB))`);
-    const matches=value=>value.length===blobBytes && value.every((byte,index)=>byte===(tailBytes && index>=blobBytes-tailBytes ? (tailValue < 0 ? index-(blobBytes-tailBytes)+1 : tailValue) : repeatedMarker ? marker[index%9] : index===0 ? 255 : 0));
-    const statement=`DELETE FROM pinned_blob_shape RETURNING value${extra.map(name => `,${name}`).join('')}`;
+    const insertion=interspersed ? Math.floor((blobBytes-tailBytes)/9/2)*9 : -1;
+    const matches=value=>value.length===blobBytes && value.every((byte,index)=>byte===(interspersed && index===insertion ? 1 : tailBytes && index>=blobBytes-tailBytes+(interspersed?1:0) ? (tailValue < 0 ? index-(blobBytes-tailBytes)+1 : tailValue) : repeatedMarker ? marker[(index-(interspersed && index>insertion?1:0))%9] : index===0 ? 255 : 0));
+    const cte=withCte === 'plain' ? 'WITH /*existing*/ mapi_shared_value(n) AS (VALUES(1)),mapi_shared_value_ AS (SELECT 1) ' : withCte ? 'WITH RECURSIVE mapi_shared_value(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM mapi_shared_value WHERE n<1),mapi_shared_value_ AS (SELECT 1) ' : '';
+    const where=withCte ? ' WHERE EXISTS(SELECT 1 FROM mapi_shared_value WHERE n=1) AND EXISTS(SELECT 1 FROM mapi_shared_value_)' : '';
+    const statement=`${cte}DELETE FROM pinned_blob_shape${where} RETURNING value${extra.map(name => `,${name}`).join('')}`;
     let directLength, bridgeError;
     try { storage.transactionSync(()=>{insert();directLength=sql.exec(statement).raw().toArray()[0][valueIndex].byteLength;throw Error(abort);}); }
     catch(error) { if(error.message!==abort) throw error; }
@@ -495,7 +498,7 @@ export class SQLLimitProbe extends DurableObject {
     assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0, 'Rejected write left a business row');
     assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'Rejected write left an audit row');
 
-    // Verify compact-to-terse fallback and both UTF-8 SQL size boundaries.
+    // Verify compact-to-shared fallback and both UTF-8 SQL size boundaries.
     // Each accepted statement executes once; an oversized one rolls back.
     const wideBoundaryNames = ['a','b','c',...Array.from({length:48}, () => 'd')];
     sql.exec('CREATE TABLE limit_probe_wide_boundary (a,b,c,d)');
@@ -516,19 +519,19 @@ export class SQLLimitProbe extends DurableObject {
     assert(calls[0] === 100000, 'Full wide RETURNING missed the byte boundary');
     calls.length = 0;
     checkWideBoundary(execute(observed, request(wideWrite(wideBoundary + 1))));
-    assert(calls.length === 1 && calls[0] < 100000, 'Terse wide RETURNING fallback was not selected');
-    const terseOverhead = calls[0] - (wideBoundary + 1);
-    const terseBoundary = 100000 - terseOverhead;
+    assert(calls.length === 1 && calls[0] < 100000, 'Shared wide RETURNING fallback was not selected');
+    const sharedOverhead = calls[0] - (wideBoundary + 1);
+    const sharedBoundary = 100000 - sharedOverhead;
     calls.length = 0;
-    checkWideBoundary(execute(observed, request(wideWrite(terseBoundary))));
-    assert(calls.length === 1 && calls[0] === 100000, 'Terse wide RETURNING missed the byte boundary');
+    checkWideBoundary(execute(observed, request(wideWrite(sharedBoundary))));
+    assert(calls.length === 1 && calls[0] === 100000, 'Shared wide RETURNING missed the byte boundary');
     calls.length = 0;
-    rejects(() => storage.transactionSync(() => execute(observed, request(wideWrite(terseBoundary + 1)))), 'statement too long');
-    assert(calls.length === 1 && calls[0] === 100001, 'Terse wide RETURNING rejection missed the byte boundary');
+    rejects(() => storage.transactionSync(() => execute(observed, request(wideWrite(sharedBoundary + 1)))), 'statement too long');
+    assert(calls.length === 1 && calls[0] === 100001, 'Shared wide RETURNING rejection missed the byte boundary');
     assert(sql.exec('SELECT count FROM limit_probe_trigger').one().count === beforeWideTrigger + 4, 'Wide size test changed trigger effects');
 
-    // Force the shorter codec with a long comment, then check every byte in
-    // short BLOBs and in colliding marker-prefixed and nested BLOBs.
+    // Force the shared codec with a long comment, then check every byte in
+    // short BLOBs and in marker-prefixed and nested BLOBs.
     const terseNames=['id','v','l','m',...Array.from({length:47},(_,i)=>`y${i}`)];
     sql.exec(`CREATE TABLE terse_scope (id INTEGER PRIMARY KEY,v,l,m,${Array.from({length:47},(_,i)=>`y${i}`).join(',')})`);
     sql.exec('CREATE TABLE terse_audit (n INTEGER NOT NULL)'); sql.exec('INSERT INTO terse_audit VALUES(0)');
@@ -549,7 +552,7 @@ export class SQLLimitProbe extends DurableObject {
     calls.length=0;
     try { storage.transactionSync(()=>{checkTerseUpdate(execute(observed,request(terseUpdate)));throw Error('terse update rollback');}); }
     catch(error) { if(error.message!=='terse update rollback') throw error; }
-    assert(calls.length===1 && calls[0]<90000 && sql.exec('SELECT n FROM terse_update_audit').one().n===0,'Terse update rollback or selection changed');
+    assert(calls.length===1 && calls[0]<70000 && sql.exec('SELECT n FROM terse_update_audit').one().n===0,'Terse update rollback or selection changed');
     calls.length=0; checkTerseUpdate(execute(observed,request(terseUpdate)));
     assert(calls.length===1 && sql.exec('SELECT n FROM terse_update_audit').one().n===3,'Terse update ran more than once');
     const terseDelete=sizedSQL('DELETE FROM terse_scope /*é',`*/ RETURNING ${terseNames.join(',')}`,60000);
@@ -565,10 +568,81 @@ export class SQLLimitProbe extends DurableObject {
     calls.length=0;
     try { storage.transactionSync(()=>{checkTerse(execute(observed,request(terseDelete)));throw Error('terse rollback');}); }
     catch(error) { if(error.message!=='terse rollback') throw error; }
-    assert(calls.length===1 && calls[0]<90000, 'Terse codec was not selected');
+    assert(calls.length===1 && calls[0]<70000, 'Shared codec was not selected');
     assert(sql.exec('SELECT COUNT(*) AS n FROM terse_scope').one().n===terseRows.length && sql.exec('SELECT n FROM terse_audit').one().n===0,'Terse rollback changed rows or audit');
     calls.length=0; checkTerse(execute(observed,request(terseDelete)));
     assert(calls.length===1 && sql.exec('SELECT n FROM terse_audit').one().n===terseRows.length,'Terse delete ran more than once');
+
+    // Force the shared codec and preserve existing recursive CTEs, parameter
+    // binding, alias-like names, per-row values and transactional effects.
+    const sharedNames=['id','v','l','m','e','mapi_shared_value',...Array.from({length:45},(_,i)=>`p${i}`)];
+    sql.exec(`CREATE TABLE shared_scope (id INTEGER PRIMARY KEY,v,l,m,e,mapi_shared_value,${Array.from({length:45},(_,i)=>`p${i}`).join(',')})`);
+    sql.exec('CREATE TABLE shared_audit (updated INTEGER NOT NULL,deleted INTEGER NOT NULL)'); sql.exec('INSERT INTO shared_audit VALUES(0,0)');
+    sql.exec('CREATE TABLE mapi_shared_value__ (n INTEGER NOT NULL)'); sql.exec('INSERT INTO mapi_shared_value__ VALUES(0)');
+    sql.exec('CREATE TRIGGER shared_update_aux AFTER UPDATE ON shared_scope BEGIN UPDATE mapi_shared_value__ SET n=n+1; END');
+    sql.exec('CREATE TRIGGER shared_update AFTER UPDATE ON shared_scope BEGIN UPDATE shared_audit SET updated=updated+1; END');
+    sql.exec('CREATE TRIGGER shared_delete AFTER DELETE ON shared_scope BEGIN UPDATE shared_audit SET deleted=deleted+1; END');
+    const sharedRows=[], alternateMarker=[77,97,80,105,35,57,33,64,63];
+    for(let byte=0;byte<256;byte++) for(const prefix of [scopeMarker,alternateMarker]) {
+      const id=sharedRows.length, tail=Array.from({length:8},(_,i)=>(byte+i*37)&255), value=Uint8Array.from([...prefix,...prefix,...tail]);
+      const integer=scopeInts[id%scopeInts.length]; sharedRows.push({integer,blob:value.toBase64()});
+      sql.exec('INSERT INTO shared_scope(id,v,l,m,e,mapi_shared_value) VALUES (?, CAST(? AS INTEGER), ?, ?, 0.25, ?)',id,integer,value.buffer,'text\0'+id,'identity-'+id);
+    }
+    const sharedUpdate=sizedSQL("WITH RECURSIVE input(k) AS (VALUES(0) UNION ALL SELECT k+1 FROM input WHERE k<2), mapi_shared_value AS (SELECT 1 AS v), mapi_shared_value_ AS (SELECT 2 AS v) UPDATE shared_scope SET m=m||'#' WHERE id IN (SELECT k FROM input) AND id<?1 /*é",`*/ RETURNING ${sharedNames.join(',')}`,60000);
+    const checkSharedUpdate=result=>{
+      assert(result.columns.length===51 && result.rows.length===3,'Shared recursive UPDATE shape changed');
+      for(const row of result.rows) {const id=Number(row[0]?.integer), expected=sharedRows[id]; assert(id>=0 && id<3 && row[1]?.integer===expected.integer && row[2]?.blob===expected.blob && row[3]==='text\0'+id+'#' && row[4]===0.25 && row[5]==='identity-'+id,`Shared UPDATE changed row ${id}`);}
+    };
+    calls.length=0;
+    try { storage.transactionSync(()=>{checkSharedUpdate(execute(observed,request(sharedUpdate,[{kind:'int',value:'3'}]))); throw Error('shared update rollback');}); }
+    catch(error) { if(error.message!=='shared update rollback') throw error; }
+    assert(calls.length===1 && calls[0]<70000 && sql.exec('SELECT updated FROM shared_audit').one().updated===0 && sql.exec('SELECT n FROM mapi_shared_value__').one().n===0,'Shared UPDATE selection or rollback changed');
+    calls.length=0; checkSharedUpdate(execute(observed,request(sharedUpdate,[{kind:'int',value:'3'}])));
+    assert(calls.length===1 && sql.exec('SELECT updated FROM shared_audit').one().updated===3 && sql.exec('SELECT n FROM mapi_shared_value__').one().n===3,'Shared UPDATE ran more than once');
+    // An UPSERT is still a single write, with the shared helper added before
+    // an existing plain CTE and with all original bindings preserved.
+    const replacement=Uint8Array.from([...scopeMarker,1,2,3,4,5,6,7,8]), replacementInteger='9223372036854775807';
+    const sharedUpsert=sizedSQL("WITH mapi_shared_value AS (SELECT 1),mapi_shared_value_ AS (SELECT 2) INSERT INTO shared_scope(id,v,l,m,e,mapi_shared_value) VALUES (?1,?2,?3,?4,0.25,?5) ON CONFLICT(id) DO UPDATE SET v=excluded.v,l=excluded.l,m=excluded.m,e=excluded.e,mapi_shared_value=excluded.mapi_shared_value /*é",`*/ RETURNING ${sharedNames.join(',')}`,60000);
+    const upsertArgs=[{kind:'int',value:'7'},{kind:'int',value:replacementInteger},{kind:'blob',value:replacement.toBase64()},{kind:'value',value:'replacement\0'},{kind:'value',value:'identity-7'}];
+    const checkSharedUpsert=result=>{const row=result.rows[0];assert(result.columns.length===51 && result.rows.length===1 && row[0]?.integer==='7' && row[1]?.integer===replacementInteger && row[2]?.blob===replacement.toBase64() && row[3]==='replacement\0' && row[4]===0.25 && row[5]==='identity-7','Shared UPSERT changed values');};
+    calls.length=0;
+    try { storage.transactionSync(()=>{checkSharedUpsert(execute(observed,request(sharedUpsert,upsertArgs)));throw Error('shared upsert rollback');}); }
+    catch(error) { if(error.message!=='shared upsert rollback') throw error; }
+    assert(calls.length===1 && calls[0]<70000 && sql.exec('SELECT updated FROM shared_audit').one().updated===3 && sql.exec('SELECT n FROM mapi_shared_value__').one().n===3,'Shared UPSERT rollback changed audit');
+    calls.length=0; checkSharedUpsert(execute(observed,request(sharedUpsert,upsertArgs)));
+    assert(calls.length===1 && sql.exec('SELECT updated FROM shared_audit').one().updated===4 && sql.exec('SELECT n FROM mapi_shared_value__').one().n===4,'Shared UPSERT ran more than once');
+    sharedRows[7]={integer:replacementInteger,blob:replacement.toBase64(),text:'replacement\0'};
+    const sharedDelete=sizedSQL('DELETE FROM shared_scope /*é',`*/ RETURNING ${sharedNames.join(',')}`,60000);
+    const checkSharedDelete=result=>{
+      assert(result.columns.length===51 && result.rows.length===sharedRows.length,'Shared DELETE shape changed'); const seen=new Set();
+      for(const row of result.rows) {const id=Number(row[0]?.integer), expected=sharedRows[id]; assert(expected && !seen.has(id) && row[1]?.integer===expected.integer && row[2]?.blob===expected.blob && row[3]===(expected.text ?? ('text\0'+id+(id<3?'#':''))) && row[4]===0.25 && row[5]==='identity-'+id && row.slice(6).every(value=>value===null),`Shared DELETE changed row ${id}`);seen.add(id);}
+    };
+    calls.length=0;
+    try { storage.transactionSync(()=>{checkSharedDelete(execute(observed,request(sharedDelete)));throw Error('shared delete rollback');}); }
+    catch(error) { if(error.message!=='shared delete rollback') throw error; }
+    assert(calls.length===1 && calls[0]<70000 && sql.exec('SELECT deleted FROM shared_audit').one().deleted===0 && sql.exec('SELECT COUNT(*) AS n FROM shared_scope').one().n===sharedRows.length,'Shared DELETE selection or rollback changed');
+    calls.length=0; checkSharedDelete(execute(observed,request(sharedDelete)));
+    assert(calls.length===1 && sql.exec('SELECT deleted FROM shared_audit').one().deleted===sharedRows.length,'Shared DELETE ran more than once');
+
+    // AFTER triggers may change the row after RETURNING values are formed.
+    // The shared correlated helper must still return the pre-trigger values.
+    const selfNames=['id','v',...Array.from({length:49},(_,i)=>`s${i}`)];
+    sql.exec(`CREATE TABLE shared_self_trigger (id INTEGER PRIMARY KEY,v,${Array.from({length:49},(_,i)=>`s${i}`).join(',')})`);
+    sql.exec('INSERT INTO shared_self_trigger(id,v) VALUES(0,0),(1,1)');
+    sql.exec('CREATE TABLE shared_self_audit(n INTEGER NOT NULL)'); sql.exec('INSERT INTO shared_self_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER shared_self_after AFTER UPDATE ON shared_self_trigger WHEN NEW.v<1000 BEGIN UPDATE shared_self_trigger SET v=NEW.v+1000 WHERE id=NEW.id; UPDATE shared_self_audit SET n=n+1; END');
+    const selfUpdate=sizedSQL('UPDATE shared_self_trigger SET v=v+1 /*é',`*/ RETURNING ${selfNames.join(',')}`,60000);
+    const checkSelf=result=>{
+      assert(result.columns.length===51 && result.rows.length===2,'Shared self-trigger result shape changed');
+      for(const row of result.rows) {const id=Number(row[0]?.integer);assert((id===0||id===1) && row[1]?.integer===String(id+1) && row.slice(2).every(value=>value===null),`Shared self-trigger RETURNING changed row ${id}`);}
+    };
+    calls.length=0;
+    try { storage.transactionSync(()=>{checkSelf(execute(observed,request(selfUpdate)));throw Error('shared self rollback');}); }
+    catch(error) { if(error.message!=='shared self rollback') throw error; }
+    assert(calls.length===1 && calls[0]<70000 && sql.exec('SELECT n FROM shared_self_audit').one().n===0,'Shared self-trigger rollback changed audit');
+    calls.length=0; checkSelf(execute(observed,request(selfUpdate)));
+    const selfRows=sql.exec('SELECT id,v FROM shared_self_trigger ORDER BY id').raw().toArray();
+    assert(calls.length===1 && sql.exec('SELECT n FROM shared_self_audit').one().n===2 && JSON.stringify(selfRows)===JSON.stringify([[0,1001],[1,1002]]),'Shared self-trigger commit changed values or duplicated writes');
 
     // Query-mode must not execute a write hidden in a comment or second SQL
     // statement. The trigger makes accidental writes visible in audit too.
@@ -714,4 +788,4 @@ export class SQLLimitProbe extends DurableObject {
     return { ok: true, wideColumns: 100, directSQLBytes: 100000, rewrittenSelectBytes: 100000, rewrittenReturningBytes: 100000, rejectedBytes: 100001, function33, largeRows };
   }
 }
-export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-tail8-ff') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,255) : params.has('exact-blob-repeat-tail8-zero') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,0) : params.has('exact-blob-repeat-tail8-wide-ff') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,255) : params.has('exact-blob-repeat-tail8-wide-zero') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,0) : params.has('exact-blob-repeat-tail8-wide64-ff') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,255) : params.has('exact-blob-repeat-tail8-wide64-zero') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,0) : params.has('exact-blob-repeat-tail8-wide100-very-long-last') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'very',true) : params.has('exact-blob-repeat-tail8-wide100-very-long-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,'very') : params.has('exact-blob-repeat-tail8-wide100-very-long-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,'very') : params.has('exact-blob-repeat-tail8-wide100-extreme-terse-marker') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',false,'terse') : params.has('exact-blob-repeat-tail8-wide100-extreme-last') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',true) : params.has('exact-blob-repeat-tail8-wide100-extreme-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,'extreme') : params.has('exact-blob-repeat-tail8-wide100-extreme-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,'extreme') : params.has('exact-blob-repeat-tail8-wide100-extreme') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme') : params.has('exact-blob-repeat-tail8-wide100-very-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'very') : params.has('exact-blob-repeat-tail8-wide100-long-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,true) : params.has('exact-blob-repeat-tail8-wide100-long-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,true) : params.has('exact-blob-repeat-tail8-wide100-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,true) : params.has('exact-blob-repeat-tail8-wide100-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255) : params.has('exact-blob-repeat-tail8-wide100-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0) : params.has('exact-blob-repeat-tail8-wide100') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100) : params.has('exact-blob-repeat-tail8-wide66') ? await probe.runEscapedBlobReturningExact(true,8388566,8,66) : params.has('exact-blob-repeat-tail8-wide65') ? await probe.runEscapedBlobReturningExact(true,8388566,8,65) : params.has('exact-blob-repeat-tail8-wide64') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64) : params.has('exact-blob-repeat-tail8-wide63') ? await probe.runEscapedBlobReturningExact(true,8388566,8,63) : params.has('exact-blob-repeat-tail8-wide') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true) : params.has('exact-blob-repeat-tail11') ? await probe.runEscapedBlobReturningExact(true,8388632,11) : params.has('exact-blob-repeat-tail8') ? await probe.runEscapedBlobReturningExact(true,8388629,8) : params.has('exact-blob-repeat-tail6') ? await probe.runEscapedBlobReturningExact(true,8388636,6) : params.has('exact-blob-repeat-tail5') ? await probe.runEscapedBlobReturningExact(true,8388635,5) : params.has('exact-blob-repeat-tail4') ? await probe.runEscapedBlobReturningExact(true,8388634,4) : params.has('exact-blob-repeat-tail3') ? await probe.runEscapedBlobReturningExact(true,8388633,3) : params.has('exact-blob-repeat-tail2') ? await probe.runEscapedBlobReturningExact(true,8388632,2) : params.has('exact-blob-repeat-tail') ? await probe.runEscapedBlobReturningExact(true,8388631,1) : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
+export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-tail8-ff') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,255) : params.has('exact-blob-repeat-tail8-zero') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,0) : params.has('exact-blob-repeat-tail8-wide-ff') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,255) : params.has('exact-blob-repeat-tail8-wide-zero') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,0) : params.has('exact-blob-repeat-tail8-wide64-ff') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,255) : params.has('exact-blob-repeat-tail8-wide64-zero') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,0) : params.has('exact-blob-repeat-tail8-wide100-very-long-last') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'very',true) : params.has('exact-blob-repeat-tail8-wide100-very-long-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,'very') : params.has('exact-blob-repeat-tail8-wide100-very-long-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,'very') : params.has('exact-blob-repeat-tail8-wide100-extreme-interspersed') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',false,'normal',false,true) : params.has('exact-blob-repeat-tail8-wide100-extreme-plain-cte') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',false,'terse','plain') : params.has('exact-blob-repeat-tail8-wide100-extreme-marker-cte') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',false,'terse',true) : params.has('exact-blob-repeat-tail8-wide100-extreme-cte') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',false,'normal',true) : params.has('exact-blob-repeat-tail8-wide100-extreme-terse-marker') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',false,'terse') : params.has('exact-blob-repeat-tail8-wide100-extreme-last') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',true) : params.has('exact-blob-repeat-tail8-wide100-extreme-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,'extreme') : params.has('exact-blob-repeat-tail8-wide100-extreme-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,'extreme') : params.has('exact-blob-repeat-tail8-wide100-extreme') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme') : params.has('exact-blob-repeat-tail8-wide100-very-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'very') : params.has('exact-blob-repeat-tail8-wide100-long-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,true) : params.has('exact-blob-repeat-tail8-wide100-long-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,true) : params.has('exact-blob-repeat-tail8-wide100-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,true) : params.has('exact-blob-repeat-tail8-wide100-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255) : params.has('exact-blob-repeat-tail8-wide100-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0) : params.has('exact-blob-repeat-tail8-wide100') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100) : params.has('exact-blob-repeat-tail8-wide66') ? await probe.runEscapedBlobReturningExact(true,8388566,8,66) : params.has('exact-blob-repeat-tail8-wide65') ? await probe.runEscapedBlobReturningExact(true,8388566,8,65) : params.has('exact-blob-repeat-tail8-wide64') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64) : params.has('exact-blob-repeat-tail8-wide63') ? await probe.runEscapedBlobReturningExact(true,8388566,8,63) : params.has('exact-blob-repeat-tail8-wide') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true) : params.has('exact-blob-repeat-tail11') ? await probe.runEscapedBlobReturningExact(true,8388632,11) : params.has('exact-blob-repeat-tail8') ? await probe.runEscapedBlobReturningExact(true,8388629,8) : params.has('exact-blob-repeat-tail6') ? await probe.runEscapedBlobReturningExact(true,8388636,6) : params.has('exact-blob-repeat-tail5') ? await probe.runEscapedBlobReturningExact(true,8388635,5) : params.has('exact-blob-repeat-tail4') ? await probe.runEscapedBlobReturningExact(true,8388634,4) : params.has('exact-blob-repeat-tail3') ? await probe.runEscapedBlobReturningExact(true,8388633,3) : params.has('exact-blob-repeat-tail2') ? await probe.runEscapedBlobReturningExact(true,8388632,2) : params.has('exact-blob-repeat-tail') ? await probe.runEscapedBlobReturningExact(true,8388631,1) : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
