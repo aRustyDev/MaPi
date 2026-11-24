@@ -53,12 +53,19 @@ function compactValueExpression(column, length, marker) {
   // Reserve the sparse tag after any leading marker run (and literal Qs).
   // Its escaped form gets one extra marker; decodeReturning removes it.
   const sparseCollision = `substr(ltrim(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'Q'),'Q'),1,9)='@MaPiRun1'`;
+  // A reserved-tag source may itself be near the row-size limit. When the
+  // span after its tag is zero-filled, preserve an arbitrary 64-byte tail and
+  // encode the zero count instead of adding an escape marker to the full row.
+  const headerEnd = `(instr(${column},X'404d61506952756e31')+8)`;
+  const zeroCount = `(${length}-${headerEnd}-64)`;
+  const zeroRun = `CAST(${marker}||'@MaPiRun1J'||unhex(printf('%08x',${zeroCount}))||substr(${column},1,${headerEnd})||substr(${column},-64) AS BLOB)`;
   const tag = `CAST(${marker}||unhex(printf('%02x',${count}>>8&255))||${run(`1+512*(${count}>>16)+256*(${rem} IN(3,8))+iif(${rem}=8,${byte(-8)},0)`)}||unhex(printf('%02x',${count}&255))||${run(`1+iif(${rem}=8,${byte(-7)},0)`)}||substr(${column},-min(${rem},6),${rem})||substr(X'53',1,${rem}=3) AS BLOB)`;
   // Count the hex digits needed for the signed value plus its sign bit,
   // then map byte widths 5 and 7 to the supported widths 6 and 8.
   const width = `substr('12346688',(length(printf('%x',(iif(${column}<0,~${column},${column})<<1)|1))+1)/2,1)`;
   return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN X'' ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
-    ` WHEN 'blob' THEN iif(substr(${column},1,9)=${marker} AND ${sparseCollision},CAST(${marker}||${column} AS BLOB),` +
+    ` WHEN 'blob' THEN iif(substr(${column},1,9)=${marker} AND ${sparseCollision},` +
+    `iif(${zeroCount}>=64 AND substr(${column},${headerEnd}+1,${zeroCount})=zeroblob(${zeroCount}),${zeroRun},CAST(${marker}||${column} AS BLOB)),` +
     `iif(${length} IN${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN${widths}),` +
     `iif(${length}<75497472 AND substr(${column},-9-${length}%9,9)=${marker},${tag},` +
     `iif(${length}>100,${sparse},CAST(${marker}||${column} AS BLOB))),` +
@@ -163,6 +170,18 @@ function decodeReturning(value, unified = false, terse = false) {
       if (hasHeader && markers > 1) return { blob: blob.subarray(9).toBase64() };
       if (hasHeader && markers === 1 && position === 9) {
         const sentinel = blob[position + header.length];
+        if (sentinel === 74) {
+          const start = position + header.length + 1;
+          if (blob.length < start + 4 + 18 + 64) throw new Error('Invalid zero-run SQLite BLOB tag');
+          const count = blob[start] * 0x1000000 + blob[start + 1] * 0x10000 + blob[start + 2] * 0x100 + blob[start + 3];
+          if (count < 64) throw new Error('Invalid zero-run SQLite BLOB length');
+          const payload = blob.subarray(start + 4);
+          const prefixLength = payload.length - 64;
+          const expanded = new Uint8Array(payload.length + count);
+          expanded.set(payload.subarray(0, prefixLength));
+          expanded.set(payload.subarray(prefixLength), prefixLength + count);
+          return { blob: expanded.toBase64() };
+        }
         if (sentinel < 65 || sentinel > 73) throw new Error('Invalid sparse SQLite BLOB sentinel');
         const payload = blob.subarray(position + header.length + 1);
         let markerCount = 0;

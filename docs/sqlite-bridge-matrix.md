@@ -488,11 +488,20 @@ encoder can scan and copy large BLOBs multiple times; neither CPU nor total
 isolate memory is bounded by these local tests.
 
 `npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header`
-is a **failing regression**: a near-limit BLOB beginning with the reserved
-sparse tag requires an escape prefix that exceeds SQLite's result-size limit.
-Direct DELETE succeeds and both attempts roll back business and audit changes.
-Other marker-heavy shapes and wide SELECT materialization may also exceed the
-limit. General exact-size compatibility remains an open Phase 1 gate.
+now passes the formerly failing reserved-tag value. For a source beginning with
+the reserved tag after marker and optional `Q` runs, the codec checks whether
+the span after the tag is zero-filled, preserves its final 64 bytes verbatim,
+and encodes the zero count. Local Workerd tests cover nested prefixes, all 256
+tail byte values, 63/64/65/127-byte zero-span boundaries, rollback and trigger
+effects. This is a specific compressible shape, not a general solution; SQL
+may copy or compare large values and hosted CPU and isolate memory are unverified.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-nonzero`
+is a **failing regression**: a near-limit reserved-tag BLOB with a nonzero byte
+inside the zero-filled span requires an escape prefix that exceeds SQLite's
+result-size limit. Direct DELETE succeeds and both attempts roll back business
+and audit changes. Other data shapes and wide SELECT materialization may also
+exceed the limit. General exact-size compatibility remains an open Phase 1 gate.
 
 The checks for this change ran in a disposable checkout with a copied pinned
 upstream tree and dependencies symlinked to the original checkout's installed
