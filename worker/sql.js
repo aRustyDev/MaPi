@@ -32,7 +32,26 @@ function decodePacked(encoded) {
 // with those reserved widths. Marker runs use compact tags when their suffix
 // fits a supported encoding. TEXT is unchanged; other marker-heavy BLOBs can
 // still exceed the limit.
-function returningColumn(column, allowEight = true) {
+// The compact wide codec keeps its tag in the existing BLOB escape grammar.
+// JSON extraction maps each suffix byte to a Unicode code point; SQLite's
+// unicode() returns NULL for a zero byte, which ifnull maps back to zero.
+function compactValueExpression(column, length, marker) {
+  const widths = "(0,1,2,3,4,6,8)";
+  // Removing 9-byte markers preserves length modulo 9, so a remainder in a
+  // reserved width already proves the original length has the same residue.
+  const remainder = `length(CAST(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'') AS BLOB))`;
+  const byte = index => `ifnull(unicode(json_extract('"\\u00'||hex(substr(${column},${index},1))||'"','$')),0)`;
+  const run = n => `unhex(replace(hex(zeroblob(${n})),'00',hex(${marker})))`;
+  const count = `${length}/9`, rem = `${length}%9`;
+  const tag = `CAST(${marker}||unhex(printf('%02x',(${count}>>8)&255))||${run(`1+512*(${count}>>16)+256*(${rem} IN(3,8))+iif(${rem}=8,${byte(-8)},0)`)}||unhex(printf('%02x',${count}&255))||${run(`1+iif(${rem}=8,${byte(-7)},0)`)}||substr(${column},-min(${rem},6),min(${rem},6))||substr(X'53',1,${rem}=3) AS BLOB)`;
+  const width = `1+(${column}>>7 NOT IN(-1,0))+(${column}>>15 NOT IN(-1,0))+(${column}>>23 NOT IN(-1,0))+2*(${column}>>31 NOT IN(-1,0))+2*(${column}>>47 NOT IN(-1,0))`;
+  return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN zeroblob(0) ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
+    ` WHEN 'blob' THEN iif(${length} IN ${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN ${widths}),` +
+    `iif(${length}<75497472 AND substr(${column},-9-${length}%9,9)=${marker},${tag},CAST(${marker}||${column} AS BLOB)),` +
+    `${column}) ELSE ${column} END`;
+}
+
+function legacyReturningColumn(column, allowEight = true) {
   const length = `length(${column})`, marker = "X'FF0000000000000000'", widths = "(0,1,2,3,4,6,8)";
   // Removing 9-byte markers preserves length modulo 9, so the outer BLOB
   // collision check proves any eligible residue is a reserved width. Values
@@ -55,7 +74,14 @@ function returningColumn(column, allowEight = true) {
     ` ELSE ${column} END ELSE ${column} END`;
 }
 
-function decodeReturning(value) {
+// The scalar subquery gives each correlated RETURNING value short local names
+// so the complete projection can fit SQLite's statement-size limit.
+function compactReturningColumn(column) {
+  const expression = compactValueExpression('v', 'l', 'm');
+  return `(SELECT ${expression} FROM (SELECT ${column} AS v,length(${column}) AS l,X'FF0000000000000000' AS m))`;
+}
+
+function decodeReturning(value, unified = false) {
   if (typeof value === 'string' || typeof value === 'number' || value === null) return value;
   const blob = new Uint8Array(value);
   const widths = [0, 1, 2, 3, 4, 6, 8];
@@ -70,45 +96,76 @@ function decodeReturning(value) {
     for (let i = 1; i < 9; i++) if (blob[index + i] !== 0) return false;
     return true;
   };
-  // In this tag each count byte precedes a marker run, so the bytes after
-  // the first marker cannot themselves start with a marker (FF is followed
-  // by the next marker's FF). The two runs encode the high count and suffix.
-  if (markerAt(0) && markerAt(10)) {
-    let position = 10, first = 0;
-    while (first < 32768 && markerAt(position)) { position += 9; first++; }
-    const low = blob[position++];
-    let second = 0;
-    while (second < 256 && markerAt(position)) { position += 9; second++; }
-    const count = Math.floor((first - 1) / 256) * 65536 + blob[9] * 256 + low;
-    if (first > 0 && second > 0 && position + 6 === blob.length && count > 0) {
-      const repeated = new Uint8Array(count * 9 + 8);
-      for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
-      repeated[count * 9] = (first - 1) % 256;
-      repeated[count * 9 + 1] = second - 1;
-      repeated.set(blob.subarray(position), count * 9 + 2);
-      return { blob: repeated.toBase64() };
+  // The selected SQL rewrite and decoder use the same transient tag format.
+  if (unified) {
+    // Two bounded marker runs encode the high count, suffix bytes and flag.
+    // Their separators ensure an unprefixed tag cannot begin with a marker;
+    // a source BLOB shaped like a tag is escaped as ordinary data.
+    if (markerAt(0) && markerAt(10)) {
+      let position = 10, first = 0;
+      while (first < 65536 && markerAt(position)) { position += 9; first++; }
+      const low = blob[position++];
+      let second = 0;
+      while (second < 256 && markerAt(position)) { position += 9; second++; }
+      const meta = first - 1, flag = (meta & 256) !== 0;
+      const count = Math.floor(meta / 512) * 65536 + blob[9] * 256 + low;
+      const remaining = blob.length - position;
+      const valid = flag ? (remaining === 4 && blob[blob.length - 1] === 83 && (meta & 255) === 0 && second === 1) || remaining === 6 : (meta & 255) === 0 && second === 1 && [0,1,2,4,6].includes(remaining);
+      if (first > 0 && second > 0 && count > 0 && valid) {
+        const tail = flag && remaining === 4 ? 3 : flag && remaining === 6 ? 8 : remaining;
+        const repeated = new Uint8Array(count * 9 + tail);
+        for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
+        if (tail === 8) {
+          repeated[count * 9] = meta & 255;
+          repeated[count * 9 + 1] = second - 1;
+          repeated.set(blob.subarray(position), count * 9 + 2);
+        } else {
+          repeated.set(blob.subarray(position, position + tail), count * 9);
+        }
+        return { blob: repeated.toBase64() };
+      }
     }
-  }
-  // A compact tag is marker + two low count bytes + one or more markers
-  // encoding the high count and padding flag, followed by the tail. After
-  // the first marker the count bytes cannot begin a marker: FF 00 would be
-  // followed by the FF at the start of the next marker. A source BLOB shaped
-  // like this tag is escaped as data because its remainder has a reserved
-  // integer width.
-  if (markerAt(0) && markerAt(11)) {
-    let position = 11, markers = 0;
-    while (markerAt(position) && markers < 257) { markers++; position += 9; }
-    // Odd marker counts carry a normal tail; even counts carry a padded
-    // three-byte tail. Limit the encoded high count to 23 bits.
-    const tailBytes = blob.length - position;
-    const flag = (markers - 1) % 2;
-    const count = Math.floor((markers - 1) / 2) * 65536 + blob[9] * 256 + blob[10];
-    if (markers <= 256 && count > 0 && ((tailBytes === 4 && (!flag || blob[blob.length - 1] === 83)) || (!flag && [0,1,2,6].includes(tailBytes)))) {
-      const tail = tailBytes - flag;
-      const repeated = new Uint8Array(count * 9 + tail);
-      for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
-      repeated.set(blob.subarray(position, position + tail), count * 9);
-      return { blob: repeated.toBase64() };
+  } else {
+    // In this tag each count byte precedes a marker run, so the bytes after
+    // the first marker cannot themselves start with a marker (FF is followed
+    // by the next marker's FF). The two runs encode the high count and suffix.
+    if (markerAt(0) && markerAt(10)) {
+      let position = 10, first = 0;
+      while (first < 32768 && markerAt(position)) { position += 9; first++; }
+      const low = blob[position++];
+      let second = 0;
+      while (second < 256 && markerAt(position)) { position += 9; second++; }
+      const count = Math.floor((first - 1) / 256) * 65536 + blob[9] * 256 + low;
+      if (first > 0 && second > 0 && position + 6 === blob.length && count > 0) {
+        const repeated = new Uint8Array(count * 9 + 8);
+        for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
+        repeated[count * 9] = (first - 1) % 256;
+        repeated[count * 9 + 1] = second - 1;
+        repeated.set(blob.subarray(position), count * 9 + 2);
+        return { blob: repeated.toBase64() };
+      }
+    }
+    // A compact tag is marker + two low count bytes + one or more markers
+    // encoding the high count and padding flag, followed by the tail. After
+    // the first marker the count bytes cannot begin a marker: FF 00 would be
+    // followed by the FF at the start of the next marker. A source BLOB shaped
+    // like this tag is escaped as data because its remainder has a reserved
+    // integer width.
+    if (markerAt(0) && markerAt(11)) {
+      let position = 11, markers = 0;
+      while (markerAt(position) && markers < 257) { markers++; position += 9; }
+      // Odd marker counts carry a normal tail; even counts carry a padded
+      // three-byte tail. Limit the encoded high count to 23 bits.
+      const tailBytes = blob.length - position;
+      const flag = (markers - 1) % 2;
+      const count = Math.floor((markers - 1) / 2) * 65536 + blob[9] * 256 + blob[10];
+      if (markers <= 256 && count > 0 && ((tailBytes === 4 && (!flag || blob[blob.length - 1] === 83)) || (!flag && [0,1,2,6].includes(tailBytes)))) {
+        const tail = tailBytes - flag;
+        const repeated = new Uint8Array(count * 9 + tail);
+        for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
+        repeated.set(blob.subarray(position, position + tail), count * 9);
+        return { blob: repeated.toBase64() };
+      }
     }
   }
   let escaped = blob.length >= 9 && widths.includes(blob.length % 9) && markerAt(0);
@@ -268,15 +325,21 @@ export function execute(storage, { statement, args, query }) {
   let prepared;
   let wide;
   const isReturning = !!returning;
+  let unified = false;
   if (returning) {
     columns = returning[1].split(/\s*,\s*/);
     wide = columns.length > 50;
-    // Prefer the eight-byte encoding whenever a wide rewrite fits SQLite's
-    // SQL-size limit. Otherwise retain the earlier shorter wide encoding.
+    // Use the compact codec for wide projections. When the rewritten SQL is
+    // too large, use the prior codec only if its rewrite is actually shorter.
     const prefix = sql.slice(0, returningToken.start) + "RETURNING ";
-    prepared = prefix + columns.map(column => returningColumn(column)).join(", ");
+    unified = wide;
+    prepared = prefix + columns.map(column => wide ? compactReturningColumn(column) : legacyReturningColumn(column)).join(", ");
     if (wide && new TextEncoder().encode(prepared).length > 100000) {
-      prepared = prefix + columns.map(column => returningColumn(column, false)).join(", ");
+      const shorter = prefix + columns.map(column => legacyReturningColumn(column, false)).join(", ");
+      if (new TextEncoder().encode(shorter).length < new TextEncoder().encode(prepared).length) {
+        unified = false;
+        prepared = shorter;
+      }
     }
   } else {
     if (kind !== "SELECT") throw new Error("Unsupported row-producing SQLite statement");
@@ -293,7 +356,7 @@ export function execute(storage, { statement, args, query }) {
       "\n) SELECT " + aliases.map(wide ? packedColumn : columnPair).join(", ") + " FROM " + rowSource;
   }
   const rows = storage.sql.exec(prepared, ...values).raw().toArray().map((row) =>
-    columns.map((_column, index) => isReturning ? decodeReturning(row[index]) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
+    columns.map((_column, index) => isReturning ? decodeReturning(row[index], unified) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
   return { columns, rows };
 }
 

@@ -434,33 +434,29 @@ these tests do not establish CPU or total isolate-memory limits.
 `-tail` through `-tail6` commands pass their marker-run cases. The
 `-tail8`, `-tail8-zero` and `-tail8-ff` commands pass an 8,388,629-byte BLOB
 ending in eight varied, zero or FF bytes; the `-tail11` control also passes.
-The eight-byte encoding represents the first two suffix bytes as bounded marker
-run lengths, with the remaining six bytes and two count bytes in the existing
-escape grammar. A tag-shaped or nested source BLOB remains data. Local Workerd
-tests cover each byte at each suffix position, interspersed bytes, count and
-tag collisions, signed integer boundaries, 100-column results, rollback and a
-committed delete with one audit effect. The marker check and reconstruction
-can scan or allocate large values; the new tag can itself reach 297,233 bytes.
-Hosted CPU and total isolate memory remain unverified.
 
-`npm run test:sql-returning-exact-blob-repeat-tail8-wide` passes an
-8,388,584-byte BLOB with an eight-byte suffix and 50 NULL columns. The
-`-tail8-wide64`, `-tail8-wide64-zero`, `-tail8-wide64-ff` and `-tail8-wide65`
-checks pass an 8,388,566-byte BLOB with 64 and 65 returned columns. A
-64-column mixed-type test covers integer extrema, BLOB, REAL, embedded NUL,
-NULL and one trigger-backed write. The bridge uses the full encoding when
-the wide rewrite fits within 100,000 UTF-8 bytes and otherwise falls back
-to the earlier shorter encoding. The local Workerd suite tests both sides of
-the statement-size boundary and the fallback's single execution.
+`-tail8-wide66` now passes an 8,388,566-byte BLOB and 65 NULL columns.
+`-tail8-wide100`, `-tail8-wide100-zero` and `-tail8-wide100-ff` pass an
+8,388,530-byte BLOB and 99 NULL columns. For wide results a compact scalar
+subquery uses short local aliases and a unified tag in the existing escape
+grammar; the matching decoder is selected with the rewrite. The prior codec
+is retained when its SQL is shorter and the compact rewrite exceeds the
+statement-size limit. A local Workerd test checks both sides of 100,000 UTF-8
+bytes and both codec paths with one trigger effect per write.
 
-`npm run test:sql-returning-exact-blob-repeat-tail8-wide66` is a **failing
-regression**: direct DELETE returns an 8,388,566-byte BLOB with an eight-byte
-suffix and 65 NULL columns, while the size-triggered shorter rewrite fails
-with `SQLITE_TOOBIG`. Both boundary attempts roll back business and audit
-changes. The exact threshold depends on statement and column names; 100
-ordinary columns still pass the statement-size check. Other marker-heavy
-shapes and wide SELECT materialization may also exceed the limit. Exact-size
-compatibility remains an open Phase 1 gate.
+The local suite also exercises 66-column multi-row UPDATE and DELETE with
+columns named like the local aliases, all 256 suffix byte values, integer
+width boundaries, tag-shaped and nested data, rollback and trigger counts.
+This is selected local evidence, not a proof for all SQL. The SQL marker check
+and result reconstruction can scan or allocate large values; the wide tag can
+itself reach 592,145 bytes. Hosted CPU and total isolate memory are unverified.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-long` is a
+**failing regression**: direct DELETE returns the BLOB and 99 NULL columns
+with longer identifiers, while the rewritten statement exceeds SQLite's size
+limit. Both attempts roll back business and audit changes. Other marker-heavy
+shapes and wide SELECT materialization may also exceed the limit. General
+exact-size compatibility remains an open Phase 1 gate.
 
 The checks for this change ran in a disposable checkout with a copied pinned
 upstream tree and dependencies symlinked to the original checkout's installed

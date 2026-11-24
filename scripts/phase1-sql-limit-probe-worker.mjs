@@ -44,9 +44,9 @@ export class SQLLimitProbe extends DurableObject {
     }
     return {ok:!bridgeError,error:bridgeError||null,directLength,rows,audit};
   }
-  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630, tailBytes = 0, wide = false, tailValue = -1) {
+  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630, tailBytes = 0, wide = false, tailValue = -1, longNames = false) {
     const storage=this.ctx.storage, sql=storage.sql, abort='rollback boundary proof';
-    const extra = wide ? Array.from({length:wide === true ? 50 : wide - 1}, (_, i) => `c${i}`) : [];
+    const extra = wide ? Array.from({length:wide === true ? 50 : wide - 1}, (_, i) => longNames ? `column_identifier_for_test_${i}` : `c${i}`) : [];
     sql.exec(`CREATE TABLE IF NOT EXISTS pinned_blob_shape(value BLOB${extra.map(name => `, ${name}`).join('')})`);
     sql.exec('CREATE TABLE IF NOT EXISTS pinned_blob_audit(count INTEGER NOT NULL)');
     sql.exec('DELETE FROM pinned_blob_shape'); sql.exec('DELETE FROM pinned_blob_audit'); sql.exec('INSERT INTO pinned_blob_audit VALUES(0)');
@@ -181,6 +181,72 @@ export class SQLLimitProbe extends DurableObject {
     const result64 = execute(storage, request(`INSERT INTO limit_probe_64 (${columns64.join(',')}) VALUES (${values64.join(',')}) RETURNING ${columns64.join(',')}`));
     assert(result64.columns.length === 64 && JSON.stringify(result64.rows[0].slice(0,9)) === JSON.stringify(expected), '64-column RETURNING changed types');
     assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_64').one().n === 1 && sql.exec('SELECT count FROM limit_probe_trigger').one().count === triggerBefore64 + 1, '64-column RETURNING executed more than once');
+    // Exercise a wide correlated rewrite with names also used as internal
+    // aliases. Each suffix byte cycles across all 256 values and v crosses
+    // every supported signed-width boundary. Rollback and commit must
+    // produce the same values and trigger exactly one effect per row.
+    const collisionColumns = ['id','v','l','m', ...Array.from({length:62}, (_, i) => `z${i}`)];
+    sql.exec(`CREATE TABLE wide_scope_probe (id INTEGER PRIMARY KEY,v,l,m,${Array.from({length:62}, (_, i) => `z${i}`).join(',')})`);
+    sql.exec('CREATE TABLE wide_scope_audit (n INTEGER NOT NULL)'); sql.exec('INSERT INTO wide_scope_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER wide_scope_delete AFTER DELETE ON wide_scope_probe BEGIN UPDATE wide_scope_audit SET n=n+1; END');
+    const scopeMarker = [255,0,0,0,0,0,0,0,0];
+    const scopeInts = ['-9223372036854775808','-140737488355329','-140737488355328','-2147483649','-2147483648','-8388609','-8388608','-32769','-32768','-129','-128','-1','0','1','127','128','32767','32768','8388607','8388608','2147483647','2147483648','140737488355327','140737488355328','9223372036854775807'];
+    const scopeValues = [];
+    for (let i=0;i<256;i++) {
+      const tail = Array.from({length:8}, (_, index) => (i + index * 37) & 255);
+      const value = Uint8Array.from([...scopeMarker, ...tail]);
+      const integer = scopeInts[i % scopeInts.length];
+      scopeValues.push({integer, blob:value.toBase64()});
+      sql.exec('INSERT INTO wide_scope_probe(id,v,l,m) VALUES (?, CAST(? AS INTEGER), ?, ?)', i, integer, value.buffer, 'text\0' + i);
+    }
+    // Values shaped like the unified tag, its nested escape, and its
+    // unprefixed form must remain data through a wide result.
+    for (const first of [1,2,257,512]) for (const second of [1,2,256]) {
+      const tag = [...scopeMarker,255,...Array.from({length:first},()=>scopeMarker).flat(),0,...Array.from({length:second},()=>scopeMarker).flat(),0,255,83,0,255,83];
+      for (const source of [tag,[...scopeMarker,...tag],tag.slice(9)]) {
+        const id=scopeValues.length, value=Uint8Array.from(source), integer=scopeInts[id % scopeInts.length];
+        scopeValues.push({integer, blob:value.toBase64()});
+        sql.exec('INSERT INTO wide_scope_probe(id,v,l,m) VALUES (?, CAST(? AS INTEGER), ?, ?)', id, integer, value.buffer, 'text\0' + id);
+      }
+    }
+    // Cross the low-count rollover for every compact tail shape in the
+    // actual wide codec, including zero, padding and suffix-byte paths.
+    for (const count of [65535,65536]) for (const tail of [[],[0,255,83],[0,255,83,0],[0,255,83,0,255,83],[0,255,83,0,255,83,0,255]]) {
+      const id=scopeValues.length, value=new Uint8Array(count*9+tail.length), integer=scopeInts[id % scopeInts.length];
+      for (let i=0;i<count*9;i+=9) value[i]=255;
+      value.set(tail,count*9); scopeValues.push({integer,blob:value.toBase64()});
+      sql.exec('INSERT INTO wide_scope_probe(id,v,l,m) VALUES (?, CAST(? AS INTEGER), ?, ?)', id, integer, value.buffer, 'text\0'+id);
+    }
+    // UPDATE must observe each updated row through the correlated rewrite,
+    // including columns named like its internal aliases.
+    sql.exec('CREATE TABLE wide_scope_update_audit (n INTEGER NOT NULL)'); sql.exec('INSERT INTO wide_scope_update_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER wide_scope_update AFTER UPDATE ON wide_scope_probe BEGIN UPDATE wide_scope_update_audit SET n=n+1; END');
+    const scopeUpdate = () => execute(storage, request(`UPDATE wide_scope_probe SET m=m||'#' WHERE id<3 RETURNING ${collisionColumns.join(',')}`));
+    const checkUpdate = result => {
+      assert(result.columns.length===66 && result.rows.length===3, 'Wide update result shape changed');
+      for (const row of result.rows) {
+        const id=Number(row[0]?.integer), expected=scopeValues[id];
+        assert(id>=0 && id<3 && row[1]?.integer===expected.integer && row[2]?.blob===expected.blob && row[3]==='text\0'+id+'#', `Wide updated row changed at ${id}`);
+      }
+    };
+    try { storage.transactionSync(() => { checkUpdate(scopeUpdate()); assert(sql.exec('SELECT n FROM wide_scope_update_audit').one().n===3, 'Wide update trigger count changed'); throw Error('update rollback'); }); }
+    catch(error) { if(error.message!=='update rollback') throw error; }
+    assert(sql.exec('SELECT n FROM wide_scope_update_audit').one().n===0, 'Wide update rollback changed audit');
+    checkUpdate(scopeUpdate());
+    assert(sql.exec('SELECT n FROM wide_scope_update_audit').one().n===3, 'Wide update ran more than once');
+    const checkScope = result => {
+      assert(result.columns.length===66 && result.rows.length===scopeValues.length, 'Wide scope result shape changed');
+      for (const row of result.rows) {
+        const id = Number(row[0]?.integer), expected = scopeValues[id];
+        assert(expected && row[1]?.integer===expected.integer && row[2]?.blob===expected.blob && row[3]==='text\0'+id+(id<3?'#':'') && row.slice(4).every(value=>value===null), `Wide scope data changed at ${id}`);
+      }
+    };
+    const scopeDelete = () => execute(storage, request(`DELETE FROM wide_scope_probe RETURNING ${collisionColumns.join(',')}`));
+    try { storage.transactionSync(() => { checkScope(scopeDelete()); throw Error('scope rollback'); }); }
+    catch(error) { if(error.message!=='scope rollback') throw error; }
+    assert(sql.exec('SELECT COUNT(*) AS n FROM wide_scope_probe').one().n===scopeValues.length && sql.exec('SELECT n FROM wide_scope_audit').one().n===0, 'Wide scope rollback changed rows or audit');
+    checkScope(scopeDelete());
+    assert(sql.exec('SELECT COUNT(*) AS n FROM wide_scope_probe').one().n===0 && sql.exec('SELECT n FROM wide_scope_audit').one().n===scopeValues.length, 'Wide scope delete ran more than once');
     // RETURNING uses compact type tags so an ordinary near-limit TEXT value
     // is not copied into a wider record merely to carry its SQLite type.
     // Exercise SQLite's dynamic types, tag collisions and binary64 round trips.
@@ -400,22 +466,25 @@ export class SQLLimitProbe extends DurableObject {
     // For a wide RETURNING, choose the full encoding by UTF-8 SQL size.
     // When that rewrite exceeds the limit, fall back before execution and
     // execute the mutation exactly once with the earlier compact encoding.
-    sql.exec('CREATE TABLE limit_probe_wide_boundary AS SELECT * FROM limit_probe_wide WHERE 0');
+    const wideBoundaryNames = Array.from({length:51}, (_, i) => `${String.fromCharCode(97 + Math.floor(i / 10))}${i % 10}`);
+    sql.exec(`CREATE TABLE limit_probe_wide_boundary (${wideBoundaryNames.join(',')})`);
     sql.exec('CREATE TRIGGER limit_probe_wide_boundary_insert AFTER INSERT ON limit_probe_wide_boundary BEGIN UPDATE limit_probe_trigger SET count = count + 1; END');
-    const wideProjection = wideNames.slice(0, 51).join(',');
-    const wideValuesForBoundary = Array.from({length:51}, () => 'NULL').join(',');
+    const wideProjection = wideBoundaryNames.join(',');
+    const wideValuesForBoundary = ["X'FF00000000000000000102030405060708'", "CAST('9223372036854775807' AS INTEGER)", "'text'", ...Array.from({length:48}, () => 'NULL')].join(',');
+    const wideBoundaryExpected = [{blob: Uint8Array.from([255,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8]).toBase64()}, {integer:'9223372036854775807'}, 'text'];
+    const checkWideBoundary = result => assert(JSON.stringify(result.rows[0].slice(0,3))===JSON.stringify(wideBoundaryExpected) && result.rows[0].slice(3).every(value=>value===null), 'Wide size test changed values');
     const wideWrite = size => sizedSQL(`INSERT INTO limit_probe_wide_boundary (${wideProjection}) VALUES (${wideValuesForBoundary}) /*é`, `*/ RETURNING ${wideProjection}`, size);
     const initialWideSize = 5000;
     const beforeWideTrigger = sql.exec('SELECT count FROM limit_probe_trigger').one().count;
     calls.length = 0;
-    assert(execute(observed, request(wideWrite(initialWideSize))).rows[0].every(value => value === null), 'Wide size test changed values');
+    checkWideBoundary(execute(observed, request(wideWrite(initialWideSize))));
     const wideOverhead = calls[0] - initialWideSize;
     const wideBoundary = 100000 - wideOverhead;
     calls.length = 0;
     execute(observed, request(wideWrite(wideBoundary)));
     assert(calls[0] === 100000, 'Full wide RETURNING missed the byte boundary');
     calls.length = 0;
-    assert(execute(observed, request(wideWrite(wideBoundary + 1))).rows[0].every(value => value === null), 'Fallback changed wide values');
+    checkWideBoundary(execute(observed, request(wideWrite(wideBoundary + 1))));
     assert(calls.length === 1 && calls[0] < 100000, 'Wide RETURNING did not fall back before execution');
     assert(sql.exec('SELECT count FROM limit_probe_trigger').one().count === beforeWideTrigger + 3, 'Wide size test executed a write more than once');
 
@@ -563,4 +632,4 @@ export class SQLLimitProbe extends DurableObject {
     return { ok: true, wideColumns: 100, directSQLBytes: 100000, rewrittenSelectBytes: 100000, rewrittenReturningBytes: 100000, rejectedBytes: 100001, function33, largeRows };
   }
 }
-export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-tail8-ff') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,255) : params.has('exact-blob-repeat-tail8-zero') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,0) : params.has('exact-blob-repeat-tail8-wide-ff') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,255) : params.has('exact-blob-repeat-tail8-wide-zero') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,0) : params.has('exact-blob-repeat-tail8-wide64-ff') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,255) : params.has('exact-blob-repeat-tail8-wide64-zero') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,0) : params.has('exact-blob-repeat-tail8-wide66') ? await probe.runEscapedBlobReturningExact(true,8388566,8,66) : params.has('exact-blob-repeat-tail8-wide65') ? await probe.runEscapedBlobReturningExact(true,8388566,8,65) : params.has('exact-blob-repeat-tail8-wide64') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64) : params.has('exact-blob-repeat-tail8-wide63') ? await probe.runEscapedBlobReturningExact(true,8388566,8,63) : params.has('exact-blob-repeat-tail8-wide') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true) : params.has('exact-blob-repeat-tail11') ? await probe.runEscapedBlobReturningExact(true,8388632,11) : params.has('exact-blob-repeat-tail8') ? await probe.runEscapedBlobReturningExact(true,8388629,8) : params.has('exact-blob-repeat-tail6') ? await probe.runEscapedBlobReturningExact(true,8388636,6) : params.has('exact-blob-repeat-tail5') ? await probe.runEscapedBlobReturningExact(true,8388635,5) : params.has('exact-blob-repeat-tail4') ? await probe.runEscapedBlobReturningExact(true,8388634,4) : params.has('exact-blob-repeat-tail3') ? await probe.runEscapedBlobReturningExact(true,8388633,3) : params.has('exact-blob-repeat-tail2') ? await probe.runEscapedBlobReturningExact(true,8388632,2) : params.has('exact-blob-repeat-tail') ? await probe.runEscapedBlobReturningExact(true,8388631,1) : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
+export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-tail8-ff') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,255) : params.has('exact-blob-repeat-tail8-zero') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,0) : params.has('exact-blob-repeat-tail8-wide-ff') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,255) : params.has('exact-blob-repeat-tail8-wide-zero') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,0) : params.has('exact-blob-repeat-tail8-wide64-ff') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,255) : params.has('exact-blob-repeat-tail8-wide64-zero') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,0) : params.has('exact-blob-repeat-tail8-wide100-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,true) : params.has('exact-blob-repeat-tail8-wide100-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255) : params.has('exact-blob-repeat-tail8-wide100-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0) : params.has('exact-blob-repeat-tail8-wide100') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100) : params.has('exact-blob-repeat-tail8-wide66') ? await probe.runEscapedBlobReturningExact(true,8388566,8,66) : params.has('exact-blob-repeat-tail8-wide65') ? await probe.runEscapedBlobReturningExact(true,8388566,8,65) : params.has('exact-blob-repeat-tail8-wide64') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64) : params.has('exact-blob-repeat-tail8-wide63') ? await probe.runEscapedBlobReturningExact(true,8388566,8,63) : params.has('exact-blob-repeat-tail8-wide') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true) : params.has('exact-blob-repeat-tail11') ? await probe.runEscapedBlobReturningExact(true,8388632,11) : params.has('exact-blob-repeat-tail8') ? await probe.runEscapedBlobReturningExact(true,8388629,8) : params.has('exact-blob-repeat-tail6') ? await probe.runEscapedBlobReturningExact(true,8388636,6) : params.has('exact-blob-repeat-tail5') ? await probe.runEscapedBlobReturningExact(true,8388635,5) : params.has('exact-blob-repeat-tail4') ? await probe.runEscapedBlobReturningExact(true,8388634,4) : params.has('exact-blob-repeat-tail3') ? await probe.runEscapedBlobReturningExact(true,8388633,3) : params.has('exact-blob-repeat-tail2') ? await probe.runEscapedBlobReturningExact(true,8388632,2) : params.has('exact-blob-repeat-tail') ? await probe.runEscapedBlobReturningExact(true,8388631,1) : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
