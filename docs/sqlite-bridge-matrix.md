@@ -430,24 +430,24 @@ TEXT tests pass with TEXT unchanged, including comparison with the earlier
 bridge. The marker check can copy a large BLOB in SQLite and scan it in JS;
 these tests do not establish CPU or total isolate-memory limits.
 
-`npm run test:sql-returning-exact-blob-repeat`,
-`npm run test:sql-returning-exact-blob-repeat-tail`, and
-`npm run test:sql-returning-exact-blob-repeat-tail2` pass pure marker runs
-and runs with one or two trailing bytes, up to 8,388,632 bytes. The bridge
-encodes these as compact tags containing a three-byte marker count. The
-24-byte two-tail tag includes a padding byte so its marker-stripped length
-is a reserved width; real BLOBs shaped like a tag or its nested form remain
-data. Local Workerd tests cover all 256 one-byte suffixes, two-byte suffixes
-with every byte paired with zero and 255, interspersed bytes, tag collisions,
-signed integer-width boundaries, 100 returned columns, rollback, and a
-committed delete with one audit effect. Reconstructing the result and the
-SQL marker check can allocate or scan large values; hosted CPU and total
-isolate memory remain unverified.
+`npm run test:sql-returning-exact-blob-repeat` and the corresponding
+`-tail`, `-tail2`, `-tail3`, `-tail4` and `-tail5` commands pass marker runs
+with zero through five trailing bytes, up to 8,388,635 bytes. The bridge uses
+compact marker-count tags for zero through four bytes; the five-byte fixture
+is returned without an escape. A count flag distinguishes the two-byte and
+three-byte tags, while padding puts the two- and four-byte tags in reserved
+widths. Runs larger than the 23-bit marker count use the ordinary escape.
+Real BLOBs shaped like a tag or its nested form remain data. Local Workerd
+tests cover all 256 one-byte suffixes, selected two-, three- and four-byte
+suffixes, interspersed bytes, flag and tag collisions, signed integer-width
+boundaries, 100 returned columns, rollback, and a committed delete with one
+audit effect. Reconstructing the result and the SQL marker check can allocate
+or scan large values; hosted CPU and total isolate memory remain unverified.
 
-`npm run test:sql-returning-exact-blob-repeat-tail3` is a **failing
-regression**: a platform-valid 8,388,633-byte marker run followed by three
-bytes succeeds with direct DELETE but needs an escape prefix and fails in the
-bridge with `SQLITE_TOOBIG`. Both attempts roll back business and audit changes.
+`npm run test:sql-returning-exact-blob-repeat-tail6` is a **failing
+regression**: a platform-valid 8,388,636-byte marker run followed by six bytes
+succeeds with direct DELETE but needs an escape prefix and fails in the bridge
+with `SQLITE_TOOBIG`. Both attempts roll back business and audit changes.
 Other marker-heavy shapes and wide SELECT materialization may also exceed the
 limit. Exact-size compatibility remains an open Phase 1 gate.
 
