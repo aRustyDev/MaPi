@@ -56,6 +56,7 @@
     "test:egress-spike": "node scripts/test-egress-spike.mjs",
     "test:sql-bind": "node scripts/test-sql-bind.mjs",
     "test:terse-int64-differential": "MAPI_TEST_TERSE=1 node scripts/test-wide-int64-differential.mjs",
+    "test:sql-result-spill-experiment": "node scripts/test-sql-result-spill-experiment.mjs",
     "test:sparse-zero-differential": "node scripts/test-sparse-zero-differential.mjs",
     "test:shared-int64-differential": "MAPI_TEST_SHARED=1 node scripts/test-wide-int64-differential.mjs",
     "test:wide-int64-differential": "node scripts/test-wide-int64-differential.mjs",
