@@ -136,6 +136,49 @@ not establish that a check constraint is a sufficient authority for arbitrary
 SQL. `ctx.abort()` is intentional and only
 applies to the disposable local spill object. Never deploy this experiment.
 
+## Synchronous multi-row staging investigation
+
+The same local experiment now compares a fixed, mixed-type multi-row
+`DELETE ... RETURNING` with direct SQLite. Its six-column projection includes
+`typeof(v)` and decimal int64 conversion explicitly. Nine rows cover signed
+int64 extrema, colliding numeric TEXT, nonempty and empty BLOB, empty TEXT,
+NULL, a finite REAL and positive infinity. A nested delete removes one other
+row, leaving eight top-level RETURNING rows and nine audit effects. In all
+cases the test drains the source cursor synchronously into owner SQLite before
+its first spill await, then copies each staged row to the separate sealed spill.
+The original row order is checked on spill readback; values and selected
+connection-state expressions are compared to the direct statement by row ID.
+Commit and rollback runs retain the result after the owner transaction ends.
+These are fixed small fixtures; the test keeps their rows in JS arrays.
+
+A `WITHOUT ROWID` staging table avoids changing the observed
+`last_insert_rowid()`, but its row inserts change `changes()`. Updating exactly
+one staging row per returned row restored `changes()` in this fixed example,
+including the nested-trigger case. The inserts and repair nevertheless increased
+`total_changes()` by 18 for nine returned rows and 16 for eight; rollback did
+not undo that counter. This is an observable incompatibility and the repair
+is not a general solution.
+
+A second variant creates one `CREATE TABLE AS SELECT` table per returned row.
+For these small local cases it preserved the tested `changes()`,
+`last_insert_rowid()` and `total_changes()` values, and its tables were dropped
+before commit or disappeared on rollback. However, the tables were visible in
+`sqlite_schema` while staging, and their number grew with result count. Schema
+side effects, SQLite's own accumulated RETURNING output, synchronous work,
+quota, prepared statements, namespace authority, concurrent requests,
+cleanup/restart, and memory for arbitrary result sizes remain unproved. The
+local staging tables contain plaintext synthetic data and are not a secure
+production spill store. A
+local attempt to read `PRAGMA schema_version` returned `SQLITE_AUTH`; no schema
+cookie preservation is claimed. Neither variant is mounted in the bridge.
+
+On the separate 100-column 65-byte BLOB fixture, a direct DELETE also returned
+the BLOB and `typeof(value)` when that type expression **replaced** one of the
+fixture's known NULL columns. All remaining projected cells and BLOB bytes
+matched. This is not a 100-column type channel: it omits the replaced column,
+which could hold a value in a general query, and it does not establish how to
+represent all per-cell types without increasing a maximum-size row.
+
 ## Required next proof before integration
 
 - Resolve the general DML type-channel blocker at the 100-column and maximum
