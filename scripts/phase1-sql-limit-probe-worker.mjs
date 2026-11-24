@@ -19,22 +19,54 @@ const sizedSQL = (prefix, suffix, size) => {
 const request = (statement, args = [], query = true) => ({ statement, args, query });
 
 export class SQLLimitProbe extends DurableObject {
-  runEscapedBlobReturningExact() {
-    const storage=this.ctx.storage, sql=storage.sql, blobBytes=8388630, abort='rollback boundary proof';
+  runEscapedTextReturningExact(kind = 'blob-tag') {
+    const storage=this.ctx.storage, sql=storage.sql, textBytes=8388636, abort='rollback boundary proof';
+    sql.exec('CREATE TABLE IF NOT EXISTS pinned_text_escape(value TEXT)');
+    sql.exec('CREATE TABLE IF NOT EXISTS pinned_text_audit(count INTEGER NOT NULL)');
+    sql.exec('DELETE FROM pinned_text_escape'); sql.exec('DELETE FROM pinned_text_audit'); sql.exec('INSERT INTO pinned_text_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_text_delete AFTER DELETE ON pinned_text_escape BEGIN UPDATE pinned_text_audit SET count=count+1; END');
+    const prefix=kind === 'nested' ? "char(0)||'t'||char(0)||'t'" : kind === 'escape-tag' ? "char(0)||'t'" : "char(0)||'b'";
+    const expectedPrefix=kind === 'nested' ? '\0t\0t' : kind === 'escape-tag' ? '\0t' : '\0b';
+    const bodyBytes=textBytes-expectedPrefix.length;
+    const insert=()=>sql.exec(`INSERT INTO pinned_text_escape VALUES (${prefix}||substr(hex(zeroblob((?+1)/2)),1,?))`,bodyBytes,bodyBytes);
+    const statement='DELETE FROM pinned_text_escape RETURNING value';
+    let directLength, bridgeError;
+    try { storage.transactionSync(()=>{insert();directLength=sql.exec(statement).raw().toArray()[0][0].length;throw Error(abort);}); }
+    catch(error) { if(error.message!==abort) throw error; }
+    assert(directLength===textBytes,'Direct escaped-TEXT payload length changed');
+    try { storage.transactionSync(()=>{insert();const value=execute(storage,request(statement)).rows[0][0];assert(value.length===textBytes && value.startsWith(expectedPrefix),'Bridge escaped TEXT changed');throw Error(abort);}); }
+    catch(error) { if(error.message!==abort) bridgeError=String(error); }
+    const rows=sql.exec('SELECT count(*) AS n FROM pinned_text_escape').one().n, audit=sql.exec('SELECT count FROM pinned_text_audit').one().count;
+    assert(rows===0 && audit===0,'Escaped-TEXT boundary probe did not roll back business and audit rows');
+    if (!bridgeError) {
+      storage.transactionSync(()=>{insert();const value=execute(storage,request(statement)).rows[0][0];assert(value.length===textBytes && value.startsWith(expectedPrefix),'Committed tagged TEXT changed');});
+      assert(sql.exec('SELECT count(*) AS n FROM pinned_text_escape').one().n===0 && sql.exec('SELECT count FROM pinned_text_audit').one().count===1,'Committed tagged-TEXT delete or audit count changed');
+    }
+    return {ok:!bridgeError,error:bridgeError||null,directLength,rows,audit};
+  }
+  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630) {
+    const storage=this.ctx.storage, sql=storage.sql, abort='rollback boundary proof';
     sql.exec('CREATE TABLE IF NOT EXISTS pinned_blob_shape(value BLOB)');
     sql.exec('CREATE TABLE IF NOT EXISTS pinned_blob_audit(count INTEGER NOT NULL)');
     sql.exec('DELETE FROM pinned_blob_shape'); sql.exec('DELETE FROM pinned_blob_audit'); sql.exec('INSERT INTO pinned_blob_audit VALUES(0)');
     sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_blob_delete_audit AFTER DELETE ON pinned_blob_shape BEGIN UPDATE pinned_blob_audit SET count=count+1; END');
-    const insert=()=>sql.exec(`INSERT INTO pinned_blob_shape VALUES (CAST(X'FF0000000000000000'||zeroblob(${blobBytes-9}) AS BLOB))`);
+    const repeated = repeatedMarker ? new Uint8Array(blobBytes) : null;
+    if (repeated) for (let i=0;i<repeated.length;i+=9) repeated[i]=255;
+    const insert=()=>repeated ? sql.exec('INSERT INTO pinned_blob_shape VALUES (?)', repeated.buffer) : sql.exec(`INSERT INTO pinned_blob_shape VALUES (CAST(X'FF0000000000000000'||zeroblob(${blobBytes-9}) AS BLOB))`);
+    const matches=value=>value.length===blobBytes && value.every((byte,index)=>byte===(index===0 || (repeatedMarker && index%9===0) ? 255 : 0));
     const statement='DELETE FROM pinned_blob_shape RETURNING value';
     let directLength, bridgeError;
     try { storage.transactionSync(()=>{insert();directLength=sql.exec(statement).raw().toArray()[0][0].byteLength;throw Error(abort);}); }
     catch(error) { if(error.message!==abort) throw error; }
     assert(directLength===blobBytes,'Direct escaped-BLOB payload length changed');
-    try { storage.transactionSync(()=>{insert();const result=execute(storage,request(statement));const value=Uint8Array.fromBase64(result.rows[0][0].blob);assert(value.length===blobBytes && value[0]===255 && value.subarray(1).every(byte=>byte===0),'Bridge escaped BLOB changed');throw Error(abort);}); }
+    try { storage.transactionSync(()=>{insert();const result=execute(storage,request(statement));const value=Uint8Array.fromBase64(result.rows[0][0].blob);assert(matches(value),'Bridge escaped BLOB changed');throw Error(abort);}); }
     catch(error) { if(error.message!==abort) bridgeError=String(error); }
     const rows=sql.exec('SELECT count(*) AS n FROM pinned_blob_shape').one().n, audit=sql.exec('SELECT count FROM pinned_blob_audit').one().count;
     assert(rows===0 && audit===0,'Escaped-BLOB boundary probe did not roll back business and audit rows');
+    if (!bridgeError) {
+      storage.transactionSync(()=>{insert();const value=Uint8Array.fromBase64(execute(storage,request(statement)).rows[0][0].blob);assert(matches(value),'Committed escaped BLOB changed');});
+      assert(sql.exec('SELECT count(*) AS n FROM pinned_blob_shape').one().n===0 && sql.exec('SELECT count FROM pinned_blob_audit').one().count===1,'Committed escaped-BLOB delete or audit count changed');
+    }
     return {ok:!bridgeError,error:bridgeError||null,directLength,rows,audit};
   }
   runManyIntegerReturningExact() {
@@ -146,7 +178,7 @@ export class SQLLimitProbe extends DurableObject {
       assert(result.rows[0][0]?.integer === decimal, `Compact RETURNING integer changed: ${decimal}`);
     }
     sql.exec('CREATE TABLE IF NOT EXISTS compact_returning_text (value TEXT)');
-    for (const value of ['', '\0', '\0i1', '\0r3', '\0tfoo', 'i42', '🙂', 'x\0y']) {
+    for (const value of ['', '\0', '\0b', '\0b00', '\0bFF00', '\0b'+'A'.repeat(16), '\0b'+'A'.repeat(17), '\0b'+'🙂'.repeat(5), '\0t', '\0tfoo', '\0t\0b01', '\0t\0b'+'🙂'.repeat(5), '\0t\0tfoo', '\0i1', '\0r3', 'i42', '🙂', 'x\0y']) {
       const result = execute(storage, request('INSERT INTO compact_returning_text VALUES (?1) RETURNING value', [{ kind: 'value', value }]));
       assert(result.rows[0][0] === value, 'Compact RETURNING text tag collided');
     }
@@ -161,6 +193,28 @@ export class SQLLimitProbe extends DurableObject {
       const value = Uint8Array.from([255, 0, 0, 0, 0, 0, 0, 0, 0, ...suffix]);
       const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
       assert(result.rows[0][0]?.blob === value.toBase64(), 'Compact RETURNING BLOB escape-prefix collision');
+    }
+    for (let byte = 0; byte < 256; byte++) {
+      const value = Uint8Array.of(byte);
+      const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
+      assert(result.rows[0][0]?.blob === value.toBase64(), `Compact RETURNING one-byte BLOB changed: ${byte}`);
+    }
+    const marker = [255, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (let count = 1; count <= 4; count++) for (let length = 0; length <= 12; length++) {
+      for (const extra of [[], [13, ...marker, 0, 255]]) {
+        const value = Uint8Array.from([...Array.from({length:count}, () => marker).flat(), ...extra, ...Array.from({length}, (_, i) => (i * 97) & 255)]);
+        const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
+        assert(result.rows[0][0]?.blob === value.toBase64(), `Compact RETURNING repeated-marker BLOB changed at ${count}/${length}`);
+      }
+    }
+    let blobSeed = 0x2c71e895;
+    for (let sample = 0; sample < 512; sample++) {
+      const value = new Uint8Array(9 + (sample % 193));
+      for (let i = 0; i < value.length; i++) { blobSeed = (Math.imul(blobSeed, 1664525) + 1013904223) >>> 0; value[i] = blobSeed >>> 24; }
+      value.set(marker);
+      if (value.length >= 28 && sample % 3 === 0) value.set(marker, 12);
+      const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
+      assert(result.rows[0][0]?.blob === value.toBase64(), `Compact RETURNING arbitrary-byte BLOB changed at sample ${sample}`);
     }
     sql.exec('CREATE TABLE IF NOT EXISTS compact_returning_real (id INTEGER PRIMARY KEY, value REAL)');
     const bits = new DataView(new ArrayBuffer(8));
@@ -368,4 +422,4 @@ export class SQLLimitProbe extends DurableObject {
     return { ok: true, wideColumns: 100, directSQLBytes: 100000, rewrittenSelectBytes: 100000, rewrittenReturningBytes: 100000, rejectedBytes: 100001, function33, largeRows };
   }
 }
-export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
+export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };

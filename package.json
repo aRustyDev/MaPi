@@ -71,7 +71,12 @@
     "test:sql-returning-exact-int64": "MAPI_SQL_RETURNING_EXACT_INT64=1 node scripts/test-sql-returning-exact.mjs",
     "test:sql-returning-exact-real": "MAPI_SQL_RETURNING_EXACT_REAL=1 node scripts/test-sql-returning-exact.mjs",
     "test:sql-returning-exact-many": "MAPI_SQL_RETURNING_EXACT_MANY=1 node scripts/test-sql-returning-exact.mjs",
-    "test:sql-returning-exact-blob": "MAPI_SQL_RETURNING_EXACT_BLOB=1 node scripts/test-sql-returning-exact.mjs"
+    "test:sql-returning-exact-blob": "MAPI_SQL_RETURNING_EXACT_BLOB=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-blob-repeat": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-blob-repeat-safe": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_SAFE=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-text": "MAPI_SQL_RETURNING_EXACT_TEXT=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-text-tag": "MAPI_SQL_RETURNING_EXACT_TEXT_TAG=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-text-nested": "MAPI_SQL_RETURNING_EXACT_TEXT_NESTED=1 node scripts/test-sql-returning-exact.mjs"
   },
   "devDependencies": {
     "@zitadel/api": "0.7.0",

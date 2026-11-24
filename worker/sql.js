@@ -28,29 +28,42 @@ function decodePacked(encoded) {
 // RETURNING cannot use a materialized CTE, and adding a type column per value
 // can push a platform-valid returned row over SQLite's record-size limit.
 // Integers use a minimal-width signed big-endian BLOB (zero uses an empty
-// BLOB). Escape actual BLOBs that would collide with those reserved widths or
-// the escape prefix. REALs and TEXT pass through unchanged. An escaped BLOB
-// or integer one can still enlarge a valid result row, so exact-size
-// compatibility remains a separate open gate.
+// BLOB). Escape actual BLOBs only when their marker pattern can be confused
+// with those reserved widths. TEXT is unchanged; certain repeated-marker
+// BLOBs can still exceed the result-size limit after escaping.
 function returningColumn(column) {
-  const type = "typeof(" + column + ")", hex = "unhex(printf('%016llx', " + column + "))";
+  const type = "typeof(" + column + ")", hex = "unhex(printf('%016llx', " + column + "))", lengths = "(0,1,2,3,4,6,8)", marker = "X'FF0000000000000000'";
   const width = "CASE WHEN " + column + " BETWEEN -128 AND 127 THEN 1 WHEN " + column + " BETWEEN -32768 AND 32767 THEN 2 WHEN " + column + " BETWEEN -8388608 AND 8388607 THEN 3 WHEN " + column + " BETWEEN -2147483648 AND 2147483647 THEN 4 WHEN " + column + " BETWEEN -140737488355328 AND 140737488355327 THEN 6 ELSE 8 END";
   return "CASE WHEN " + type + " = 'integer' AND " + column + " = 0 THEN zeroblob(0)" +
     " WHEN " + type + " = 'integer' THEN substr(" + hex + ", 9 - (" + width + "))" +
-    " WHEN " + type + " = 'blob' AND (length(" + column + ") IN (0,1,2,3,4,6,8) OR (length(" + column + ") >= 9 AND substr(" + column + ", 1, 9) = X'FF0000000000000000')) THEN CAST(X'FF0000000000000000' || " + column + " AS BLOB)" +
+    " WHEN " + type + " = 'blob' AND (length(" + column + ") IN " + lengths + " OR (length(" + column + ") >= 9 AND substr(" + column + ", 1, 9) = " + marker + " AND (length(" + column + ") % 9) IN " + lengths + " AND length(CAST(replace(CAST(" + column + " AS TEXT), CAST(" + marker + " AS TEXT), '') AS BLOB)) IN " + lengths + ")) THEN CAST(" + marker + " || " + column + " AS BLOB)" +
     " ELSE " + column + " END";
 }
 
 function decodeReturning(value) {
   if (typeof value === 'string' || typeof value === 'number' || value === null) return value;
   const blob = new Uint8Array(value);
-  if ([0, 1, 2, 3, 4, 6, 8].includes(blob.length)) {
+  const widths = [0, 1, 2, 3, 4, 6, 8];
+  if (widths.includes(blob.length)) {
     let integer = 0n;
     for (const byte of blob) integer = (integer << 8n) | BigInt(byte);
     if (blob.length && (blob[0] & 128)) integer -= 1n << BigInt(blob.length * 8);
     return { integer: integer.toString() };
   }
-  const escaped = blob.length >= 9 && blob[0] === 255 && blob.subarray(1, 9).every(byte => byte === 0);
+  const markerAt = index => {
+    if (blob[index] !== 255 || index + 9 > blob.length) return false;
+    for (let i = 1; i < 9; i++) if (blob[index + i] !== 0) return false;
+    return true;
+  };
+  let escaped = blob.length >= 9 && widths.includes(blob.length % 9) && markerAt(0);
+  if (escaped) {
+    let position = 0, remainder = 0;
+    while (position < blob.length && remainder <= 8) {
+      if (markerAt(position)) position += 9;
+      else { position++; remainder++; }
+    }
+    escaped = position === blob.length && widths.includes(remainder);
+  }
   return { blob: (escaped ? blob.subarray(9) : blob).toBase64() };
 }
 

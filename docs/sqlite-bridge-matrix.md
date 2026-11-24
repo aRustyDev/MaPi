@@ -416,12 +416,26 @@ edge values and 2,048 deterministic binary64 inputs. A separate disposable
 experiment passed 10,000 binary64 inputs. These checks do not prove all
 possible values or eliminate every record-size overhead.
 
-`npm run test:sql-returning-exact-blob` is a distinct **failing regression**:
-an 8,388,630-byte synthetic BLOB with the reserved escape prefix is returned
-by a direct DELETE, but adding the prefix for type safety causes
-`SQLITE_TOOBIG`. Both attempted transactions roll back business and audit
-changes. Wide SELECT materialization may also add overhead. Exact-size
-compatibility remains an open Phase 1 gate.
+`npm run test:sql-returning-exact-blob` now passes the 8,388,630-byte BLOB
+that previously failed. The bridge removes marker occurrences in SQLite to
+decide whether a marker-prefixed BLOB could be an escaped short value; it
+escapes only when the remainder has a reserved integer width. The decoder
+applies the same byte-level rule. Focused Workerd tests cover BLOB widths,
+embedded NUL, repeated and interspersed markers, and 512 arbitrary-byte
+samples. `npm run test:sql-returning-exact-blob-repeat-safe` also passes an
+8,000,001-byte repeated-marker BLOB through rollback and committed delete.
+The direct and bridge deletes are rolled back, then a separate
+bridge delete commits with one audit effect. Maximum-size tagged and nested
+TEXT tests pass with TEXT unchanged, including comparison with the earlier
+bridge. The marker check can copy a large BLOB in SQLite and scan it in JS;
+these tests do not establish CPU or total isolate-memory limits.
+
+`npm run test:sql-returning-exact-blob-repeat` is a distinct **failing
+regression**: an 8,388,630-byte BLOB made entirely of repeated markers is
+returned by direct DELETE but still needs an escape prefix, causing
+`SQLITE_TOOBIG`. Both attempts roll back business and audit changes. Wide
+SELECT materialization may also add overhead. Exact-size compatibility
+remains an open Phase 1 gate.
 
 The observed rollback incompatibility is specific to the tested synchronous
 single-object staging approach. Re-execution after rollback cannot reproduce
