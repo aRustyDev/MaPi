@@ -437,24 +437,31 @@ ending in eight varied, zero or FF bytes; the `-tail11` control also passes.
 
 `-tail8-wide66` now passes an 8,388,566-byte BLOB and 65 NULL columns.
 `-tail8-wide100`, `-tail8-wide100-zero` and `-tail8-wide100-ff` pass an
-8,388,530-byte BLOB and 99 NULL columns. For wide results a compact scalar
-subquery uses short local aliases and a unified tag in the existing escape
-grammar; the matching decoder is selected with the rewrite. The prior codec
-is retained when its SQL is shorter and the compact rewrite exceeds the
-statement-size limit. A local Workerd test checks both sides of 100,000 UTF-8
-bytes and both codec paths with one trigger effect per write.
+8,388,530-byte BLOB and 99 NULL columns. The corresponding `-wide100-long`,
+`-wide100-long-zero` and `-wide100-long-ff` checks also pass with longer
+identifiers. The `-wide100-very-long` variants pass with another 80 bytes
+in each identifier, including zero and FF suffixes and the BLOB in a long
+named column. For wide results a compact scalar subquery uses short local
+aliases and a unified tag in the existing escape grammar; a nested alias
+avoids repeating longer identifiers. The matching decoder is selected with
+the rewrite. The prior codec remains available when its SQL is shorter and
+the compact rewrite exceeds the statement-size limit. Local Workerd checks
+test 100,000 UTF-8 bytes and rejection at 100,001 without a trigger effect.
 
 The local suite also exercises 66-column multi-row UPDATE and DELETE with
-columns named like the local aliases, all 256 suffix byte values, integer
-width boundaries, tag-shaped and nested data, rollback and trigger counts.
-This is selected local evidence, not a proof for all SQL. The SQL marker check
+columns named like the local aliases and with very long identifiers, all 256
+suffix byte values, deterministic signed integers and width boundaries,
+tag-shaped and nested data, rollback and trigger counts. Separately,
+`npm run test:wide-int64-differential` drives the real wide rewrite through
+a native SQLite adapter and compares 100,011 signed values against independent
+BigInt expectations. This is selected local evidence, not a proof for all SQL. The SQL marker check
 and result reconstruction can scan or allocate large values; the wide tag can
 itself reach 592,145 bytes. Hosted CPU and total isolate memory are unverified.
 
-`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-long` is a
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme` is a
 **failing regression**: direct DELETE returns the BLOB and 99 NULL columns
-with longer identifiers, while the rewritten statement exceeds SQLite's size
-limit. Both attempts roll back business and audit changes. Other marker-heavy
+with identifiers extended by 512 bytes, while the rewritten statement exceeds
+SQLite's size limit. Both attempts roll back business and audit changes. Other marker-heavy
 shapes and wide SELECT materialization may also exceed the limit. General
 exact-size compatibility remains an open Phase 1 gate.
 

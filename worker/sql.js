@@ -40,13 +40,15 @@ function compactValueExpression(column, length, marker) {
   // Removing 9-byte markers preserves length modulo 9, so a remainder in a
   // reserved width already proves the original length has the same residue.
   const remainder = `length(CAST(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'') AS BLOB))`;
-  const byte = index => `ifnull(unicode(json_extract('"\\u00'||hex(substr(${column},${index},1))||'"','$')),0)`;
+  const byte = index => `ifnull(unicode(('"\\u00'||hex(substr(${column},${index},1))||'"')->>'$'),0)`;
   const run = n => `unhex(replace(hex(zeroblob(${n})),'00',hex(${marker})))`;
   const count = `${length}/9`, rem = `${length}%9`;
-  const tag = `CAST(${marker}||unhex(printf('%02x',(${count}>>8)&255))||${run(`1+512*(${count}>>16)+256*(${rem} IN(3,8))+iif(${rem}=8,${byte(-8)},0)`)}||unhex(printf('%02x',${count}&255))||${run(`1+iif(${rem}=8,${byte(-7)},0)`)}||substr(${column},-min(${rem},6),min(${rem},6))||substr(X'53',1,${rem}=3) AS BLOB)`;
-  const width = `1+(${column}>>7 NOT IN(-1,0))+(${column}>>15 NOT IN(-1,0))+(${column}>>23 NOT IN(-1,0))+2*(${column}>>31 NOT IN(-1,0))+2*(${column}>>47 NOT IN(-1,0))`;
-  return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN zeroblob(0) ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
-    ` WHEN 'blob' THEN iif(${length} IN ${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN ${widths}),` +
+  const tag = `CAST(${marker}||unhex(printf('%02x',${count}>>8&255))||${run(`1+512*(${count}>>16)+256*(${rem} IN(3,8))+iif(${rem}=8,${byte(-8)},0)`)}||unhex(printf('%02x',${count}&255))||${run(`1+iif(${rem}=8,${byte(-7)},0)`)}||substr(${column},-min(${rem},6),${rem})||substr(X'53',1,${rem}=3) AS BLOB)`;
+  // Count the hex digits needed for the signed value plus its sign bit,
+  // then map byte widths 5 and 7 to the supported widths 6 and 8.
+  const width = `substr('12346688',(length(printf('%x',(iif(${column}<0,~${column},${column})<<1)|1))+1)/2,1)`;
+  return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN X'' ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
+    ` WHEN 'blob' THEN iif(${length} IN${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN${widths}),` +
     `iif(${length}<75497472 AND substr(${column},-9-${length}%9,9)=${marker},${tag},CAST(${marker}||${column} AS BLOB)),` +
     `${column}) ELSE ${column} END`;
 }
@@ -74,11 +76,14 @@ function legacyReturningColumn(column, allowEight = true) {
     ` ELSE ${column} END ELSE ${column} END`;
 }
 
-// The scalar subquery gives each correlated RETURNING value short local names
-// so the complete projection can fit SQLite's statement-size limit.
+// The scalar subquery gives each correlated RETURNING value short local names.
+// For long identifiers, a nested alias avoids repeating the identifier; use
+// whichever form keeps the complete projection shorter.
 function compactReturningColumn(column) {
   const expression = compactValueExpression('v', 'l', 'm');
-  return `(SELECT ${expression} FROM (SELECT ${column} AS v,length(${column}) AS l,X'FF0000000000000000' AS m))`;
+  const direct = `(SELECT ${expression} FROM (SELECT ${column} AS v,length(${column}) AS l,X'FF0000000000000000' AS m))`;
+  const nested = `(SELECT ${expression} FROM (SELECT v,length(v) AS l,X'FF0000000000000000' AS m FROM (SELECT ${column} AS v)))`;
+  return direct.length <= nested.length ? direct : nested;
 }
 
 function decodeReturning(value, unified = false) {
