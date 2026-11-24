@@ -29,16 +29,16 @@ function decodePacked(encoded) {
 // can push a platform-valid returned row over SQLite's record-size limit.
 // Integers use a minimal-width signed big-endian BLOB (zero uses an empty
 // BLOB). Escape actual BLOBs only when their marker pattern can be confused
-// with those reserved widths. Pure marker runs use a compact, collision-safe
-// tag so adding the escape does not exceed the result-size limit. TEXT is
+// with those reserved widths. Marker runs with at most one trailing byte use
+// a compact, collision-safe tag. TEXT is
 // unchanged; other marker-heavy BLOBs can still exceed the limit.
 function returningColumn(column) {
   const length = `length(${column})`, marker = "X'FF0000000000000000'", widths = "(0,1,2,3,4,6,8)";
   const remainder = `length(CAST(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'') AS BLOB))`;
-  const width = `CASE WHEN ${column} BETWEEN -128 AND 127 THEN 1 WHEN ${column} BETWEEN -32768 AND 32767 THEN 2 WHEN ${column} BETWEEN -8388608 AND 8388607 THEN 3 WHEN ${column} BETWEEN -2147483648 AND 2147483647 THEN 4 WHEN ${column} BETWEEN -140737488355328 AND 140737488355327 THEN 6 ELSE 8 END`;
+  const width = `CASE WHEN (${column}>>7) IN(-1,0) THEN 1 WHEN (${column}>>15) IN(-1,0) THEN 2 WHEN (${column}>>23) IN(-1,0) THEN 3 WHEN (${column}>>31) IN(-1,0) THEN 4 WHEN (${column}>>47) IN(-1,0) THEN 6 ELSE 8 END`;
   return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN zeroblob(0) ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
     ` WHEN 'blob' THEN CASE WHEN ${length} IN ${widths} OR (${length}%9 IN ${widths} AND substr(${column},1,9)=${marker} AND ${remainder} IN ${widths}) THEN` +
-    ` CASE WHEN ${length}>=9 AND ${length}/9<=16777215 AND ${length}%9=0 AND ${remainder}=0 THEN CAST(${marker}||X'53'||${marker}||unhex(printf('%06x',${length}/9)) AS BLOB) ELSE CAST(${marker}||${column} AS BLOB) END` +
+    ` CASE WHEN ${length}>=9 AND ${length}/9<=16777215 AND (${length}%9=0 OR (${length}%9=1 AND substr(${column},-9)<>${marker})) THEN CAST(${marker}||unhex(printf('%06x',${length}/9))||${marker}||CASE WHEN ${length}%9=1 THEN substr(${column},-1) ELSE X'' END AS BLOB) ELSE CAST(${marker}||${column} AS BLOB) END` +
     ` ELSE ${column} END ELSE ${column} END`;
 }
 
@@ -57,14 +57,15 @@ function decodeReturning(value) {
     for (let i = 1; i < 9; i++) if (blob[index + i] !== 0) return false;
     return true;
   };
-  // This 22-byte pattern cannot be emitted by the ordinary escape: its
-  // unprefixed value is longer than eight bytes and does not start with the
-  // marker. A real BLOB equal to the tag is escaped before reaching here.
-  if (blob.length === 22 && markerAt(0) && blob[9] === 83 && markerAt(10)) {
-    const count = blob[19] * 65536 + blob[20] * 256 + blob[21];
+  // The bytes after the first marker cannot themselves begin with a marker:
+  // if the first count byte is FF, the second marker puts FF in byte four.
+  // A real BLOB shaped like this tag is escaped, so it stays data.
+  if ((blob.length === 21 || blob.length === 22) && markerAt(0) && markerAt(12)) {
+    const count = blob[9] * 65536 + blob[10] * 256 + blob[11];
     if (count > 0) {
-      const repeated = new Uint8Array(count * 9);
-      for (let i = 0; i < repeated.length; i += 9) repeated[i] = 255;
+      const repeated = new Uint8Array(count * 9 + (blob.length - 21));
+      for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
+      if (blob.length === 22) repeated[repeated.length - 1] = blob[21];
       return { blob: repeated.toBase64() };
     }
   }
