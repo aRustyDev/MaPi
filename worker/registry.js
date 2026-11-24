@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { beginRegistryMove, initializeMoveRegistry, validRelocationDigest } from "./registry-move.js";
 import { initializeHistoryCheckpoint, readHistoryCheckpoint, advanceHistoryCheckpoint } from "./registry-history.js";
-import { assertRecoveryEnvelope, readAnchoredRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScopePage } from "./recovery-scopes.js";
+import { assertRecoveryEnvelope, readAnchoredRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScope, validateRecoveryScopePage } from "./recovery-scopes.js";
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
 import { RELOCATION_RECONCILIATION_VERSION } from "./relocation-values.js";
 import { authorizeSchemaMigration } from "./schema-migration.js";
@@ -35,6 +35,18 @@ function currentReconciliation(sql, projectId, moveId) {
   let tables;
   try { tables = JSON.parse(row.tables); } catch { return false; }
   return Array.isArray(tables) && tables.length > 0 && row.table_index === tables.length && !!sql.exec('SELECT 1 FROM mapi_move_journals WHERE move_id = ? AND project_id = ? AND complete = 1', moveId, projectId).toArray().length;
+}
+
+function validateRecoveryScopeCheckpoint(row, projectId, recoveryId, sql) {
+  if (!row || row.project_id !== projectId || row.recovery_id !== recoveryId ||
+      !Number.isSafeInteger(row.row_count) || row.row_count < 0 || ![0, 1].includes(row.done)) throw new Error('Invalid recovery scope checkpoint');
+  if (row.row_count === 0) {
+    if (row.cursor !== null || row.digest !== '' || row.done !== 0) throw new Error('Invalid recovery scope checkpoint');
+  } else {
+    if (typeof row.digest !== 'string' || !/^[0-9a-f]{64}$/.test(row.digest) || typeof row.cursor !== 'string') throw new Error('Invalid recovery scope checkpoint');
+    validateRecoveryScope(row.cursor, projectId, sql);
+  }
+  return row;
 }
 
 // Matching responses are not sufficient: both owners could return the same
@@ -330,9 +342,9 @@ export class ProjectRegistry extends DurableObject {
       const sql = this.ctx.storage.sql;
       const row = sql.exec('SELECT * FROM mapi_recovery_scope_progress WHERE project_id = ?', projectId).toArray()[0];
       if (row && row.recovery_id !== recoveryId) throw new Error('Conflicting scope capture');
-      if (row) return row;
+      if (row) return validateRecoveryScopeCheckpoint(row, projectId, recoveryId, sql);
       sql.exec("INSERT INTO mapi_recovery_scope_progress VALUES (?, ?, NULL, 0, '', 0)", projectId, recoveryId);
-      return { cursor: null, row_count: 0, digest: '', done: 0 };
+      return validateRecoveryScopeCheckpoint(sql.exec('SELECT * FROM mapi_recovery_scope_progress WHERE project_id = ?', projectId).one(), projectId, recoveryId, sql);
     });
     if (checkpoint.done) return { done: true, count: checkpoint.row_count, digest: checkpoint.digest };
     const page = await this.env.NEXTGEN_APPLICATION.getByName(recovery.object_name).recoveryScopePage(secret, projectId, recoveryId, checkpoint.cursor);
@@ -342,9 +354,13 @@ export class ProjectRegistry extends DurableObject {
       const sql = this.ctx.storage.sql;
       const currentRecovery = sql.exec('SELECT * FROM mapi_project_recoveries WHERE project_id = ?', projectId).toArray()[0];
       const current = sql.exec('SELECT * FROM mapi_recovery_scope_progress WHERE project_id = ?', projectId).toArray()[0];
-      if (!currentRecovery || currentRecovery.recovery_id !== recoveryId || currentRecovery.phase !== 'anchored' || currentRecovery.clock_kind !== 'revision' || currentRecovery.clock_highwater !== recovery.clock_highwater || !current || current.recovery_id !== recoveryId || current.cursor !== checkpoint.cursor || current.digest !== checkpoint.digest || current.done) throw new Error('Recovery scope checkpoint changed; retry');
-      for (const row of page.rows) sql.exec('INSERT INTO mapi_recovery_scope_anchors VALUES (?, ?, ?, ?)', recoveryId, projectId, row.scope, row.stamp);
+      if (!currentRecovery || currentRecovery.recovery_id !== recoveryId || currentRecovery.phase !== 'anchored' || currentRecovery.clock_kind !== 'revision' || currentRecovery.clock_highwater !== recovery.clock_highwater ||
+          ['project_id', 'origin', 'object_name', 'object_id', 'generation', 'epoch'].some(key => currentRecovery[key] !== recovery[key]) ||
+          !current || current.recovery_id !== recoveryId || current.cursor !== checkpoint.cursor || current.row_count !== checkpoint.row_count || current.digest !== checkpoint.digest || current.done !== checkpoint.done) throw new Error('Recovery scope checkpoint changed; retry');
+      validateRecoveryScopeCheckpoint(current, projectId, recoveryId, sql);
       const count = current.row_count + page.rows.length;
+      if (!Number.isSafeInteger(count)) throw new Error('Recovery scope count exceeds safe range');
+      for (const row of page.rows) sql.exec('INSERT INTO mapi_recovery_scope_anchors VALUES (?, ?, ?, ?)', recoveryId, projectId, row.scope, row.stamp);
       if (page.done && !count) throw new Error('Recovery scope anchor is empty');
       sql.exec('UPDATE mapi_recovery_scope_progress SET cursor = ?, row_count = ?, digest = ?, done = ? WHERE project_id = ?', page.cursor, count, digest, page.done ? 1 : 0, projectId);
       return { done: page.done, count, digest };
@@ -355,7 +371,9 @@ export class ProjectRegistry extends DurableObject {
     authorizeRelocation(this.env, secret);
     const recovery = this.recoveryStatus(secret, projectId);
     const progress = this.ctx.storage.sql.exec('SELECT * FROM mapi_recovery_scope_progress WHERE project_id = ?', projectId).toArray()[0];
-    if (!recovery || recovery.recovery_id !== recoveryId || recovery.phase !== 'anchored' || recovery.clock_kind !== 'revision' || !progress || progress.recovery_id !== recoveryId || !progress.done || progress.row_count < 1 || !/^[0-9a-f]{64}$/.test(progress.digest)) throw new Error('Recovery scope anchor is incomplete');
+    if (!recovery || recovery.recovery_id !== recoveryId || recovery.phase !== 'anchored' || recovery.clock_kind !== 'revision') throw new Error('Recovery scope anchor is incomplete');
+    validateRecoveryScopeCheckpoint(progress, projectId, recoveryId, this.ctx.storage.sql);
+    if (progress.done !== 1) throw new Error('Recovery scope anchor is incomplete');
     return assertRecoveryEnvelope({ recovery, count: progress.row_count, digest: progress.digest });
   }
 
@@ -363,7 +381,9 @@ export class ProjectRegistry extends DurableObject {
     authorizeRelocation(this.env, secret);
     const recovery = this.recoveryStatus(secret, projectId);
     const progress = this.ctx.storage.sql.exec('SELECT * FROM mapi_recovery_scope_progress WHERE project_id = ?', projectId).toArray()[0];
-    if (!recovery || recovery.recovery_id !== recoveryId || recovery.phase !== 'anchored' || recovery.clock_kind !== 'revision' || !progress || progress.recovery_id !== recoveryId || !progress.done || progress.row_count < 1 || !/^[0-9a-f]{64}$/.test(progress.digest)) throw new Error('Recovery scope anchor is incomplete');
+    if (!recovery || recovery.recovery_id !== recoveryId || recovery.phase !== 'anchored' || recovery.clock_kind !== 'revision') throw new Error('Recovery scope anchor is incomplete');
+    validateRecoveryScopeCheckpoint(progress, projectId, recoveryId, this.ctx.storage.sql);
+    if (progress.done !== 1) throw new Error('Recovery scope anchor is incomplete');
     return assertRecoveryEnvelope({ recovery: { object_id: recovery.object_id, epoch: recovery.epoch, generation: recovery.generation, clock_highwater: recovery.clock_highwater }, count: progress.row_count, digest: progress.digest, page: readAnchoredRecoveryScopes(this.ctx.storage.sql, recoveryId, projectId, cursor) });
   }
 
