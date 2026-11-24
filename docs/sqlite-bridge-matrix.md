@@ -444,16 +444,16 @@ in each identifier, including zero and FF suffixes and the BLOB in a long
 named column. For wide results a compact scalar subquery uses short local
 aliases and a unified tag in the existing escape grammar; a nested alias
 avoids repeating longer identifiers. The matching decoder is selected with
-the rewrite. The prior codec remains available when its SQL is shorter and
-the compact rewrite exceeds the statement-size limit. Local Workerd checks
+the rewrite. The shared compact rewrite is tried when the per-column rewrite exceeds the
+statement-size limit; prior codecs remain available if still needed. Local Workerd checks
 test 100,000 UTF-8 bytes and rejection at 100,001 without a trigger effect.
 
 The local suite also exercises 66-column multi-row UPDATE and DELETE with
 columns named like the local aliases and with very long identifiers, all 256
 suffix byte values, deterministic signed integers and width boundaries,
 tag-shaped and nested data, rollback and trigger counts. Separately,
-`npm run test:wide-int64-differential` drives the real wide rewrite through
-a native SQLite adapter and compares 100,011 signed values against independent
+`npm run test:wide-int64-differential` drives the production compact codec
+directly through a native SQLite adapter and compares 100,011 signed values against independent
 BigInt expectations. This is selected local evidence, not a proof for all SQL. The SQL marker check
 and result reconstruction can scan or allocate large values; the wide tag can
 itself reach 592,145 bytes. Hosted CPU and total isolate memory are unverified.
@@ -461,9 +461,9 @@ itself reach 592,145 bytes. Hosted CPU and total isolate memory are unverified.
 `npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme` and
 its `-ff`, `-zero`, `-last` and `-terse-marker` variants pass an
 8,388,530-byte BLOB with 99 NULL columns whose identifiers are extended by
-512 bytes. When the previous wide rewrites exceed the SQL-size limit, the
+512 bytes. When the per-column compact rewrite exceeds the SQL-size limit, the
 bridge tries a shared correlated `NOT MATERIALIZED` CTE using the compact
-codec before the shorter distinct-marker fallback. The terse-marker value no
+codec before the older and distinct-marker fallbacks. The terse-marker value no
 longer needs escaping in the shared codec. The shared rewrite also passed
 plain and recursive caller CTE variants, colliding CTE and trigger-table names,
 bound UPSERT, multi-row UPDATE and DELETE, same-row AFTER trigger semantics,
@@ -476,11 +476,23 @@ planner hint; these cases do not prove every query shape or bound hosted CPU
 and isolate memory.
 
 `npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-interspersed`
-is a **failing regression**: a near-limit BLOB with a non-marker byte inserted
-inside a run of the compact marker exceeds SQLite's result-size limit when
-escaped. Direct DELETE succeeds and both attempts roll back business and audit
-changes. Other marker-heavy shapes and wide SELECT materialization may also
-exceed the limit. General exact-size compatibility remains an open Phase 1 gate.
+now passes the previously failing 8,388,530-byte BLOB with an inserted byte
+and seven suffix bytes. For marker-prefixed BLOBs with at most eight bytes
+outside the marker runs, the compact codec selects an ASCII sentinel absent
+from those bytes and replaces each marker with the sentinel. The decoder
+expands the sentinel and retains the other bytes. Local Workerd tests cover
+all 256 inserted byte values, one through eight interspersed bytes at varying
+positions, sentinel exhaustion through eight candidates, tag-like source
+values, nested marker prefixes, rollback and trigger effects. The shared
+encoder can scan and copy large BLOBs multiple times; neither CPU nor total
+isolate memory is bounded by these local tests.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header`
+is a **failing regression**: a near-limit BLOB beginning with the reserved
+sparse tag requires an escape prefix that exceeds SQLite's result-size limit.
+Direct DELETE succeeds and both attempts roll back business and audit changes.
+Other marker-heavy shapes and wide SELECT materialization may also exceed the
+limit. General exact-size compatibility remains an open Phase 1 gate.
 
 The checks for this change ran in a disposable checkout with a copied pinned
 upstream tree and dependencies symlinked to the original checkout's installed

@@ -43,14 +43,26 @@ function compactValueExpression(column, length, marker) {
   const byte = index => `ifnull(unicode(('"\\u00'||hex(substr(${column},${index},1))||'"')->>'$'),0)`;
   const run = n => `unhex(replace(hex(zeroblob(${n})),'00',hex(${marker})))`;
   const count = `${length}/9`, rem = `${length}%9`;
+  // Sparse non-marker bytes (at most eight on this branch) leave at least
+  // one of nine ASCII sentinels unused. Replace each marker by that byte;
+  // the decoder expands it and copies every other byte verbatim.
+  const stripped = `CAST(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'') AS BLOB)`;
+  const sentinels = 'ABCDEFGHI';
+  const sentinel = `(CASE ${[...sentinels].map(c => `WHEN instr(${stripped},X'${c.charCodeAt(0).toString(16)}')=0 THEN '${c}'`).join(' ')} END)`;
+  const sparse = `CAST(${marker}||'@MaPiRun1'||${sentinel}||replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),${sentinel}) AS BLOB)`;
+  // Reserve the sparse tag after any leading marker run (and literal Qs).
+  // Its escaped form gets one extra marker; decodeReturning removes it.
+  const sparseCollision = `substr(ltrim(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'Q'),'Q'),1,9)='@MaPiRun1'`;
   const tag = `CAST(${marker}||unhex(printf('%02x',${count}>>8&255))||${run(`1+512*(${count}>>16)+256*(${rem} IN(3,8))+iif(${rem}=8,${byte(-8)},0)`)}||unhex(printf('%02x',${count}&255))||${run(`1+iif(${rem}=8,${byte(-7)},0)`)}||substr(${column},-min(${rem},6),${rem})||substr(X'53',1,${rem}=3) AS BLOB)`;
   // Count the hex digits needed for the signed value plus its sign bit,
   // then map byte widths 5 and 7 to the supported widths 6 and 8.
   const width = `substr('12346688',(length(printf('%x',(iif(${column}<0,~${column},${column})<<1)|1))+1)/2,1)`;
   return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN X'' ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
-    ` WHEN 'blob' THEN iif(${length} IN${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN${widths}),` +
-    `iif(${length}<75497472 AND substr(${column},-9-${length}%9,9)=${marker},${tag},CAST(${marker}||${column} AS BLOB)),` +
-    `${column}) ELSE ${column} END`;
+    ` WHEN 'blob' THEN iif(substr(${column},1,9)=${marker} AND ${sparseCollision},CAST(${marker}||${column} AS BLOB),` +
+    `iif(${length} IN${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN${widths}),` +
+    `iif(${length}<75497472 AND substr(${column},-9-${length}%9,9)=${marker},${tag},` +
+    `iif(${length}>100,${sparse},CAST(${marker}||${column} AS BLOB))),` +
+    `${column})) ELSE ${column} END`;
 }
 
 function legacyReturningColumn(column, allowEight = true) {
@@ -142,6 +154,28 @@ function decodeReturning(value, unified = false, terse = false) {
   };
   // The selected SQL rewrite and decoder use the same transient tag format.
   if (unified) {
+    if (markerAt(0)) {
+      let markers = 0, position = 0;
+      while (markerAt(position)) { markers++; position += 9; }
+      while (blob[position] === 81) position++; // literal Q bytes
+      const header = '@MaPiRun1';
+      const hasHeader = [...header].every((c, i) => blob[position + i] === c.charCodeAt(0));
+      if (hasHeader && markers > 1) return { blob: blob.subarray(9).toBase64() };
+      if (hasHeader && markers === 1 && position === 9) {
+        const sentinel = blob[position + header.length];
+        if (sentinel < 65 || sentinel > 73) throw new Error('Invalid sparse SQLite BLOB sentinel');
+        const payload = blob.subarray(position + header.length + 1);
+        let markerCount = 0;
+        for (const byte of payload) if (byte === sentinel) markerCount++;
+        const expanded = new Uint8Array(payload.length + markerCount * 8);
+        let out = 0;
+        for (const byte of payload) {
+          if (byte === sentinel) { expanded[out] = 255; out += 9; }
+          else expanded[out++] = byte;
+        }
+        return { blob: expanded.toBase64() };
+      }
+    }
     // Two bounded marker runs encode the high count, suffix bytes and flag.
     // Their separators ensure an unprefixed tag cannot begin with a marker;
     // a source BLOB shaped like a tag is escaped as ordinary data.
@@ -375,22 +409,22 @@ export function execute(storage, { statement, args, query }) {
     columns = returning[1].split(/\s*,\s*/);
     wide = columns.length > 50;
     // Use the compact codec for wide projections. When the rewritten SQL is
-    // too large, use the prior codec only if its rewrite is actually shorter.
+    // too large, share the compact encoder before trying shorter prior codecs.
     const prefix = sql.slice(0, returningToken.start) + "RETURNING ";
     unified = wide;
     prepared = prefix + columns.map(column => wide ? compactReturningColumn(column) : legacyReturningColumn(column)).join(", ");
-    if (wide && new TextEncoder().encode(prepared).length > 100000) {
-      const shorter = prefix + columns.map(column => legacyReturningColumn(column, false)).join(", ");
-      if (new TextEncoder().encode(shorter).length < new TextEncoder().encode(prepared).length) {
-        unified = false;
-        prepared = shorter;
-      }
-    }
     if (wide && new TextEncoder().encode(prepared).length > 100000) {
       const candidate = sharedReturningRewrite(sql, tokens, returningToken, columns);
       if (new TextEncoder().encode(candidate).length < new TextEncoder().encode(prepared).length) {
         unified = true;
         prepared = candidate;
+      }
+    }
+    if (wide && new TextEncoder().encode(prepared).length > 100000) {
+      const shorter = prefix + columns.map(column => legacyReturningColumn(column, false)).join(", ");
+      if (new TextEncoder().encode(shorter).length < new TextEncoder().encode(prepared).length) {
+        unified = false;
+        prepared = shorter;
       }
     }
     if (wide && new TextEncoder().encode(prepared).length > 100000) {
