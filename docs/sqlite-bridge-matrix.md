@@ -431,25 +431,26 @@ bridge. The marker check can copy a large BLOB in SQLite and scan it in JS;
 these tests do not establish CPU or total isolate-memory limits.
 
 `npm run test:sql-returning-exact-blob-repeat` and the corresponding
-`-tail`, `-tail2`, `-tail3`, `-tail4`, `-tail5` and `-tail6` commands pass
-marker runs with zero through six trailing bytes, up to 8,388,636 bytes. The
-bridge uses compact tags for zero through four and six trailing bytes; the
-five-byte fixture is returned without an escape. Two count bytes and a bounded
-marker run encode the count and the padding flag. Their positions keep a tag
-in the escape grammar, so real tag-shaped or nested source BLOBs remain data.
-Runs exceeding the 23-bit marker count use the ordinary escape. Local Workerd
-tests cover each byte at every six-byte tail position, interspersed bytes,
-marker-count boundaries, tag collisions, signed integer-width boundaries, 100
-returned columns, rollback, and a committed delete with one audit effect.
-Reconstructing the result and the SQL marker check can allocate or scan large
-values; hosted CPU and total isolate memory remain unverified.
+`-tail` through `-tail6` commands pass their marker-run cases. The
+`-tail8`, `-tail8-zero` and `-tail8-ff` commands pass an 8,388,629-byte BLOB
+ending in eight varied, zero or FF bytes; the `-tail11` control also passes.
+The eight-byte encoding represents the first two suffix bytes as bounded marker
+run lengths, with the remaining six bytes and two count bytes in the existing
+escape grammar. A tag-shaped or nested source BLOB remains data. Local Workerd
+tests cover each byte at each suffix position, interspersed bytes, count and
+tag collisions, signed integer boundaries, 100-column results, rollback and a
+committed delete with one audit effect. The marker check and reconstruction
+can scan or allocate large values; the new tag can itself reach 297,233 bytes.
+Hosted CPU and total isolate memory remain unverified.
 
-`npm run test:sql-returning-exact-blob-repeat-tail8` is a **failing
-regression**: a platform-valid 8,388,629-byte BLOB consisting of a marker run followed
-by eight bytes succeeds with direct DELETE but needs an escape prefix and fails in the
-bridge with `SQLITE_TOOBIG`. Both attempts roll back business and audit changes.
-Other marker-heavy shapes and wide SELECT materialization may also exceed the
-limit. Exact-size compatibility remains an open Phase 1 gate.
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide` is a **failing
+regression**: direct DELETE returns an 8,388,584-byte BLOB with an eight-byte
+suffix and 50 NULL columns, but bridge RETURNING fails with `SQLITE_TOOBIG`.
+The new encoding is limited to at most 50 returned columns to preserve the
+100-column statement-size check; wider results retain the previous encoding.
+Both attempts roll back business and audit changes. Other marker-heavy shapes
+and wide SELECT materialization may also exceed the limit. Exact-size
+compatibility remains an open Phase 1 gate.
 
 The observed rollback incompatibility is specific to the tested synchronous
 single-object staging approach. Re-execution after rollback cannot reproduce

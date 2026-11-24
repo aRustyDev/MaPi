@@ -44,17 +44,18 @@ export class SQLLimitProbe extends DurableObject {
     }
     return {ok:!bridgeError,error:bridgeError||null,directLength,rows,audit};
   }
-  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630, tailBytes = 0) {
+  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630, tailBytes = 0, wide = false, tailValue = -1) {
     const storage=this.ctx.storage, sql=storage.sql, abort='rollback boundary proof';
-    sql.exec('CREATE TABLE IF NOT EXISTS pinned_blob_shape(value BLOB)');
+    const extra = wide ? Array.from({length:50}, (_, i) => `c${i}`) : [];
+    sql.exec(`CREATE TABLE IF NOT EXISTS pinned_blob_shape(value BLOB${extra.map(name => `, ${name}`).join('')})`);
     sql.exec('CREATE TABLE IF NOT EXISTS pinned_blob_audit(count INTEGER NOT NULL)');
     sql.exec('DELETE FROM pinned_blob_shape'); sql.exec('DELETE FROM pinned_blob_audit'); sql.exec('INSERT INTO pinned_blob_audit VALUES(0)');
     sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_blob_delete_audit AFTER DELETE ON pinned_blob_shape BEGIN UPDATE pinned_blob_audit SET count=count+1; END');
     const repeated = repeatedMarker ? new Uint8Array(blobBytes) : null;
-    if (repeated) { for (let i=0;i<repeated.length-tailBytes;i+=9) repeated[i]=255; for (let i=0;i<tailBytes;i++) repeated[repeated.length-tailBytes+i]=i+1; }
-    const insert=()=>repeated ? sql.exec('INSERT INTO pinned_blob_shape VALUES (?)', repeated.buffer) : sql.exec(`INSERT INTO pinned_blob_shape VALUES (CAST(X'FF0000000000000000'||zeroblob(${blobBytes-9}) AS BLOB))`);
-    const matches=value=>value.length===blobBytes && value.every((byte,index)=>byte===(tailBytes && index>=blobBytes-tailBytes ? index-(blobBytes-tailBytes)+1 : index===0 || (repeatedMarker && index%9===0) ? 255 : 0));
-    const statement='DELETE FROM pinned_blob_shape RETURNING value';
+    if (repeated) { for (let i=0;i<repeated.length-tailBytes;i+=9) repeated[i]=255; for (let i=0;i<tailBytes;i++) repeated[repeated.length-tailBytes+i]=tailValue < 0 ? i+1 : tailValue; }
+    const insert=()=>repeated ? sql.exec('INSERT INTO pinned_blob_shape(value) VALUES (?)', repeated.buffer) : sql.exec(`INSERT INTO pinned_blob_shape(value) VALUES (CAST(X'FF0000000000000000'||zeroblob(${blobBytes-9}) AS BLOB))`);
+    const matches=value=>value.length===blobBytes && value.every((byte,index)=>byte===(tailBytes && index>=blobBytes-tailBytes ? (tailValue < 0 ? index-(blobBytes-tailBytes)+1 : tailValue) : index===0 || (repeatedMarker && index%9===0) ? 255 : 0));
+    const statement=`DELETE FROM pinned_blob_shape RETURNING value${extra.map(name => `,${name}`).join('')}`;
     let directLength, bridgeError;
     try { storage.transactionSync(()=>{insert();directLength=sql.exec(statement).raw().toArray()[0][0].byteLength;throw Error(abort);}); }
     catch(error) { if(error.message!==abort) throw error; }
@@ -267,6 +268,25 @@ export class SQLLimitProbe extends DurableObject {
           const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
           assert(result.rows[0][0]?.blob === value.toBase64(), `Marker-count tag collision: ${markers}/${low}/${tail.length}`);
         }
+      }
+    }
+    // Eight-byte suffixes exercise both independently encoded marker-run
+    // lengths and interspersed data, including every possible byte.
+    for (let byte = 0; byte < 256; byte++) for (let index = 0; index < 8; index++) {
+      const tail = [0, 255, 83, 0, 255, 83, 0, 255]; tail[index] = byte;
+      for (const source of [[...marker, ...marker, ...tail], [...marker, tail[0], ...marker, ...tail.slice(1)]]) {
+        const value = Uint8Array.from(source);
+        const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
+        assert(result.rows[0][0]?.blob === value.toBase64(), `Eight-byte marker-tail changed: ${index}/${byte}`);
+      }
+    }
+    // The eight-byte format has two marker runs separated by count bytes.
+    for (const first of [1, 2, 255, 256, 257]) for (const second of [1, 2, 255, 256]) for (const low of [0, 255]) {
+      const tag = [...marker, low, ...Array.from({length:first}, () => marker).flat(), low, ...Array.from({length:second}, () => marker).flat(), 0, 255, 83, 0, 255, 83];
+      for (const source of [tag, [...marker, ...tag], tag.slice(9)]) {
+        const value = Uint8Array.from(source);
+        const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
+        assert(result.rows[0][0]?.blob === value.toBase64(), `Eight-byte tag collision: ${first}/${second}/${low}`);
       }
     }
     // A real source BLOB may itself look exactly like a compact run tag. It
@@ -510,4 +530,4 @@ export class SQLLimitProbe extends DurableObject {
     return { ok: true, wideColumns: 100, directSQLBytes: 100000, rewrittenSelectBytes: 100000, rewrittenReturningBytes: 100000, rejectedBytes: 100001, function33, largeRows };
   }
 }
-export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-tail8') ? await probe.runEscapedBlobReturningExact(true,8388629,8) : params.has('exact-blob-repeat-tail6') ? await probe.runEscapedBlobReturningExact(true,8388636,6) : params.has('exact-blob-repeat-tail5') ? await probe.runEscapedBlobReturningExact(true,8388635,5) : params.has('exact-blob-repeat-tail4') ? await probe.runEscapedBlobReturningExact(true,8388634,4) : params.has('exact-blob-repeat-tail3') ? await probe.runEscapedBlobReturningExact(true,8388633,3) : params.has('exact-blob-repeat-tail2') ? await probe.runEscapedBlobReturningExact(true,8388632,2) : params.has('exact-blob-repeat-tail') ? await probe.runEscapedBlobReturningExact(true,8388631,1) : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
+export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-tail8-ff') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,255) : params.has('exact-blob-repeat-tail8-zero') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,0) : params.has('exact-blob-repeat-tail8-wide') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true) : params.has('exact-blob-repeat-tail11') ? await probe.runEscapedBlobReturningExact(true,8388632,11) : params.has('exact-blob-repeat-tail8') ? await probe.runEscapedBlobReturningExact(true,8388629,8) : params.has('exact-blob-repeat-tail6') ? await probe.runEscapedBlobReturningExact(true,8388636,6) : params.has('exact-blob-repeat-tail5') ? await probe.runEscapedBlobReturningExact(true,8388635,5) : params.has('exact-blob-repeat-tail4') ? await probe.runEscapedBlobReturningExact(true,8388634,4) : params.has('exact-blob-repeat-tail3') ? await probe.runEscapedBlobReturningExact(true,8388633,3) : params.has('exact-blob-repeat-tail2') ? await probe.runEscapedBlobReturningExact(true,8388632,2) : params.has('exact-blob-repeat-tail') ? await probe.runEscapedBlobReturningExact(true,8388631,1) : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
