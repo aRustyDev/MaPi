@@ -24,6 +24,15 @@ cannot represent all SQLite int64 values. Adding a type column can exceed the
 100-column limit or the row-size limit. Reading the original 100 columns
 unchanged therefore does not by itself solve typed arbitrary `RETURNING`.
 
+SQLite's [RETURNING processing-order documentation](https://www.sqlite.org/lang_returning.html#processing_order)
+says that a DML statement performs its changes on the first step and accumulates
+all returned output in memory before emitting a row. Its output order is not
+promised to match write order. Consequently, transferring individual rows in
+bounded frames cannot by itself bound SQLite-internal memory for arbitrary
+multi-row RETURNING. The candidate needs either a supported engine/runtime
+primitive, a rigorously equivalent bounded statement transformation, or an
+explicitly approved compatibility limit. A limit is not currently authorized.
+
 ## Candidate boundary
 
 1. **Acquire a typed, ordered result without growing its SQLite row.** For
@@ -96,14 +105,20 @@ direct JavaScript results for integer `9007199254740992` and
 the same JavaScript value as a TEXT cell containing that decimal string. Both
 checks illustrate why an independent type channel is necessary for these
 representations; they do not prove that no other implementation is possible.
+A local three-row DELETE also confirms that all three delete-trigger effects
+are visible before the first RETURNING row is consumed, and that the enclosing
+rollback removes them. It does not measure SQLite's temporary memory.
 
 In local workerd, separate commit and rollback runs each transferred and
 verified all 8,388,530 bytes through 256 encrypted frames of at most 32,768
 plaintext bytes. AES-GCM additional data binds synthetic project, owner,
-generation, handle, sequence, offset and total. Identical replay is accepted;
-conflicting and out-of-order writes, modified ciphertext and a changed
-generation are rejected. The spill object is intentionally aborted and
-recreated after writing; its durable frames remain readable. The rollback case
+generation, handle, fixed row/column/type, sequence, offset and total. The
+experiment chains ciphertext hashes and authenticates a final seal containing
+the frame count, total bytes and final hash. Identical frame and seal replays
+are accepted; conflicting replays, writes after seal, premature seal,
+out-of-order or missing frames, reordered or modified ciphertext, a modified
+seal and a changed generation are rejected. The spill object is intentionally
+aborted and recreated after writing; its durable frames and seal remain readable. The rollback case
 retains the returned bytes while its business and audit effects roll back; the
 commit case records one audit effect. An injected failure after the first frame
 drains the write cursor, rolls back, and removes the test spill. These results
@@ -114,10 +129,11 @@ the test also holds the input copy. The single-row test awaits while its cursor 
 multi-row snapshot or override Cloudflare's documented cursor limitation. No
 total isolate-memory, peak SQLite memory, CPU, hosted limit or concurrent-traffic
 measurement is made. The spill object's
-RPCs have no production authentication, keys are ephemeral, the test has no
-seal, TTL, protected cleanup, quota reservation or owner-restart recovery, and
-the fixture does not independently establish that a check constraint is a
-sufficient authority for arbitrary SQL. `ctx.abort()` is intentional and only
+RPCs have no production authentication, keys are ephemeral, and the test has no
+TTL, protected cleanup, quota reservation or owner-restart recovery. Neither
+the seal nor its key has independently protected authority. The fixture does
+not establish that a check constraint is a sufficient authority for arbitrary
+SQL. `ctx.abort()` is intentional and only
 applies to the disposable local spill object. Never deploy this experiment.
 
 ## Required next proof before integration
@@ -126,8 +142,10 @@ applies to the disposable local spill object. Never deploy this experiment.
   row boundaries, with mixed NULL, BLOB, TEXT, int64 extrema and REAL,
   duplicate and long names, and nested/ignored triggers. The 65-byte fixture
   must pass through the actual Go driver without a schema-specific type guess.
-- Establish a supported snapshot-preserving path across asynchronous spill and
-  owner rollback, or an alternative that consumes the cursor synchronously
+- Resolve SQLite's documented multi-row RETURNING output accumulation under
+  the required memory bound without changing semantics, or explicitly surface
+  any proposed limit for separate approval. Establish a supported
+  snapshot-preserving path across asynchronous spill and owner rollback, or an alternative that consumes the cursor synchronously
   without unbounded memory or changed SQLite connection state. Then combine
   typed SELECT and DML framing with the real Go/Wasm driver and owner
   transaction/fence paths. Test escaping rows after rollback, `Rows.Close`,
