@@ -59,13 +59,25 @@ function compactValueExpression(column, length, marker) {
   const headerEnd = `(instr(${column},X'404d61506952756e31')+8)`;
   const zeroCount = `(${length}-${headerEnd}-64)`;
   const zeroRun = `CAST(${marker}||'@MaPiRun1J'||unhex(printf('%08x',${zeroCount}))||substr(${column},1,${headerEnd})||substr(${column},-64) AS BLOB)`;
+  // Traverse nonzero subranges, smallest first. The recursive CTE itself is
+  // capped even if SQLite materializes it; a full cap fails closed because
+  // its patch list might be incomplete. Nine leaves also force fallback.
+  const partStart = `p+iif(side=0,0,n/2)`;
+  const partLength = `iif(side=0,n/2,n-n/2)`;
+  const sparseZero = `(WITH RECURSIVE mapi_zero_scan(p,n) AS (` +
+    `SELECT 0,${zeroCount} UNION ALL SELECT ${partStart},${partLength} FROM mapi_zero_scan JOIN (SELECT 0 AS side UNION ALL SELECT 1) ` +
+    `WHERE n>1 AND substr(${column},${headerEnd}+1+${partStart},${partLength})<>zeroblob(${partLength}) ORDER BY 2 ASC LIMIT 250), ` +
+    `mapi_zero_patches AS (SELECT p FROM mapi_zero_scan WHERE n=1 LIMIT 9) ` +
+    `SELECT iif(count(*) BETWEEN 1 AND 8 AND (SELECT count(*) FROM mapi_zero_scan)<250,CAST(${marker}||'@MaPiRun1K'||unhex(printf('%08x',${zeroCount}))||printf('%d',count(*))||` +
+    `group_concat(printf('%08X',p)||hex(substr(${column},${headerEnd}+1+p,1)),'')||substr(${column},1,${headerEnd})||substr(${column},-64) AS BLOB),` +
+    `CAST(${marker}||${column} AS BLOB)) FROM mapi_zero_patches)`;
   const tag = `CAST(${marker}||unhex(printf('%02x',${count}>>8&255))||${run(`1+512*(${count}>>16)+256*(${rem} IN(3,8))+iif(${rem}=8,${byte(-8)},0)`)}||unhex(printf('%02x',${count}&255))||${run(`1+iif(${rem}=8,${byte(-7)},0)`)}||substr(${column},-min(${rem},6),${rem})||substr(X'53',1,${rem}=3) AS BLOB)`;
   // Count the hex digits needed for the signed value plus its sign bit,
   // then map byte widths 5 and 7 to the supported widths 6 and 8.
   const width = `substr('12346688',(length(printf('%x',(iif(${column}<0,~${column},${column})<<1)|1))+1)/2,1)`;
   return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN X'' ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
     ` WHEN 'blob' THEN iif(substr(${column},1,9)=${marker} AND ${sparseCollision},` +
-    `iif(${zeroCount}>=64 AND substr(${column},${headerEnd}+1,${zeroCount})=zeroblob(${zeroCount}),${zeroRun},CAST(${marker}||${column} AS BLOB)),` +
+    `iif(${zeroCount}>=64,iif(substr(${column},${headerEnd}+1,${zeroCount})=zeroblob(${zeroCount}),${zeroRun},${sparseZero}),CAST(${marker}||${column} AS BLOB)),` +
     `iif(${length} IN${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN${widths}),` +
     `iif(${length}<75497472 AND substr(${column},-9-${length}%9,9)=${marker},${tag},` +
     `iif(${length}>100,${sparse},CAST(${marker}||${column} AS BLOB))),` +
@@ -170,6 +182,28 @@ function decodeReturning(value, unified = false, terse = false) {
       if (hasHeader && markers > 1) return { blob: blob.subarray(9).toBase64() };
       if (hasHeader && markers === 1 && position === 9) {
         const sentinel = blob[position + header.length];
+        if (sentinel === 75) {
+          const start = position + header.length + 1;
+          if (blob.length < start + 5 + 10 + 18 + 64) throw new Error('Invalid sparse-zero SQLite BLOB tag');
+          const count = blob[start] * 0x1000000 + blob[start + 1] * 0x10000 + blob[start + 2] * 0x100 + blob[start + 3];
+          const patches = blob[start + 4] - 48;
+          if (count < 64 || patches < 1 || patches > 8) throw new Error('Invalid sparse-zero SQLite BLOB length');
+          const patchStart = start + 5, payloadStart = patchStart + patches * 10;
+          if (blob.length < payloadStart + 18 + 64) throw new Error('Invalid sparse-zero SQLite BLOB payload');
+          const payload = blob.subarray(payloadStart), prefixLength = payload.length - 64;
+          const expanded = new Uint8Array(payload.length + count), seen = new Set();
+          expanded.set(payload.subarray(0, prefixLength));
+          expanded.set(payload.subarray(prefixLength), prefixLength + count);
+          for (let i = 0; i < patches; i++) {
+            const encoded = String.fromCharCode(...blob.subarray(patchStart + i * 10, patchStart + (i + 1) * 10));
+            if (!/^[0-9A-F]{10}$/.test(encoded)) throw new Error('Invalid sparse-zero SQLite BLOB patch');
+            const offset = Number.parseInt(encoded.slice(0, 8), 16), value = Number.parseInt(encoded.slice(8), 16);
+            if (offset >= count || value === 0 || seen.has(offset)) throw new Error('Invalid sparse-zero SQLite BLOB patch');
+            seen.add(offset);
+            expanded[prefixLength + offset] = value;
+          }
+          return { blob: expanded.toBase64() };
+        }
         if (sentinel === 74) {
           const start = position + header.length + 1;
           if (blob.length < start + 4 + 18 + 64) throw new Error('Invalid zero-run SQLite BLOB tag');

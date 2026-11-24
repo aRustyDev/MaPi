@@ -497,11 +497,26 @@ effects. This is a specific compressible shape, not a general solution; SQL
 may copy or compare large values and hosted CPU and isolate memory are unverified.
 
 `npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-nonzero`
-is a **failing regression**: a near-limit reserved-tag BLOB with a nonzero byte
-inside the zero-filled span requires an escape prefix that exceeds SQLite's
-result-size limit. Direct DELETE succeeds and both attempts roll back business
-and audit changes. Other data shapes and wide SELECT materialization may also
-exceed the limit. General exact-size compatibility remains an open Phase 1 gate.
+and the `-sparse-header-eight` variant now pass near-limit values with one and
+eight separated nonzero bytes in the zero span. A recursive SQLite search
+visits nonzero subranges and records up to eight byte positions and values;
+the scan itself is capped at 250 nodes. Reaching that cap or finding nine bytes
+falls back to the ordinary escape, rather than encoding an incomplete value.
+Local Workerd checks cover all 255 nonzero byte values, one, two, four, eight
+and nine positions, ends and interior positions, arbitrary tails, rollback and
+audit effects. `npm run test:sparse-zero-differential` instruments the actual
+rewrite against native SQLite at approximately 8 MiB: one, eight, nine and 4,096
+nonzero bytes round-trip; the measured scan made at most 580 child checks. The
+native planner ran the scan twice for the eight-byte case. The explicit node
+cap limits each scan, not SQLite's per-node allocation, scan cost, total
+invocations or hosted CPU and isolate memory.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-nine`
+is a **failing regression**: a near-limit reserved-tag BLOB with nine nonzero
+bytes in the zero span takes the safe escape path and exceeds SQLite's result
+limit. Direct DELETE succeeds and both attempts roll back business and audit
+changes. Other data shapes and wide SELECT materialization may also exceed
+the limit. General exact-size compatibility remains an open Phase 1 gate.
 
 The checks for this change ran in a disposable checkout with a copied pinned
 upstream tree and dependencies symlinked to the original checkout's installed
