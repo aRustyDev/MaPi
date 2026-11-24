@@ -59,16 +59,17 @@ function compactValueExpression(column, length, marker) {
   const headerEnd = `(instr(${column},X'404d61506952756e31')+8)`;
   const zeroCount = `(${length}-${headerEnd}-64)`;
   const zeroRun = `CAST(${marker}||'@MaPiRun1J'||unhex(printf('%08x',${zeroCount}))||substr(${column},1,${headerEnd})||substr(${column},-64) AS BLOB)`;
-  // Traverse nonzero subranges, smallest first. The recursive CTE itself is
-  // capped even if SQLite materializes it; a full cap fails closed because
-  // its patch list might be incomplete. Nine leaves also force fallback.
+  // Traverse nonzero subranges, smallest first. Cap each materialized scan
+  // and fail closed if its patch list could be incomplete. Sixty-five leaves
+  // force fallback. Only use patches when they save space over escape.
+  // SQLite may evaluate this correlated subquery more than once per value.
   const partStart = `p+iif(side=0,0,n/2)`;
   const partLength = `iif(side=0,n/2,n-n/2)`;
-  const sparseZero = `(WITH RECURSIVE mapi_zero_scan(p,n) AS (` +
+  const sparseZero = `(WITH RECURSIVE mapi_zero_scan(p,n) AS MATERIALIZED (` +
     `SELECT 0,${zeroCount} UNION ALL SELECT ${partStart},${partLength} FROM mapi_zero_scan JOIN (SELECT 0 AS side UNION ALL SELECT 1) ` +
-    `WHERE n>1 AND substr(${column},${headerEnd}+1+${partStart},${partLength})<>zeroblob(${partLength}) ORDER BY 2 ASC LIMIT 250), ` +
-    `mapi_zero_patches AS (SELECT p FROM mapi_zero_scan WHERE n=1 LIMIT 9) ` +
-    `SELECT iif(count(*) BETWEEN 1 AND 8 AND (SELECT count(*) FROM mapi_zero_scan)<250,CAST(${marker}||'@MaPiRun1K'||unhex(printf('%08x',${zeroCount}))||printf('%d',count(*))||` +
+    `WHERE n>1 AND substr(${column},${headerEnd}+1+${partStart},${partLength})<>zeroblob(${partLength}) ORDER BY 2 ASC LIMIT 2048), ` +
+    `mapi_zero_patches AS (SELECT p FROM mapi_zero_scan WHERE n=1 LIMIT 65) ` +
+    `SELECT iif(count(*) BETWEEN 1 AND 64 AND (SELECT count(*) FROM mapi_zero_scan)<2048 AND ${zeroCount}>10*count(*)+18,CAST(${marker}||'@MaPiRun1K'||unhex(printf('%08x',${zeroCount}))||printf('%04X',count(*))||` +
     `group_concat(printf('%08X',p)||hex(substr(${column},${headerEnd}+1+p,1)),'')||substr(${column},1,${headerEnd})||substr(${column},-64) AS BLOB),` +
     `CAST(${marker}||${column} AS BLOB)) FROM mapi_zero_patches)`;
   const tag = `CAST(${marker}||unhex(printf('%02x',${count}>>8&255))||${run(`1+512*(${count}>>16)+256*(${rem} IN(3,8))+iif(${rem}=8,${byte(-8)},0)`)}||unhex(printf('%02x',${count}&255))||${run(`1+iif(${rem}=8,${byte(-7)},0)`)}||substr(${column},-min(${rem},6),${rem})||substr(X'53',1,${rem}=3) AS BLOB)`;
@@ -184,11 +185,13 @@ function decodeReturning(value, unified = false, terse = false) {
         const sentinel = blob[position + header.length];
         if (sentinel === 75) {
           const start = position + header.length + 1;
-          if (blob.length < start + 5 + 10 + 18 + 64) throw new Error('Invalid sparse-zero SQLite BLOB tag');
+          if (blob.length < start + 8 + 10 + 18 + 64) throw new Error('Invalid sparse-zero SQLite BLOB tag');
           const count = blob[start] * 0x1000000 + blob[start + 1] * 0x10000 + blob[start + 2] * 0x100 + blob[start + 3];
-          const patches = blob[start + 4] - 48;
-          if (count < 64 || patches < 1 || patches > 8) throw new Error('Invalid sparse-zero SQLite BLOB length');
-          const patchStart = start + 5, payloadStart = patchStart + patches * 10;
+          const patchCount = String.fromCharCode(...blob.subarray(start + 4, start + 8));
+          if (!/^[0-9A-F]{4}$/.test(patchCount)) throw new Error('Invalid sparse-zero SQLite BLOB patch count');
+          const patches = Number.parseInt(patchCount, 16);
+          if (count < 64 || patches < 1 || patches > 64) throw new Error('Invalid sparse-zero SQLite BLOB length');
+          const patchStart = start + 8, payloadStart = patchStart + patches * 10;
           if (blob.length < payloadStart + 18 + 64) throw new Error('Invalid sparse-zero SQLite BLOB payload');
           const payload = blob.subarray(payloadStart), prefixLength = payload.length - 64;
           const expanded = new Uint8Array(payload.length + count), seen = new Set();

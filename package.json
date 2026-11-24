@@ -95,6 +95,8 @@
     "test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-ff": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_TAIL8_WIDE100_EXTREME_FF=1 node scripts/test-sql-returning-exact.mjs",
     "test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-zero": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_TAIL8_WIDE100_EXTREME_ZERO=1 node scripts/test-sql-returning-exact.mjs",
     "test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-last": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_TAIL8_WIDE100_EXTREME_LAST=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-sixtyfour": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_TAIL8_WIDE100_EXTREME_SPARSE_HEADER_SIXTYFOUR=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-sixtyfive": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_TAIL8_WIDE100_EXTREME_SPARSE_HEADER_SIXTYFIVE=1 node scripts/test-sql-returning-exact.mjs",
     "test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-eight": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_TAIL8_WIDE100_EXTREME_SPARSE_HEADER_EIGHT=1 node scripts/test-sql-returning-exact.mjs",
     "test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-nine": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_TAIL8_WIDE100_EXTREME_SPARSE_HEADER_NINE=1 node scripts/test-sql-returning-exact.mjs",
     "test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-nonzero": "MAPI_SQL_RETURNING_EXACT_BLOB_REPEAT_TAIL8_WIDE100_EXTREME_SPARSE_HEADER_NONZERO=1 node scripts/test-sql-returning-exact.mjs",
