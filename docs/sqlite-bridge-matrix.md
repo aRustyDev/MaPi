@@ -430,11 +430,23 @@ TEXT tests pass with TEXT unchanged, including comparison with the earlier
 bridge. The marker check can copy a large BLOB in SQLite and scan it in JS;
 these tests do not establish CPU or total isolate-memory limits.
 
-`npm run test:sql-returning-exact-blob-repeat` is a distinct **failing
-regression**: an 8,388,630-byte BLOB made entirely of repeated markers is
-returned by direct DELETE but still needs an escape prefix, causing
-`SQLITE_TOOBIG`. Both attempts roll back business and audit changes. Wide
-SELECT materialization may also add overhead. Exact-size compatibility
+`npm run test:sql-returning-exact-blob-repeat` now passes the 8,388,630-byte
+pure repeated-marker BLOB. The bridge encodes a pure run as a 22-byte tag
+containing a three-byte marker count, then reconstructs the exact BLOB in JS.
+The tag occupies a previously unused part of the existing BLOB escape grammar:
+a real BLOB equal to the tag or a nested version is escaped and returned as
+data. Local Workerd checks cover those collisions, marker runs, rollback and
+one committed delete and audit effect. A first prototype exceeded the SQL
+statement-size limit for a 100-column RETURNING; the optimized form passed the
+existing 100-column and statement-length tests. Reconstructing the result and
+the SQL marker check can allocate or scan large values; hosted CPU and total
+isolate memory remain unverified.
+
+`npm run test:sql-returning-exact-blob-repeat-tail` is a distinct **failing
+regression**: an 8,388,631-byte BLOB consisting of repeated markers followed
+by one byte is returned by direct DELETE but still requires an escape prefix,
+causing `SQLITE_TOOBIG`. Both attempts roll back business and audit changes.
+Wide SELECT materialization may also add overhead. Exact-size compatibility
 remains an open Phase 1 gate.
 
 The observed rollback incompatibility is specific to the tested synchronous
