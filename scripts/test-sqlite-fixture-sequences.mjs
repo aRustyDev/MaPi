@@ -29,7 +29,11 @@ try {
     DELETE FROM negative;
     UPDATE sqlite_sequence SET seq=-5 WHERE name='negative';
   `);
-  source.prepare("INSERT INTO empty_after_delete VALUES (?)").run(9007199254740993n);
+  const largeInsert = source.prepare("INSERT INTO empty_after_delete VALUES (?)");
+  // `run()` returns the inserted row ID too; keep that result exact rather
+  // than asking Node to represent it as an unsafe JavaScript number.
+  largeInsert.setReadBigInts(true);
+  largeInsert.run(9007199254740993n);
   source.exec("DELETE FROM empty_after_delete; INSERT INTO \"a'\"\"quoted\" VALUES (9); DELETE FROM \"a'\"\"quoted\"");
   const before = sequence(source);
   assert(before.some(([name, seq]) => name === "empty_after_delete" && seq === 9007199254740993n));

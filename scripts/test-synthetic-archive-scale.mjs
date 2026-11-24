@@ -179,21 +179,26 @@ try {
     sealHead = sealed.head; sealingSteps++;
   }
   const sealMs = performance.now() - sealStarted;
+  // The current archive format requires the published terminal sealing head
+  // throughout verification and restore. This local authority is a test
+  // double and does not establish independent custody or nonrollback storage.
+  const sealing = { authority, jobId: sealingJob, head: sealHead };
   const verificationJob = randomBytes(16).toString('hex');
-  let head = await beginSyntheticVerification(bucket, kms, scope, commitment, envelope, signal(), authority, verificationJob);
+  let head = await beginSyntheticVerification(bucket, kms, scope, commitment, envelope, signal(), authority, verificationJob, sealing);
   const verifyStarted = performance.now();
   let verified, verificationSteps = 0, verificationResumeRevision = null;
   while (!verified?.complete) {
     if (verificationSteps === 32) {
       const old = head;
       authority.failAfterCommit = true;
-      await assert.rejects(() => advanceSyntheticVerification(bucket, kms, scope, commitment, envelope, signal(), authority, verificationJob, old, 8));
+      await assert.rejects(() => advanceSyntheticVerification(bucket, kms, scope, commitment, envelope, signal(), authority, verificationJob, old, 8, sealing));
       authority.close(); authority = new Authority(); bucket = new Bucket();
+      sealing.authority = authority;
       head = await authority.read(verificationJob);
       assert.equal(head.revision, old.revision + 1);
       verificationResumeRevision = head.revision;
     }
-    verified = await advanceSyntheticVerification(bucket, kms, scope, commitment, envelope, signal(), authority, verificationJob, head, 8);
+    verified = await advanceSyntheticVerification(bucket, kms, scope, commitment, envelope, signal(), authority, verificationJob, head, 8, sealing);
     head = verified.head; verificationSteps++;
   }
   assert.equal(verified.inventoryDigest, sealed.inventoryDigest);
@@ -205,7 +210,7 @@ try {
     return db;
   }
   staged = openStage();
-  let rollbackFault = true, lostCommitAck = true;
+  let rollbackFault = true, lostCommitAck = true, injectedFault = null;
   const target = {
     async load() { const row = staged.prepare('SELECT state FROM checkpoint WHERE singleton=1').get(); return row ? JSON.parse(row.state) : null; },
     async begin(cp) {
@@ -221,10 +226,10 @@ try {
       try {
         assert.deepEqual(await this.load(), expected); assert.equal(index, expected.next);
         staged.prepare('INSERT INTO chunks VALUES (?,?,?)').run(index, content, digest);
-        if (index === 384 && rollbackFault) { rollbackFault = false; throw Error('injected restore rollback'); }
+        if (index === 384 && rollbackFault) { rollbackFault = false; injectedFault = { index, committed: false }; throw Error('injected restore rollback'); }
         staged.prepare('UPDATE checkpoint SET state=? WHERE singleton=1').run(JSON.stringify(next)); staged.exec('COMMIT');
       } catch (error) { staged.exec('ROLLBACK'); throw error; }
-      if (index === 768 && lostCommitAck) { lostCommitAck = false; throw Error('injected lost restore acknowledgement'); }
+      if (index === 768 && lostCommitAck) { lostCommitAck = false; injectedFault = { index, committed: true }; throw Error('injected lost restore acknowledgement'); }
     },
     async finish(cp) {
       staged.exec('BEGIN IMMEDIATE');
@@ -232,15 +237,20 @@ try {
       catch (error) { staged.exec('ROLLBACK'); throw error; }
     },
   };
-  const options = { authority, jobId: verificationJob, head, maxChunks: 8 };
+  const options = { authority, jobId: verificationJob, head, maxChunks: 8, sealing };
   const restoreStarted = performance.now();
   let restored, restoreCalls = 0, resumedCursors = [], firstSelectorAfterRestart = 0;
   while (!restored?.complete) {
     try { restored = await restoreSyntheticArchive(bucket, kms, scope, commitment, envelope, signal(), target, options); }
     catch (error) {
-      if (!['injected restore rollback', 'injected lost restore acknowledgement'].includes(error.message)) throw error;
+      // The driver deliberately redacts destination errors and treats them as
+      // uncertain. Accept only our recorded injected fault, then resolve the
+      // outcome by reopening the durable checkpoint rather than the error.
+      if (!injectedFault || error.message !== 'Archive destination outcome uncertain; reconciliation required') throw error;
       staged.close(); staged = openStage(); bucket = new Bucket();
-      const checkpoint = await target.load(); resumedCursors.push(checkpoint.next);
+      const checkpoint = await target.load();
+      assert.equal(checkpoint.next, injectedFault.index + Number(injectedFault.committed));
+      injectedFault = null; resumedCursors.push(checkpoint.next);
       if (resumedCursors.length === 1) {
         const firstKey = `mapi-p1-synthetic-archive-v1/${runId}/${scope.archiveId}/chunk-selector/${'0'.repeat(16)}`;
         firstSelectorAfterRestart = metrics.selectedReads.get(firstKey) ?? 0;
