@@ -1,6 +1,7 @@
 import { ProjectRegistry, validNewRelocationMoveId } from "../worker/registry.js";
 import { beginRegistryMove, commitRegistryMove } from "../worker/registry-move.js";
 import { initializeHistoryCheckpoint, advanceHistoryCheckpoint } from '../worker/registry-history.js';
+import { RELOCATION_RECONCILIATION_VERSION } from '../worker/relocation-values.js';
 import { DurableObject } from "cloudflare:workers";
 
 export class RegistryMoveOwner extends DurableObject {
@@ -34,6 +35,11 @@ export class RegistryMoveTest extends ProjectRegistry {
       const prior = initializeHistoryCheckpoint(this.ctx.storage.sql, id, 1, digest);
       return advanceHistoryCheckpoint(this.ctx.storage.sql, id, 1, digest, prior, digest);
     });
+  }
+  syntheticCompletedReconciliation(projectId, moveId) {
+    const sql = this.ctx.storage.sql;
+    sql.exec('INSERT INTO mapi_move_reconciliation (project_id, move_id, tables, table_index, cursor, journal_version) VALUES (?, ?, ?, 1, NULL, ?) ON CONFLICT(project_id) DO UPDATE SET move_id = excluded.move_id, tables = excluded.tables, table_index = excluded.table_index, cursor = NULL, journal_version = excluded.journal_version', projectId, moveId, JSON.stringify(['synthetic']), RELOCATION_RECONCILIATION_VERSION);
+    sql.exec('INSERT INTO mapi_move_journals (move_id, project_id, complete) VALUES (?, ?, 1)', moveId, projectId);
   }
   inconsistentIntent(project, origin, source, move) { this.ctx.storage.sql.exec("INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, 1)", project, move, origin, source, "wrong-destination"); }
   seedLegacyIntent(project, origin, source, move) { this.ctx.storage.sql.exec("INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, 1)", project, move, origin, source, "project:legacy-intent-destination"); }
@@ -133,6 +139,10 @@ export default {
       if (legacyRetry.object_name !== 'destination' || legacyRetry.generation !== 2 || (await registry.rawMove('proj_first')).move.digest !== 'legacy-invalid') throw Error('Legacy committed retry changed state');
       await reject(() => registry.commitRelocation('move-secret', 'proj_first', 'move-1'));
       await reject(() => registry.finalizeRelocation('move-secret', 'proj_first', 'move-1'));
+      await registry.syntheticCompletedReconciliation('proj_first', 'move-1');
+      const recovered = await registry.commitRelocation('move-secret', 'proj_first', 'move-1');
+      if (recovered.object_name !== 'destination' || recovered.generation !== 2) throw Error('Committed move retry did not return its route');
+      await reject(() => registry.commitRelocation('move-secret', 'proj_first', 'different-move'));
       const third = "https://third.example";
       await registry.reserve(third, "third-source"); await registry.activate(third, "third-source", "proj_third");
       await reject(() => registry.beginRelocation("wrong", third, "proj_third", "move-3"));
@@ -164,6 +174,16 @@ export default {
       const resumed = await registry.verifyRelocationHistory('move-secret', 'proj_third', 'move-3');
       if (!resumed.done || resumed.nextIndex !== 2) throw Error('Lost history acknowledgement did not resume from checkpoint');
       if (!(await registry.verifyRelocationHistory('move-secret', 'proj_third', 'move-3')).done) throw Error('Completed history replay failed');
+      // Even matching owner attestations, verified transfer history and a
+      // completed reconciliation are not an independent recovery archive.
+      await registry.syntheticCompletedReconciliation('proj_third', 'move-3');
+      const beforeCutover = JSON.stringify(await registry.rawMove('proj_third'));
+      const attempts = await Promise.allSettled([
+        registry.commitRelocation('move-secret', 'proj_third', 'move-3'),
+        registry.commitRelocation('move-secret', 'proj_third', 'move-3'),
+      ]);
+      if (attempts.some(result => result.status !== 'rejected' || !String(result.reason).includes('independent archive proof'))) throw Error('Direct cutover did not fail closed on archive proof');
+      if (JSON.stringify(await registry.rawMove('proj_third')) !== beforeCutover || (await registry.resolve(third)).state !== 'moving' || (await registry.resolve(other)).state !== 'active') throw Error('Rejected archive gate changed routes or move');
       // The last safe increment is accepted and retained exactly. This uses
       // test-only synthetic owner attestations and exercises the registry CAS.
       const boundary = 'https://boundary.example', boundaryGeneration = Number.MAX_SAFE_INTEGER - 1;

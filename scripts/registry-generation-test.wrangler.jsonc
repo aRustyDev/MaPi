@@ -4,7 +4,10 @@
   "compatibility_date": "2026-11-18",
   "workers_dev": false,
   "durable_objects": {
-    "bindings": [{ "name": "REGISTRY_TEST", "class_name": "RegistryGenerationTest" }]
+    "bindings": [
+      { "name": "REGISTRY_TEST", "class_name": "RegistryGenerationTest" },
+      { "name": "NEXTGEN_APPLICATION", "class_name": "RegistryGenerationOwner" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RegistryGenerationTest"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RegistryGenerationTest", "RegistryGenerationOwner"] }]
 }

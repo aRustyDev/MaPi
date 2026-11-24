@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { beginRegistryMove, commitRegistryMove, initializeMoveRegistry, validRelocationDigest } from "./registry-move.js";
+import { beginRegistryMove, initializeMoveRegistry, validRelocationDigest } from "./registry-move.js";
 import { initializeHistoryCheckpoint, readHistoryCheckpoint, advanceHistoryCheckpoint } from "./registry-history.js";
 import { assertRecoveryEnvelope, readAnchoredRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScopePage } from "./recovery-scopes.js";
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
@@ -546,9 +546,11 @@ export class ProjectRegistry extends DurableObject {
       return existing.route;
     }
     if (!currentReconciliation(this.ctx.storage.sql, projectId, moveId)) throw new Error("Reconciliation is incomplete");
-    const proofs = await this.relocationProofs(secret, projectId, moveId);
-    if (!currentReconciliation(this.ctx.storage.sql, projectId, moveId)) throw new Error("Reconciliation changed before cutover");
-    return commitRegistryMove(this.ctx.storage, projectId, existing.move.generation, moveId, proofs.source, proofs.destination);
+    // No independently administered archive authority is integrated yet.
+    // Deny every new cutover at the registry boundary, including direct RPCs;
+    // owner attestations and the control secret do not establish recoverability.
+    // Already-committed moves above must remain recoverable after a lost reply.
+    throw new Error("Relocation cutover unavailable: independent archive proof is not configured");
   }
 
   async finalizeRelocation(secret, projectId, moveId) {
