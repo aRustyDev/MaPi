@@ -2,6 +2,7 @@
  "name": "mapi-management-e2e",
  "main": "management-e2e-worker.mjs",
  "compatibility_date": "2026-11-18",
+ "workers_dev": false,
  "durable_objects": { "bindings": [
   { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" },
   { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }

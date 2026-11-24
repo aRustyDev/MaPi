@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
+import { makeRehearsalConfigs } from './relocation-rehearsal-config.mjs';
+
+const temporary = await mkdtemp(resolve(tmpdir(), 'mapi-rehearsal-secrets-'));
+try {
+  const directory = resolve(temporary, 'config');
+  await makeRehearsalConfigs({ directory, accountId: 'a'.repeat(32), subdomain: 'synthetic' });
+  const run = () => spawnSync(process.execPath, ['scripts/relocation-rehearsal-secrets.mjs', directory], { stdio: 'ignore' }).status;
+  assert.equal(run(), 0); assert.notEqual(run(), 0);
+  const owner = JSON.parse(await readFile(resolve(directory, 'secrets/owner.json'))), control = JSON.parse(await readFile(resolve(directory, 'secrets/control.json')));
+  assert.equal(owner.MAPI_RELOCATION_CONTROL_TOKEN, control.MAPI_RELOCATION_CONTROL_TOKEN);
+  assert.equal(owner.MAPI_PHASE1_CONTROL_TOKEN, control.MAPI_PHASE1_CONTROL_TOKEN);
+  assert.notEqual(owner.MAPI_OPERATOR_TOKEN, control.MAPI_REHEARSAL_OPERATOR_TOKEN);
+  assert.ok(owner.MAPI_MASTER_KEY);
+  for (const name of ['owner.json', 'control.json', 'operator.env']) assert.equal((await stat(resolve(directory, 'secrets', name))).mode & 0o777, 0o600);
+  assert.equal((await stat(resolve(directory, 'secrets'))).mode & 0o777, 0o700);
+  const hashes = {};
+  for (const name of ['manifest', 'owner', 'control']) hashes[name] = createHash('sha256').update(await readFile(resolve(directory, `${name}.json`))).digest('hex');
+  const manifest = JSON.parse(await readFile(resolve(directory, 'manifest.json')));
+  await writeFile(resolve(directory, 'provenance-after-codehash.json'), JSON.stringify({ stage: 'after', disabledFlagsVerified: true, names: manifest.names, hashes }));
+  delete owner.MAPI_PHASE1_CONTROL_TOKEN; delete control.MAPI_PHASE1_CONTROL_TOKEN;
+  await writeFile(resolve(directory, 'secrets/owner.json'), JSON.stringify(owner)); await writeFile(resolve(directory, 'secrets/control.json'), JSON.stringify(control));
+  const addToken = () => { const result = spawnSync(process.execPath, ['scripts/relocation-rehearsal-phase-token.mjs', directory], { encoding: 'utf8' }); if (result.status && !result.stderr.includes('Existing Phase 1 tokens conflict')) throw Error(result.stderr); return result.status; };
+  assert.equal(addToken(), 0); assert.equal(addToken(), 0);
+  const updatedOwner = JSON.parse(await readFile(resolve(directory, 'secrets/owner.json'))), updatedControl = JSON.parse(await readFile(resolve(directory, 'secrets/control.json')));
+  assert.equal(updatedOwner.MAPI_PHASE1_CONTROL_TOKEN, updatedControl.MAPI_PHASE1_CONTROL_TOKEN);
+  assert.equal(updatedOwner.MAPI_MASTER_KEY, owner.MAPI_MASTER_KEY);
+  delete updatedControl.MAPI_PHASE1_CONTROL_TOKEN;
+  await writeFile(resolve(directory, 'secrets/control.json'), JSON.stringify(updatedControl));
+  assert.equal(addToken(), 0);
+  assert.equal(JSON.parse(await readFile(resolve(directory, 'secrets/control.json'))).MAPI_PHASE1_CONTROL_TOKEN, updatedOwner.MAPI_PHASE1_CONTROL_TOKEN);
+  updatedControl.MAPI_PHASE1_CONTROL_TOKEN = 'a'.repeat(43); await writeFile(resolve(directory, 'secrets/control.json'), JSON.stringify(updatedControl));
+  assert.notEqual(addToken(), 0);
+  console.log('Verified isolated rehearsal secret generation and permissions.');
+} finally { await rm(temporary, { recursive: true, force: true }); }

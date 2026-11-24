@@ -184,7 +184,7 @@ func initialize() uint64 {
 	}
 	keys := service.NewKeyService(pool, *master, crypters, signing)
 	runtimePool, runtimeKeys, runtimeHashers = pool, keys, hashers
-	tokens := service.NewTokenService(keys, pool)
+	tokens := recoveryTokenGuard{service.NewTokenService(keys, pool)}
 	runtimeTokens = tokens
 	attempts := service.NewAuthAttemptService(pool,
 		service.SessionStatementsResolver{Pool: pool}, service.UserStatementsLookup{Pool: pool},

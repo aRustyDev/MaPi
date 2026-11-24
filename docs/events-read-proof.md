@@ -1,5 +1,7 @@
 # Experimental audit event reads
 
+The build commands and size measurements below describe the earlier pinned-event prototype. The current event test build also generates the MaPi audit-read variants and a matching OpenAPI bundle, and requires `MAPI_EVENT_BUNDLE_NODE_MODULES` to point to a disposable installation of the pinned Redocly dependency. Follow the isolated setup in `audit-relocation-local-proof.md` before rerunning these build commands. The current event-and-OAuth relocation test Worker is larger than the earlier measurements and remains above the 55 MiB limit; the historical figures below are not its artifact measurements.
+
 The `mapi_events` Go build tag adds the pinned Nextgen `GET /events` and `GET /events/{event_id}` handlers, including their `/api/v1` aliases. The local-only build wires the pinned `EventService`, Ogen security and decoding, upstream project authorization, and the pre-claim visibility gate. The main management and combined owner builds do **not** include this tag or mount these handlers. No public Worker ingress exposes them.
 
 After preparing the pinned checkout and installing dependencies with `npm ci` and `bash scripts/build.sh`, run:

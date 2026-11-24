@@ -6,9 +6,11 @@ const origin = "https://project.example";
 const projectId = "proj_test";
 let calls = 0;
 let last;
-const object = { async flowRequest(input) {
+let lastRoute;
+const object = { async flowRequest(input, route) {
   calls++;
   last = input;
+  lastRoute = route;
   return { status: 200, headers: { "content-type": ["application/json"], "set-cookie": ["_zflow=test; HttpOnly; Path=/", "session=test; HttpOnly; Path=/"] }, body: new TextEncoder().encode("{}").toBase64() };
 } };
 async function proxy(path, options = {}) {
@@ -20,6 +22,10 @@ assert.equal(new URL(last.url).pathname, "/api/v1/flows");
 assert.equal(last.headers.authorization, undefined);
 assert.equal(response.headers.getSetCookie().length, 2);
 assert.equal(response.headers.get("cache-control"), "no-store");
+const ownerRoute = { projectId, origin, objectName: "project:one", generation: 3 };
+response = await handleFlowProxy(new Request(`${origin}/__nextgen/flows/flow_ABC`), object, projectId, origin, ownerRoute);
+assert.equal(response.status, 200);
+assert.deepEqual(lastRoute, ownerRoute);
 response = await proxy("/__nextgen/api/v1/flows/flow_ABC");
 assert.equal(response.status, 200);
 response = await proxy("/__nextgen/sessions/exchange?project_id=proj_test", { method: "POST", headers: { origin }, body: "{}" });

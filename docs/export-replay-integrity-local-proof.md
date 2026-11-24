@@ -1,0 +1,9 @@
+# Export replay checkpoint integrity: local proof
+
+`exportChunk` reserves a content row before hashing, then records the digest and advances the export cursor in the same synchronous transaction. A pre-finalization retry is valid only while the row has a NULL digest and its index is the current cursor. Once the cursor advances, replay requires the persisted digest to equal the computed digest; replay of the immediately preceding chunk also requires that digest to equal the checkpoint chain. An inconsistent current digest or missing, empty, malformed, or mismatched finalized digest fails without advancing the cursor.
+
+`node scripts/test-export-replay-integrity.mjs` passed in disposable local workerd with loopback access. The synthetic project verifies a reserved interruption and valid retry, normal and concurrent identical replays, and the rejection of inconsistent current and finalized rows. It compares the complete checkpoint, chunk, fence, and business records before and after each rejection. Before the fix, both a matching-but-premature current digest and a modified predecessor with a matching modified digest were incorrectly accepted. Expected rejection stack traces are emitted by workerd.
+
+A test-only digest barrier also holds a replay while the next chunk advances the checkpoint. Before the first synchronous transaction checked the predecessor digest against the checkpoint chain, a modified replay was incorrectly accepted after that advance. The focused test now rejects that replay and preserves all state; an unmodified replay succeeds across the same interleaving. The barrier exists only in the synthetic Worker and is not a production hook.
+
+The test exercises a synthetic local source only. It checks the immediate predecessor, not older chunk history; it does not establish full chunk-history reconciliation, real-owner relocation, a hosted move, recovery, or archive safety. No Woven resource was modified.

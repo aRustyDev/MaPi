@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { handleOAuthIngress, isOAuthRoute } from "../worker/oauth-ingress.js";
 
 const origin = "https://issuer.example", project = "proj_test";
-let calls = 0, last;
-const object = { async oauthRequest(request) {
-  calls++; last = request;
+let calls = 0, last, lastRoute;
+const object = { async oauthRequest(request, route) {
+  calls++; last = request; lastRoute = route;
   return { status: 303, headers: { location: ["https://rp.example/callback"], "set-cookie": ["a=1; Path=/", "b=2; Path=/"], "cache-control": ["public"], "x-private": ["omit"] }, body: "" };
 } };
 const send = (path, options = {}) => handleOAuthIngress(new Request(origin + path, options), object, project, origin);
@@ -16,6 +16,10 @@ assert.equal(response.status, 303);
 assert.equal(response.headers.get("cache-control"), "no-store");
 assert.equal(response.headers.getSetCookie().length, 2);
 assert.equal(response.headers.get("x-private"), null);
+const ownerRoute = { projectId: project, origin, objectName: "project:one", generation: 3 };
+response = await handleOAuthIngress(new Request(`${origin}/oauth/${project}/jwks`), object, project, origin, ownerRoute);
+assert.equal(response.status, 303);
+assert.deepEqual(lastRoute, ownerRoute);
 response = await send(`/oauth/${project}/token`, { method: "POST", headers: { authorization: "Basic test", "content-type": "application/x-www-form-urlencoded" }, body: "grant_type=authorization_code" });
 assert.equal(response.status, 303);
 assert.equal(last.headers.authorization[0], "Basic test");

@@ -5,10 +5,13 @@
   "compatibility_date": "2026-11-18",
   "workers_dev": false,
   "durable_objects": { "bindings": [
-    { "name": "TEST_MAIN", "class_name": "NextgenApplication" },
+    { "name": "TEST_MAIN", "class_name": "MainOwner" },
     { "name": "TEST_MAINTENANCE", "class_name": "MaintenanceOwner" },
-    { "name": "TEST_RECOVERY", "class_name": "RecoveryOwner" }
+    { "name": "TEST_RECOVERY", "class_name": "RecoveryOwner" },
+    { "name": "MAIN_REGISTRY", "class_name": "MainRegistry" },
+    { "name": "MAINTENANCE_REGISTRY", "class_name": "MaintenanceRegistry" },
+    { "name": "RECOVERY_REGISTRY", "class_name": "RecoveryRegistry" }
   ] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "MaintenanceOwner", "RecoveryOwner"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MainOwner", "MaintenanceOwner", "RecoveryOwner", "MainRegistry", "MaintenanceRegistry", "RecoveryRegistry"] }],
   "vars": { "MAPI_OIDC_EXPERIMENTAL": "1", "MAPI_APP_ORIGIN": "https://issuer.example", "MAPI_LOCAL_TEST": "1" }
 }

@@ -1,0 +1,7 @@
+# Audit snapshot guard: native SQLite replacement experiment
+
+The distinct command `node experiments/audit-snapshot/replace-trigger-native-test.mjs` passed on local Node SQLite. In a disposable database, `BEFORE DELETE` and `BEFORE UPDATE` triggers prevented direct updates and deletes and an `ON CONFLICT DO UPDATE` on the original row. An `ON CONFLICT DO NOTHING` remained a valid no-op. With `PRAGMA recursive_triggers = OFF`, an `INSERT OR REPLACE` on the same primary key nevertheless replaced the original row without either guard stopping it. With recursive triggers enabled, the delete guard stopped the replacement.
+
+This is evidence about the local SQLite configuration used by this test. It does not establish workerd's trigger setting, the pinned real event schema's full constraints, behavior after schema changes or restore, or an owner fence. A production solution cannot rely solely on UPDATE/DELETE triggers without also proving all SQLite conflict paths and maintaining that proof across connection and schema changes. A blanket BEFORE INSERT collision rejection is not automatically equivalent: the no-op conflict action was accepted in the experiment, and such a rejection would fail it.
+
+The proposed audit snapshot remains unmounted. No Woven resource was changed, and no previously interrupted exact-size, nonfinite, malformed-text, cursor, SQL-limit, normalization or hosted action was rerun.

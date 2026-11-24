@@ -1,0 +1,7 @@
+# Owner fence initialization postcondition: local proof
+
+`initializeOwnerFence` now acknowledges creation of a new active fence only after its synchronous transaction reports one logical insert and the stored row contains the expected project, origin, owner, generation, active state, and empty move ID and digest. It also checks the exact route using `assertOwnerFence`. An exception inside the transaction rolls back the insert and trigger side effects. An existing matching active fence remains an idempotent retry.
+
+`node scripts/test-owner-fence.mjs` passed in disposable local workerd with approved loopback access. Before the fix, a `BEFORE INSERT` trigger with `RAISE(IGNORE)` caused the focused test to fail because initialization returned successfully with no fence. The passing test covers that trigger and an `AFTER INSERT` trigger that deletes the new fence, checks that both rejected calls leave fence, business and audit records unchanged, and verifies that mutation without a fence remains rejected. Existing normal initialization, retry, freeze, stale-write, and eviction cases also pass. Expected rejected calls produce workerd error traces.
+
+These test faults require privileged schema changes. This is a standalone helper proof; it does not establish arbitrary schema-tampering resistance, integrated relocation, registry state, a real-owner move, or hosted behavior. No Woven resource was changed.

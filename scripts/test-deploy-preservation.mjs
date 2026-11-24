@@ -36,7 +36,9 @@ if (process.argv[2] === "prepare") {
     assert.ok(result.handoff_token);
     const exchange = await fetch(new URL(`/__nextgen/sessions/exchange?project_id=${encodeURIComponent(user.projectId)}`, origin), { method: "POST", headers: { origin, "content-type": "application/json", cookie: flowCookie }, body: JSON.stringify({ handoff_token: result.handoff_token }) });
     assert.equal(exchange.status, 200);
-    const cookie = exchange.headers.getSetCookie().find((value) => value.startsWith("__Host-zitadel_session="))?.split(";", 1)[0]; assert.ok(cookie);
+    const localHTTP = new URL(origin).protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(new URL(origin).hostname);
+    const cookieName = localHTTP ? "zitadel_session=" : "__Host-zitadel_session=";
+    const cookie = exchange.headers.getSetCookie().find((value) => value.startsWith(cookieName))?.split(";", 1)[0]; assert.ok(cookie);
     return cookie;
   }
   const active = await createSession(), revoked = await createSession();

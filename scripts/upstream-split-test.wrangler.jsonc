@@ -4,6 +4,7 @@
   "compatibility_date":"2026-11-18",
   "workers_dev":false,
   "services":[{"binding":"ARGON_VERIFIER","service":"mapi-argon-spike-verifier"}],
-  "durable_objects":{"bindings":[{"name":"SPLIT","class_name":"UpstreamSplitTest"}]},
-  "migrations":[{"tag":"v1","new_sqlite_classes":["UpstreamSplitTest"]}]
+  "durable_objects":{"bindings":[{"name":"SPLIT","class_name":"UpstreamSplitTest"},{"name":"NEXTGEN_APPLICATION","class_name":"UpstreamSplitTest"},{"name":"REGISTRY","class_name":"SplitRegistry"}]},
+  "vars":{"MAPI_RELOCATION_ENABLED":"1","MAPI_RELOCATION_CONTROL_TOKEN":"test-move-secret"},
+  "migrations":[{"tag":"v1","new_sqlite_classes":["UpstreamSplitTest","SplitRegistry"]}]
 }

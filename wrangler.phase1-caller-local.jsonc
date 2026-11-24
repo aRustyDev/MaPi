@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mapi-phase1-caller-local",
+  "main": "worker/phase1-caller.js",
+  "compatibility_date": "2026-11-19",
+  "workers_dev": false,
+  "preview_urls": false,
+  "services": [{ "binding": "PHASE1_CONTROL", "service": "mapi-phase1-control-local" }],
+  "vars": { "MAPI_PHASE1_LOCAL_CALLER": "1" }
+}

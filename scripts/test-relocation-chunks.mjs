@@ -38,7 +38,7 @@ try {
   assert.equal(response.status, 200, JSON.stringify(result));
   assert.equal(result.ok, true, result.error);
   console.log(`Transferred ${result.bytes} bytes across ${result.chunks} chunks.`);
-  console.log("Chunked relocation passed interrupted export/import, rollback, eviction, typed data and fencing checks in workerd.");
+  console.log("Chunked relocation passed interrupted export/import, fragmented blob and Unicode rows, bounds, rollback, eviction, typed data and fencing checks in workerd.");
 } catch (error) {
   if (diagnostic) console.error(diagnostic);
   throw error;

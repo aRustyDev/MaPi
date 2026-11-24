@@ -1,0 +1,6 @@
+{
+  "name": "mapi-schema-migration-test", "main": "schema-migration-test-worker.mjs", "compatibility_date": "2026-11-18", "workers_dev": false,
+  "vars": { "MAPI_LOCAL_TEST": "1", "MAPI_SCHEMA_TARGET": "2", "MAPI_SCHEMA_MIGRATION_ENABLED": "1", "MAPI_SCHEMA_CONTROL_TOKEN": "schema-secret", "MAPI_FENCE_WRITERS_DRAINED": "1", "MAPI_RELOCATION_ENABLED": "1", "MAPI_RELOCATION_CONTROL_TOKEN": "relocation-secret" },
+  "durable_objects": { "bindings": [ { "name": "PROJECT_REGISTRY", "class_name": "TestRegistry" }, { "name": "NEXTGEN_APPLICATION", "class_name": "SchemaOwner" }, { "name": "COORDINATOR", "class_name": "RelocationCoordinator" } ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestRegistry", "SchemaOwner", "RelocationCoordinator"] }]
+}

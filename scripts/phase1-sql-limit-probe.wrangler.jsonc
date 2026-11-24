@@ -1,0 +1,1 @@
+{"name":"mapi-phase1-sql-limit-probe","main":"phase1-sql-limit-probe-worker.mjs","compatibility_date":"2026-11-19","workers_dev":false,"durable_objects":{"bindings":[{"name":"PROBE","class_name":"SQLLimitProbe"}]},"migrations":[{"tag":"v1","new_sqlite_classes":["SQLLimitProbe"]}]}

@@ -1,0 +1,9 @@
+# Owner Wasm sampling: local failure isolation
+
+`NextgenApplication.#sampleWasmMemory` previously obtained its object ID outside the best-effort logger. In a Node VM test of the actual owner request method with a fake reactor and synthetic storage, making that diagnostics-only identity lookup throw changed an otherwise successful request from HTTP 200 to 503. This synthetic failure does not establish that Cloudflare's real Durable Object ID lookup can fail.
+
+The owner now treats the memory observation and correlation metadata as best effort. If ID lookup fails, it retains a successfully measured high-water value but does not emit an uncorrelated high-water record. If the memory observation itself fails, it leaves the previous value unchanged. Either gap makes the associated memory evidence incomplete: a later identical value need not generate a new high-water log, and the zero-limit-error gate cannot be inferred from absent telemetry.
+
+`node --experimental-vm-modules scripts/test-owner-reactor-markers-native.mjs` reproduced 503 before the change and passed afterward, including the separate retry, marker and log-sink cases. `node scripts/test-runtime-diagnostics.mjs`, `node --experimental-vm-modules scripts/test-legacy-body-boundary.mjs`, `node --experimental-vm-modules scripts/test-owner-retirement-app-native.mjs`, and `node --check worker/app.js` passed. The focused test exercises actual application code but uses a fake reactor and synthetic ID/storage; it does not establish actual Go, local Workerd, hosted memory, startup, or logging completeness. No pending restart or stopped integration test was repeated.
+
+The tested `worker/app.js` SHA-256 was `528e85446bc76b6bf796481b547adda4cd987ca8b21b5b874a10e10702ee8941`; the focused owner-method test SHA-256 was `cc48b649cd6f813ccbcf842c6e858a18de1608c5c48b3fef416e32e3c4ae19de`. No Woven deployment or AWS resource was changed.

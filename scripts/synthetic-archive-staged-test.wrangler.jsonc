@@ -1,0 +1,7 @@
+{
+  "name": "mapi-local-synthetic-staged-test",
+  "main": "synthetic-archive-staged-test-worker.mjs",
+  "compatibility_date": "2026-01-01",
+  "durable_objects": {"bindings": [{"name":"TARGET","class_name":"SyntheticArchiveStagedDestination"}]},
+  "migrations": [{"tag":"v1","new_sqlite_classes":["SyntheticArchiveStagedDestination"]}]
+}

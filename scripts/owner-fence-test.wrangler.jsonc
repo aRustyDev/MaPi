@@ -1,0 +1,8 @@
+{
+  "name": "mapi-owner-fence-test",
+  "main": "owner-fence-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "OWNER", "class_name": "OwnerFenceTest" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OwnerFenceTest"] }]
+}

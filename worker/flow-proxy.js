@@ -1,3 +1,4 @@
+import { readBoundedBody } from './request-body.js';
 // Browser-facing, same-origin subset of the SDK proxy. Project authority is
 // added by the Durable Object for the exchange only, never by the browser.
 const PREFIX = "/__nextgen";
@@ -10,32 +11,11 @@ function allowed(method, pathname) {
     (method === "POST" && /^\/api\/v1\/flows\/flow_[A-Za-z0-9_-]+\/submit$/.test(pathname));
 }
 
-async function readBody(request) {
-  const reader = request.body?.getReader();
-  if (!reader) return new Uint8Array();
-  const chunks = [];
-  let length = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    length += value.length;
-    if (length > LIMIT) {
-      await reader.cancel();
-      return null;
-    }
-    chunks.push(value);
-  }
-  const body = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.length; }
-  return body;
-}
-
 /** Route only the login SDK calls to the project's Durable Object.
  * `expectedOrigin` is the canonical registered origin chosen by the registry;
  * the caller must resolve the object and projectId from that registry first.
  */
-export async function handleFlowProxy(request, object, projectId, expectedOrigin) {
+export async function handleFlowProxy(request, object, projectId, expectedOrigin, route) {
   const url = new URL(request.url);
   if (!url.pathname.startsWith(`${PREFIX}/`)) return new Response(null, { status: 404, headers: noStore });
   let pathname = url.pathname.slice(PREFIX.length);
@@ -51,7 +31,7 @@ export async function handleFlowProxy(request, object, projectId, expectedOrigin
       (pathname === "/api/v1/sessions/exchange" && queryProjects.length !== 1)) {
     return new Response(null, { status: 403, headers: noStore });
   }
-  const body = await readBody(request);
+  const body = await readBoundedBody(request, LIMIT);
   if (body === null) return new Response(null, { status: 413, headers: noStore });
   if (pathname === "/api/v1/flows") {
     try {
@@ -69,7 +49,7 @@ export async function handleFlowProxy(request, object, projectId, expectedOrigin
   const result = await object.flowRequest({
     method: request.method, url: url.toString(), headers, body: body.toBase64(),
     peer: request.headers.get("cf-connecting-ip") ?? "127.0.0.1",
-  }, { projectId, origin: expectedOrigin });
+  }, route ?? { projectId, origin: expectedOrigin });
   const outgoing = new Headers(noStore);
   for (const [name, values] of Object.entries(result.headers)) {
     // Do not pass hop-by-hop headers, redirects, or upstream cache policy.

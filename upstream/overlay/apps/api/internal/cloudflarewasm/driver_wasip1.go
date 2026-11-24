@@ -7,8 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"strconv"
 )
 
@@ -102,46 +100,4 @@ func (conn) QueryContext(ctx context.Context, sql string, args []driver.NamedVal
 		return nil, err
 	}
 	return &rows{columns: result.Columns, data: result.Rows}, nil
-}
-
-type rows struct {
-	columns []string
-	data    [][]json.RawMessage
-}
-
-func (r *rows) Columns() []string { return r.columns }
-func (r *rows) Close() error      { return nil }
-func (r *rows) Next(dest []driver.Value) error {
-	if len(r.data) == 0 {
-		return io.EOF
-	}
-	row := r.data[0]
-	r.data = r.data[1:]
-	for i, value := range row {
-		if value[0] == '{' {
-			var encoded struct {
-				Blob    []byte `json:"blob"`
-				Integer string `json:"integer"`
-			}
-			if err := json.Unmarshal(value, &encoded); err != nil {
-				return err
-			}
-			if encoded.Integer != "" {
-				integer, err := strconv.ParseInt(encoded.Integer, 10, 64)
-				if err != nil {
-					return err
-				}
-				dest[i] = integer
-			} else {
-				dest[i] = encoded.Blob
-			}
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(value, &decoded); err != nil {
-			return fmt.Errorf("decode SQLite column %q: %w", r.columns[i], err)
-		}
-		dest[i] = decoded
-	}
-	return nil
 }

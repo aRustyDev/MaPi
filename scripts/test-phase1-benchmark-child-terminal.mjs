@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
+import { watchBenchmarkChild } from './phase1-benchmark-child.mjs';
+import { persistBenchmarkReport } from './phase1-benchmark-report.mjs';
+
+const deadProcess = new EventEmitter(), aliveProcess = new EventEmitter();
+const dead = watchBenchmarkChild(deadProcess, () => {}, { timeoutMs: 500, now: () => 10 });
+const alive = watchBenchmarkChild(aliveProcess, () => {}, { timeoutMs: 500, now: () => 10 });
+const starts = Promise.allSettled([dead.next('wave-start'), alive.next('wave-start')]);
+deadProcess.emit('message', { type: 'child-failure', failure: { operation: 'oidc-init', kind: 'http', status: 503 } });
+aliveProcess.emit('message', { type: 'wave-start', wave: 0, attempts: 4, started: 4 });
+const started = await starts;
+assert.equal(started[0].status, 'rejected');
+assert.deepEqual(started[0].reason.phase1Failure, { operation: 'oidc-init', kind: 'http', status: 503 });
+assert.equal(started[1].value.parentReceivedAtMs, 10);
+const partial = Promise.allSettled([dead.next('wave'), alive.next('wave')]);
+setTimeout(() => aliveProcess.emit('message', { type: 'wave', wave: 0, attempts: 4, failures: 1 }), 10);
+const outcomes = await Promise.race([partial, new Promise((_, reject) => setTimeout(() => reject(new Error('Second wait hung after terminal child failure')), 150))]);
+assert.equal(outcomes[0].status, 'rejected');
+assert.deepEqual(outcomes[0].reason.phase1Failure, { operation: 'oidc-init', kind: 'http', status: 503 });
+assert.equal(outcomes[1].status, 'fulfilled');
+assert.equal(outcomes[1].value.failures, 1);
+const directory = await mkdtemp(resolve(tmpdir(), 'mapi-wave-partial-'));
+try {
+  const path = resolve(directory, 'report.json');
+  const checkpoint = { outcomes: outcomes.map(item => item.status === 'fulfilled' ? item.value : { error: 'child_wave_failed', failure: item.reason?.phase1Failure ?? null }) };
+  await persistBenchmarkReport(path, { mixed: { waves: [checkpoint] } });
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(saved.mixed.waves[0].outcomes[0].failure.status, 503);
+  assert.equal(saved.mixed.waves[0].outcomes[1].failures, 1);
+} finally { await rm(directory, { recursive: true, force: true }); }
+const exitedProcess = new EventEmitter(), exited = watchBenchmarkChild(exitedProcess, () => {}, { timeoutMs: 500 });
+exitedProcess.emit('exit', 1);
+await assert.rejects(exited.next('wave-start'), /exited/);
+await assert.rejects(exited.next('wave'), /exited/);
+const queuedProcess = new EventEmitter(), queued = watchBenchmarkChild(queuedProcess, () => {}, { timeoutMs: 500 });
+queuedProcess.emit('message', { type: 'wave', attempts: 4 }); queuedProcess.emit('exit', 0);
+assert.equal((await queued.next('wave')).attempts, 4);
+await assert.rejects(queued.next('result'), /exited/);
+const hangingProcess = new EventEmitter(), hanging = watchBenchmarkChild(hangingProcess, () => {}, { timeoutMs: 10 });
+await assert.rejects(hanging.next('wave-start'), /timed out/);
+await assert.rejects(hanging.next('wave'), /timed out/);
+console.log('Terminal child state stays sticky and the other project’s partial outcome is persisted.');

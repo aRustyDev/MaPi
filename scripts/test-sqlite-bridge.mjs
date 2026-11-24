@@ -1,16 +1,54 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout } from "node:timers/promises";
+import { snapshotSchema, snapshotSchemaObjects } from "./sqlite-bridge-schema.mjs";
 
 const upstream = resolve(".mapi/nextgen/apps/api");
 const target = resolve(upstream, "cmd/mapi-bridge-test");
 await mkdir(target, { recursive: true });
 await mkdir("worker/generated", { recursive: true });
+const upstreamRoot = resolve(".mapi/nextgen");
+const upstreamCommit = "b0b74cd4a198428ea9b82910c217259ffc62b65c";
+const migrationDir = "apps/api/internal/storage/dialect/sqlite/migration/sql";
+const migrations = [];
+const migrationPaths = execFileSync("git", ["-C", upstreamRoot, "ls-tree", "-r", "--name-only", upstreamCommit, "--", migrationDir], { encoding: "utf8" })
+  .trim().split("\n").filter((path) => /^\d+_.+\.sql$/.test(path.split("/").at(-1))).sort();
+for (const path of migrationPaths) {
+  const filename = path.split("/").at(-1);
+  const source = execFileSync("git", ["-C", upstreamRoot, "show", `${upstreamCommit}:${path}`], { encoding: "utf8" });
+  const sections = source.split(/^-- \+goose (Up|Down)\s*$/m);
+  if (sections.length !== 5 || sections[1] !== "Up" || sections[3] !== "Down") {
+    throw new Error(`Unexpected migration sections in ${filename}`);
+  }
+  function statements(section) {
+    const items = [...section.matchAll(/^-- \+goose StatementBegin\s*$([\s\S]*?)^-- \+goose StatementEnd\s*$/gm)];
+    const residue = section.replace(/^-- \+goose StatementBegin\s*$[\s\S]*?^-- \+goose StatementEnd\s*$/gm, "");
+    if (residue.split("\n").some((line) => line.trim() && !line.trim().startsWith("--"))) {
+      throw new Error(`Unparsed migration content in ${filename}`);
+    }
+    return items.map((item) => item[1].trim());
+  }
+  migrations.push({ version: Number(filename.slice(0, 6)), name: filename, up: statements(sections[2]), down: statements(sections[4]) });
+}
+await writeFile("worker/generated/sqlite-bridge-migrations.json", JSON.stringify(migrations));
+try {
+  await access("worker/generated/baseline.json");
+} catch {
+  execFileSync(process.execPath, ["scripts/baseline.mjs"], { stdio: "inherit" });
+}
+const nativeBaseline = JSON.parse(await readFile("worker/generated/baseline.json", "utf8"));
+const nativeDb = new DatabaseSync(":memory:");
+nativeDb.exec("PRAGMA foreign_keys = OFF");
+for (const statement of nativeBaseline.statements) nativeDb.exec(statement);
+const nativeSchema = snapshotSchema((statement) => nativeDb.prepare(statement).all());
+const nativeObjects = snapshotSchemaObjects((statement) => nativeDb.prepare(statement).all());
+nativeDb.close();
 await copyFile("upstream/overlay/apps/api/cmd/mapi-bridge-test/main_wasip1.go", resolve(target, "main_wasip1.go"));
 execFileSync("go", ["build", "-trimpath", "-ldflags=-s -w", "-buildmode=c-shared", "-o", resolve("worker/generated/sqlite-bridge-test.wasm"), "./cmd/mapi-bridge-test"], {
   cwd: upstream, stdio: "inherit",
@@ -46,7 +84,30 @@ try {
   const result = await response.json();
   assert.equal(result.ok, true, result.error);
   assert.equal(result.changes, 1, "SQLite logical affected rows must not include index writes");
-  console.log("Go/Wasm SQLite bridge passed nested commit/rollback, panic rollback, int64, and parameter-limit checks in workerd.");
+  assert.deepEqual(result.upstreamCases, [
+    "TestProjectStatements_Create/explicit-id-and-duplicate",
+    "TestProjectStatements_Update/name",
+    "TestProjectCRUD/create-get-update-delete",
+    "TestUserStatements_Create_EmptyIDAssigned/create-get",
+  ]);
+  console.log("Pinned upstream adapted assertion matrix:", result.upstreamCases.join(", "));
+  const migrationResponse = await fetch(`http://127.0.0.1:${port}/migrations`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tables: nativeSchema, objects: nativeObjects }),
+  });
+  assert.equal(migrationResponse.status, 200);
+  const migrationResult = await migrationResponse.json();
+  assert.equal(migrationResult.ok, true, migrationResult.error);
+  assert.equal(migrationResult.versions, migrations.length);
+  assert.deepEqual(migrationResult.seededBackfills, [29, 33]);
+  assert.equal(migrationResult.injectedRollback, true);
+  assert.equal(migrationResult.adaptedMigration, 33);
+  assert.equal(migrationResult.schemaMatched, true);
+  assert.equal(migrationResult.objectsMatched, true);
+  assert.equal(migrationResult.objectCount, nativeObjects.length);
+  assert.equal(nativeObjects.length, 0, "the pinned native baseline has no application views or triggers");
+  assert.equal(migrationResult.maxObjectCount, 0, "the pinned migration snapshots have no application views or triggers");
+  console.log(`Pinned SQLite migrations passed Up/Down/Up in workerd for ${migrationResult.versions} versions, including seeded backfills and rollback; migration 33 uses a bounded UNION rewrite.`);
+  console.log("Go/Wasm SQLite bridge passed nested transactions, panic rollback, stored int64 and type round trips, RETURNING safety, and parameter-limit checks in workerd.");
 } finally {
   if (server.exitCode === null && server.signalCode === null) {
     const stopped = once(server, "exit");

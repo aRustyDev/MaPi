@@ -1,0 +1,15 @@
+{
+  "name": "mapi-recovery-epoch-guard-test",
+  "main": "recovery-epoch-guard-test-worker.mjs",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [
+    { "name": "OWNER", "class_name": "RecoveryEpochOwner" },
+    { "name": "NEXTGEN_APPLICATION", "class_name": "RecoveryEpochOwner" },
+    { "name": "PROJECT_REGISTRY", "class_name": "RecoveryRegistry" },
+    { "name": "BAD_OWNER", "class_name": "BadRecoveryEpochOwner" },
+    { "name": "PRODUCTION_OWNER", "class_name": "ProductionBlockedRecoveryOwner" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RecoveryEpochOwner", "BadRecoveryEpochOwner", "RecoveryRegistry", "ProductionBlockedRecoveryOwner"] }],
+  "vars": { "MAPI_LOCAL_TEST": "1", "MAPI_RELOCATION_ENABLED": "1", "MAPI_RELOCATION_CONTROL_TOKEN": "secret", "MAPI_FENCE_WRITERS_DRAINED": "1", "MAPI_RECOVERY_STAGING_ENABLED": "1", "MAPI_RECOVERY_INVALIDATION_ENABLED": "1" }
+}

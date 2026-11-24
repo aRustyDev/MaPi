@@ -1,0 +1,19 @@
+# Destination reservation identifier freshness
+
+A distinct local native SQLite regression, `node scripts/test-destination-identifier-freshness.mjs`, exited 1 before the local fix: `reserveMoveDestination` accepted a populated table named `PROJECTS`. SQLite resolves table identifiers case-insensitively, while the earlier `sqlite_schema.name` equality lookup used binary comparison. The failure was an assertion that a reservation should be rejected; it did not invoke a registry, real owner, Woven deployment, history test or interrupted action.
+
+The user chose to continue fixing and retesting. `reserveMoveDestination` now compares the fixed destination schema names with `COLLATE NOCASE`, checks reserved reservation-table schema and triggers case-insensitively, and rejects a view or index occupying an application/control table name. Existing empty project tables and an identical reservation retry remain allowed. SQLite's normal ASCII case-insensitive identifier resolution is the reason for this comparison; this does not change project ID comparison rules.
+
+`node scripts/test-destination-identifier-freshness.mjs` passed in native SQLite after the fix. It covers populated uppercase or mixed-case project metadata, pending-owner, owner-fence and relocation-state tables; views and indexes occupying reserved names; valid empty uppercase tables; a canonical uppercase reservation table; rejection of its side-effect trigger; and a same-tuple reservation retry after staging synthetic project data. Rejected reservations leave no newly created reservation table, and the trigger case leaves its business row unchanged.
+
+`node scripts/test-destination-identifier-workerd.mjs` passed in disposable local Workerd/SQLite with separate synthetic Durable Objects. It covers populated uppercase tables, views and indexes, an uppercase reservation trigger, valid empty tables and matching retries. The first sandboxed invocation exited 1 before assertions because the loopback listener received `EPERM`; scoped local-only approval was granted and the run then exited 0. It performed no hosted calls. The generated Worker SHA-256 was `e1404a6475f8d06de1a5e8088def8becf716e9c2aefb47c35d294dd81cb9ad84`.
+
+`node scripts/test-owner-fence.mjs` also passed in disposable local Workerd after scoped loopback approval. Its expected fault logs accompany deliberate rejection and eviction cases. The source and focused test hashes after these runs were:
+
+- `worker/owner-fence.js`: `56422cae9627a6ab3885a21c806822e5ea5279a3d1c60f3d412d86f8ee373256`.
+- `scripts/test-destination-identifier-freshness.mjs`: `98365ffd0de391448375e8434d12f188b88e2ab6a7bb849610c77e6e7d54d081`.
+- `scripts/test-destination-identifier-workerd.mjs`: `fbccb51ccfd4029376c5037731410bb4caf3c4c1a97ef56b419b4faf5ecd3d6d`.
+
+The freshness and view/index checks apply when creating a new reservation. A matching existing reservation still returns after validating its control table and tuple, without re-running freshness checks: this permits a legitimate retry after staging data, and does **not** prove that subsequently introduced views, indexes or foreign rows are safe. Later import and destination-manifest checks remain responsible for staged ownership and schema validation. The uppercase reservation test exercises this matching-retry behavior, not malicious changes introduced after reservation.
+
+These are synthetic main-schema checks; they do not establish TEMP or attached-schema behavior, the actual project owner's full database schema, registry/cutover integration, hosted isolation, or all owner mutation fencing. Separate read-only review identified similar case-sensitive control-table lookups in `worker/app.js`; those paths have not been modified or measured here. No real-owner, previously interrupted registry/history action, Woven deployment or AWS resource was exercised.
