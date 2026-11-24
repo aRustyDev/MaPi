@@ -443,14 +443,27 @@ committed delete with one audit effect. The marker check and reconstruction
 can scan or allocate large values; the new tag can itself reach 297,233 bytes.
 Hosted CPU and total isolate memory remain unverified.
 
-`npm run test:sql-returning-exact-blob-repeat-tail8-wide` is a **failing
-regression**: direct DELETE returns an 8,388,584-byte BLOB with an eight-byte
-suffix and 50 NULL columns, but bridge RETURNING fails with `SQLITE_TOOBIG`.
-The new encoding is limited to at most 50 returned columns to preserve the
-100-column statement-size check; wider results retain the previous encoding.
-Both attempts roll back business and audit changes. Other marker-heavy shapes
-and wide SELECT materialization may also exceed the limit. Exact-size
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide` now passes an
+8,388,584-byte BLOB with an eight-byte suffix and 50 NULL columns, including
+all-zero and all-FF suffixes. `-tail8-wide63` also passes with 63 returned
+columns. Wide rewrites now use the full encoding when their UTF-8 SQL fits in
+100,000 bytes and otherwise fall back to the earlier shorter encoding. A
+local Workerd test checks exactly 100,000 bytes, the fallback at 100,001,
+unchanged NULL values and single execution with a trigger.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide64` is a **failing
+regression**: direct DELETE returns an 8,388,566-byte BLOB with an eight-byte
+suffix and 63 NULL columns, while the size-triggered shorter rewrite fails
+with `SQLITE_TOOBIG`. Both boundary attempts roll back business and audit
+changes. The exact threshold depends on the statement and column names; 100
+ordinary columns still pass the statement-size check. Other marker-heavy
+shapes and wide SELECT materialization may also exceed the limit. Exact-size
 compatibility remains an open Phase 1 gate.
+
+The checks for this change ran in a disposable checkout with a copied pinned
+upstream tree and dependencies symlinked to the original checkout's installed
+Wrangler 4.165.0 and matching workerd. Empty Git metadata directories were
+recreated in the copy. They are local evidence; hosted limits remain unverified.
 
 The observed rollback incompatibility is specific to the tested synchronous
 single-object staging approach. Re-execution after rollback cannot reproduce

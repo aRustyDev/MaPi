@@ -270,9 +270,13 @@ export function execute(storage, { statement, args, query }) {
   if (returning) {
     columns = returning[1].split(/\s*,\s*/);
     wide = columns.length > 50;
-    // The eight-byte encoding would exceed SQLite's statement limit for
-    // wide projections. Preserve the existing wide encoding in that case.
-    prepared = sql.slice(0, returningToken.start) + "RETURNING " + columns.map(column => returningColumn(column, columns.length <= 50)).join(", ");
+    // Prefer the eight-byte encoding whenever a wide rewrite fits SQLite's
+    // SQL-size limit. Otherwise retain the earlier shorter wide encoding.
+    const prefix = sql.slice(0, returningToken.start) + "RETURNING ";
+    prepared = prefix + columns.map(column => returningColumn(column)).join(", ");
+    if (wide && new TextEncoder().encode(prepared).length > 100000) {
+      prepared = prefix + columns.map(column => returningColumn(column, false)).join(", ");
+    }
   } else {
     if (kind !== "SELECT") throw new Error("Unsupported row-producing SQLite statement");
     const cursor = storage.sql.exec(metadataQuery(sql, tokens, verb), ...values);
