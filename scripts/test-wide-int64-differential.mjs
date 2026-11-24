@@ -29,12 +29,17 @@ for (let row = 0; row < 1961; row++) {
   insert.run(row, ...values);
 }
 db.exec('COMMIT');
+const useTerse = process.env.MAPI_TEST_TERSE === '1';
+let selectedSQL;
 const storage = { sql: { exec(statement, ...args) {
+  selectedSQL = statement;
   const prepared = db.prepare(statement);
   prepared.setReturnArrays(true);
   return { raw: () => ({ toArray: () => prepared.all(...args) }) };
 } } };
-const result = execute(storage, { statement: `DELETE FROM values_to_delete RETURNING id,${names.join(',')}`, args: [], query: true });
+const padding = useTerse ? `/*${'x'.repeat(60000)}*/` : '';
+const result = execute(storage, { statement: `DELETE FROM values_to_delete ${padding} RETURNING id,${names.join(',')}`, args: [], query: true });
+assert.equal(selectedSQL.includes("X'4D615069233921403F'"), useTerse, 'Unexpected wide codec selected');
 assert.equal(result.columns.length, 52);
 assert.equal(result.rows.length, expected.length);
 const seen = new Set();
@@ -48,5 +53,5 @@ for (const row of result.rows) {
 }
 assert.equal(seen.size, expected.length);
 assert.equal(db.prepare('SELECT COUNT(*) AS n FROM values_to_delete').get().n, 0);
-console.log(`Native SQLite wide RETURNING int64 differential passed ${expected.length * names.length} values.`);
+console.log(`Native SQLite ${useTerse ? 'terse' : 'compact'} wide RETURNING int64 differential passed ${expected.length * names.length} values.`);
 db.close();

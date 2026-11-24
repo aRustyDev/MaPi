@@ -458,12 +458,26 @@ BigInt expectations. This is selected local evidence, not a proof for all SQL. T
 and result reconstruction can scan or allocate large values; the wide tag can
 itself reach 592,145 bytes. Hosted CPU and total isolate memory are unverified.
 
-`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme` is a
-**failing regression**: direct DELETE returns the BLOB and 99 NULL columns
-with identifiers extended by 512 bytes, while the rewritten statement exceeds
-SQLite's size limit. Both attempts roll back business and audit changes. Other marker-heavy
-shapes and wide SELECT materialization may also exceed the limit. General
-exact-size compatibility remains an open Phase 1 gate.
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme` and
+its `-ff`, `-zero` and `-last` variants pass an 8,388,530-byte BLOB with 99
+NULL columns whose identifiers are extended by 512 bytes. When both earlier
+wide rewrites exceed the SQL limit, a shorter fallback uses a distinct
+self-non-overlapping marker and the existing reserved-integer-width escape
+grammar. Its decoder is selected only for that rewrite. Local Workerd checks
+cover compact-to-fallback and final 100,000-byte SQL boundaries, all byte
+values in short and marker-prefixed BLOBs, nested markers, integer extrema,
+REAL, TEXT, NULL, multi-row UPDATE and DELETE, rollback and trigger effects.
+`npm run test:terse-int64-differential` compares 100,011 independently
+generated signed values through the actual fallback using a native SQLite
+adapter. These are selected local cases; hosted resource limits remain open.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-terse-marker`
+is a **failing regression**: direct DELETE returns the 8,388,530-byte BLOB
+when it is composed of the fallback's own repeated marker and an eight-byte
+tail, while the fallback escape exceeds SQLite's result-size limit. Both
+attempts roll back business and audit changes. Other marker-heavy shapes and
+wide SELECT materialization may also exceed the limit. General exact-size
+compatibility remains an open Phase 1 gate.
 
 The checks for this change ran in a disposable checkout with a copied pinned
 upstream tree and dependencies symlinked to the original checkout's installed

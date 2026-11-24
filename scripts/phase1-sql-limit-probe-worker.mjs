@@ -44,7 +44,7 @@ export class SQLLimitProbe extends DurableObject {
     }
     return {ok:!bridgeError,error:bridgeError||null,directLength,rows,audit};
   }
-  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630, tailBytes = 0, wide = false, tailValue = -1, longNames = false, blobAtEnd = false) {
+  runEscapedBlobReturningExact(repeatedMarker = false, blobBytes = 8388630, tailBytes = 0, wide = false, tailValue = -1, longNames = false, blobAtEnd = false, markerPattern = 'normal') {
     const storage=this.ctx.storage, sql=storage.sql, abort='rollback boundary proof';
     const extra = wide ? Array.from({length:wide === true ? 50 : wide - 1}, (_, i) => longNames ? `column_identifier_for_test_${i}${longNames === 'extreme' ? '_'.repeat(512) : longNames === 'very' ? '_'.repeat(80) : ''}` : `c${i}`) : [];
     sql.exec(`CREATE TABLE IF NOT EXISTS pinned_blob_shape(value BLOB${extra.map(name => `, ${name}`).join('')})`);
@@ -52,10 +52,11 @@ export class SQLLimitProbe extends DurableObject {
     sql.exec('DELETE FROM pinned_blob_shape'); sql.exec('DELETE FROM pinned_blob_audit'); sql.exec('INSERT INTO pinned_blob_audit VALUES(0)');
     sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_blob_delete_audit AFTER DELETE ON pinned_blob_shape BEGIN UPDATE pinned_blob_audit SET count=count+1; END');
     const repeated = repeatedMarker ? new Uint8Array(blobBytes) : null;
-    if (repeated) { for (let i=0;i<repeated.length-tailBytes;i+=9) repeated[i]=255; for (let i=0;i<tailBytes;i++) repeated[repeated.length-tailBytes+i]=tailValue < 0 ? i+1 : tailValue; }
+    const marker = markerPattern === 'terse' ? [77,97,80,105,35,57,33,64,63] : [255,0,0,0,0,0,0,0,0];
+    if (repeated) { for (let i=0;i<repeated.length-tailBytes;i+=9) repeated.set(marker,i); for (let i=0;i<tailBytes;i++) repeated[repeated.length-tailBytes+i]=tailValue < 0 ? i+1 : tailValue; }
     const valueColumn=blobAtEnd ? extra[extra.length-1] : 'value', valueIndex=blobAtEnd ? extra.length : 0;
     const insert=()=>repeated ? sql.exec(`INSERT INTO pinned_blob_shape(${valueColumn}) VALUES (?)`, repeated.buffer) : sql.exec(`INSERT INTO pinned_blob_shape(${valueColumn}) VALUES (CAST(X'FF0000000000000000'||zeroblob(${blobBytes-9}) AS BLOB))`);
-    const matches=value=>value.length===blobBytes && value.every((byte,index)=>byte===(tailBytes && index>=blobBytes-tailBytes ? (tailValue < 0 ? index-(blobBytes-tailBytes)+1 : tailValue) : index===0 || (repeatedMarker && index%9===0) ? 255 : 0));
+    const matches=value=>value.length===blobBytes && value.every((byte,index)=>byte===(tailBytes && index>=blobBytes-tailBytes ? (tailValue < 0 ? index-(blobBytes-tailBytes)+1 : tailValue) : repeatedMarker ? marker[index%9] : index===0 ? 255 : 0));
     const statement=`DELETE FROM pinned_blob_shape RETURNING value${extra.map(name => `,${name}`).join('')}`;
     let directLength, bridgeError;
     try { storage.transactionSync(()=>{insert();directLength=sql.exec(statement).raw().toArray()[0][valueIndex].byteLength;throw Error(abort);}); }
@@ -494,8 +495,8 @@ export class SQLLimitProbe extends DurableObject {
     assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_business').one().n === 0, 'Rejected write left a business row');
     assert(sql.exec('SELECT COUNT(*) AS n FROM limit_probe_audit').one().n === priorAudits, 'Rejected write left an audit row');
 
-    // For a wide RETURNING, check the UTF-8 SQL size boundary. If neither
-    // codec fits, reject before the write and preserve the trigger count.
+    // Verify compact-to-terse fallback and both UTF-8 SQL size boundaries.
+    // Each accepted statement executes once; an oversized one rolls back.
     const wideBoundaryNames = ['a','b','c',...Array.from({length:48}, () => 'd')];
     sql.exec('CREATE TABLE limit_probe_wide_boundary (a,b,c,d)');
     sql.exec('CREATE TRIGGER limit_probe_wide_boundary_insert AFTER INSERT ON limit_probe_wide_boundary BEGIN UPDATE limit_probe_trigger SET count = count + 1; END');
@@ -514,9 +515,60 @@ export class SQLLimitProbe extends DurableObject {
     execute(observed, request(wideWrite(wideBoundary)));
     assert(calls[0] === 100000, 'Full wide RETURNING missed the byte boundary');
     calls.length = 0;
-    rejects(() => storage.transactionSync(() => execute(observed, request(wideWrite(wideBoundary + 1)))), 'statement too long');
-    assert(calls.length === 1 && calls[0] === 100001, 'Wide RETURNING rejection did not occur at the UTF-8 boundary');
-    assert(sql.exec('SELECT count FROM limit_probe_trigger').one().count === beforeWideTrigger + 2, 'Rejected wide RETURNING changed trigger effects');
+    checkWideBoundary(execute(observed, request(wideWrite(wideBoundary + 1))));
+    assert(calls.length === 1 && calls[0] < 100000, 'Terse wide RETURNING fallback was not selected');
+    const terseOverhead = calls[0] - (wideBoundary + 1);
+    const terseBoundary = 100000 - terseOverhead;
+    calls.length = 0;
+    checkWideBoundary(execute(observed, request(wideWrite(terseBoundary))));
+    assert(calls.length === 1 && calls[0] === 100000, 'Terse wide RETURNING missed the byte boundary');
+    calls.length = 0;
+    rejects(() => storage.transactionSync(() => execute(observed, request(wideWrite(terseBoundary + 1)))), 'statement too long');
+    assert(calls.length === 1 && calls[0] === 100001, 'Terse wide RETURNING rejection missed the byte boundary');
+    assert(sql.exec('SELECT count FROM limit_probe_trigger').one().count === beforeWideTrigger + 4, 'Wide size test changed trigger effects');
+
+    // Force the shorter codec with a long comment, then check every byte in
+    // short BLOBs and in colliding marker-prefixed and nested BLOBs.
+    const terseNames=['id','v','l','m',...Array.from({length:47},(_,i)=>`y${i}`)];
+    sql.exec(`CREATE TABLE terse_scope (id INTEGER PRIMARY KEY,v,l,m,${Array.from({length:47},(_,i)=>`y${i}`).join(',')})`);
+    sql.exec('CREATE TABLE terse_audit (n INTEGER NOT NULL)'); sql.exec('INSERT INTO terse_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER terse_delete AFTER DELETE ON terse_scope BEGIN UPDATE terse_audit SET n=n+1; END');
+    const terseMarker=[77,97,80,105,35,57,33,64,63], terseRows=[];
+    for(let byte=0;byte<256;byte++) for(const source of [[byte],[...terseMarker,byte],[...terseMarker,...terseMarker,byte,0]]) {
+      const id=terseRows.length, value=Uint8Array.from(source), integer=scopeInts[id%scopeInts.length];
+      terseRows.push({integer,blob:value.toBase64()});
+      sql.exec('INSERT INTO terse_scope(id,v,l,m,y0) VALUES (?, CAST(? AS INTEGER), ?, ?, 0.25)',id,integer,value.buffer,'text\0'+id);
+    }
+    sql.exec('CREATE TABLE terse_update_audit (n INTEGER NOT NULL)'); sql.exec('INSERT INTO terse_update_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER terse_update AFTER UPDATE ON terse_scope BEGIN UPDATE terse_update_audit SET n=n+1; END');
+    const terseUpdate=sizedSQL("UPDATE terse_scope SET m=m||'#' WHERE id<3 /*é",`*/ RETURNING ${terseNames.join(',')}`,60000);
+    const checkTerseUpdate=result=>{
+      assert(result.columns.length===51 && result.rows.length===3,'Terse update shape changed');
+      for(const row of result.rows) { const id=Number(row[0]?.integer), expected=terseRows[id]; assert(id>=0 && id<3 && row[1]?.integer===expected.integer && row[2]?.blob===expected.blob && row[3]==='text\0'+id+'#' && row[4]===0.25,`Terse update changed row ${id}`); }
+    };
+    calls.length=0;
+    try { storage.transactionSync(()=>{checkTerseUpdate(execute(observed,request(terseUpdate)));throw Error('terse update rollback');}); }
+    catch(error) { if(error.message!=='terse update rollback') throw error; }
+    assert(calls.length===1 && calls[0]<90000 && sql.exec('SELECT n FROM terse_update_audit').one().n===0,'Terse update rollback or selection changed');
+    calls.length=0; checkTerseUpdate(execute(observed,request(terseUpdate)));
+    assert(calls.length===1 && sql.exec('SELECT n FROM terse_update_audit').one().n===3,'Terse update ran more than once');
+    const terseDelete=sizedSQL('DELETE FROM terse_scope /*é',`*/ RETURNING ${terseNames.join(',')}`,60000);
+    const checkTerse=result=>{
+      assert(result.columns.length===51 && result.rows.length===terseRows.length,'Terse result shape changed');
+      const seen=new Set();
+      for(const row of result.rows) {
+        const id=Number(row[0]?.integer), expected=terseRows[id];
+        assert(expected && !seen.has(id) && row[1]?.integer===expected.integer && row[2]?.blob===expected.blob && row[3]==='text\0'+id+(id<3?'#':'') && row[4]===0.25 && row.slice(5).every(value=>value===null),`Terse codec changed row ${id}`);
+        seen.add(id);
+      }
+    };
+    calls.length=0;
+    try { storage.transactionSync(()=>{checkTerse(execute(observed,request(terseDelete)));throw Error('terse rollback');}); }
+    catch(error) { if(error.message!=='terse rollback') throw error; }
+    assert(calls.length===1 && calls[0]<90000, 'Terse codec was not selected');
+    assert(sql.exec('SELECT COUNT(*) AS n FROM terse_scope').one().n===terseRows.length && sql.exec('SELECT n FROM terse_audit').one().n===0,'Terse rollback changed rows or audit');
+    calls.length=0; checkTerse(execute(observed,request(terseDelete)));
+    assert(calls.length===1 && sql.exec('SELECT n FROM terse_audit').one().n===terseRows.length,'Terse delete ran more than once');
 
     // Query-mode must not execute a write hidden in a comment or second SQL
     // statement. The trigger makes accidental writes visible in audit too.
@@ -662,4 +714,4 @@ export class SQLLimitProbe extends DurableObject {
     return { ok: true, wideColumns: 100, directSQLBytes: 100000, rewrittenSelectBytes: 100000, rewrittenReturningBytes: 100000, rejectedBytes: 100001, function33, largeRows };
   }
 }
-export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-tail8-ff') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,255) : params.has('exact-blob-repeat-tail8-zero') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,0) : params.has('exact-blob-repeat-tail8-wide-ff') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,255) : params.has('exact-blob-repeat-tail8-wide-zero') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,0) : params.has('exact-blob-repeat-tail8-wide64-ff') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,255) : params.has('exact-blob-repeat-tail8-wide64-zero') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,0) : params.has('exact-blob-repeat-tail8-wide100-very-long-last') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'very',true) : params.has('exact-blob-repeat-tail8-wide100-very-long-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,'very') : params.has('exact-blob-repeat-tail8-wide100-very-long-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,'very') : params.has('exact-blob-repeat-tail8-wide100-extreme') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme') : params.has('exact-blob-repeat-tail8-wide100-very-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'very') : params.has('exact-blob-repeat-tail8-wide100-long-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,true) : params.has('exact-blob-repeat-tail8-wide100-long-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,true) : params.has('exact-blob-repeat-tail8-wide100-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,true) : params.has('exact-blob-repeat-tail8-wide100-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255) : params.has('exact-blob-repeat-tail8-wide100-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0) : params.has('exact-blob-repeat-tail8-wide100') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100) : params.has('exact-blob-repeat-tail8-wide66') ? await probe.runEscapedBlobReturningExact(true,8388566,8,66) : params.has('exact-blob-repeat-tail8-wide65') ? await probe.runEscapedBlobReturningExact(true,8388566,8,65) : params.has('exact-blob-repeat-tail8-wide64') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64) : params.has('exact-blob-repeat-tail8-wide63') ? await probe.runEscapedBlobReturningExact(true,8388566,8,63) : params.has('exact-blob-repeat-tail8-wide') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true) : params.has('exact-blob-repeat-tail11') ? await probe.runEscapedBlobReturningExact(true,8388632,11) : params.has('exact-blob-repeat-tail8') ? await probe.runEscapedBlobReturningExact(true,8388629,8) : params.has('exact-blob-repeat-tail6') ? await probe.runEscapedBlobReturningExact(true,8388636,6) : params.has('exact-blob-repeat-tail5') ? await probe.runEscapedBlobReturningExact(true,8388635,5) : params.has('exact-blob-repeat-tail4') ? await probe.runEscapedBlobReturningExact(true,8388634,4) : params.has('exact-blob-repeat-tail3') ? await probe.runEscapedBlobReturningExact(true,8388633,3) : params.has('exact-blob-repeat-tail2') ? await probe.runEscapedBlobReturningExact(true,8388632,2) : params.has('exact-blob-repeat-tail') ? await probe.runEscapedBlobReturningExact(true,8388631,1) : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
+export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-text-nested') ? await probe.runEscapedTextReturningExact('nested') : params.has('exact-text-tag') ? await probe.runEscapedTextReturningExact('escape-tag') : params.has('exact-text') ? await probe.runEscapedTextReturningExact() : params.has('exact-blob-repeat-tail8-ff') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,255) : params.has('exact-blob-repeat-tail8-zero') ? await probe.runEscapedBlobReturningExact(true,8388629,8,false,0) : params.has('exact-blob-repeat-tail8-wide-ff') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,255) : params.has('exact-blob-repeat-tail8-wide-zero') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true,0) : params.has('exact-blob-repeat-tail8-wide64-ff') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,255) : params.has('exact-blob-repeat-tail8-wide64-zero') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64,0) : params.has('exact-blob-repeat-tail8-wide100-very-long-last') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'very',true) : params.has('exact-blob-repeat-tail8-wide100-very-long-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,'very') : params.has('exact-blob-repeat-tail8-wide100-very-long-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,'very') : params.has('exact-blob-repeat-tail8-wide100-extreme-terse-marker') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',false,'terse') : params.has('exact-blob-repeat-tail8-wide100-extreme-last') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme',true) : params.has('exact-blob-repeat-tail8-wide100-extreme-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,'extreme') : params.has('exact-blob-repeat-tail8-wide100-extreme-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,'extreme') : params.has('exact-blob-repeat-tail8-wide100-extreme') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'extreme') : params.has('exact-blob-repeat-tail8-wide100-very-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,'very') : params.has('exact-blob-repeat-tail8-wide100-long-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255,true) : params.has('exact-blob-repeat-tail8-wide100-long-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0,true) : params.has('exact-blob-repeat-tail8-wide100-long') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,-1,true) : params.has('exact-blob-repeat-tail8-wide100-ff') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,255) : params.has('exact-blob-repeat-tail8-wide100-zero') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100,0) : params.has('exact-blob-repeat-tail8-wide100') ? await probe.runEscapedBlobReturningExact(true,8388530,8,100) : params.has('exact-blob-repeat-tail8-wide66') ? await probe.runEscapedBlobReturningExact(true,8388566,8,66) : params.has('exact-blob-repeat-tail8-wide65') ? await probe.runEscapedBlobReturningExact(true,8388566,8,65) : params.has('exact-blob-repeat-tail8-wide64') ? await probe.runEscapedBlobReturningExact(true,8388566,8,64) : params.has('exact-blob-repeat-tail8-wide63') ? await probe.runEscapedBlobReturningExact(true,8388566,8,63) : params.has('exact-blob-repeat-tail8-wide') ? await probe.runEscapedBlobReturningExact(true,8388584,8,true) : params.has('exact-blob-repeat-tail11') ? await probe.runEscapedBlobReturningExact(true,8388632,11) : params.has('exact-blob-repeat-tail8') ? await probe.runEscapedBlobReturningExact(true,8388629,8) : params.has('exact-blob-repeat-tail6') ? await probe.runEscapedBlobReturningExact(true,8388636,6) : params.has('exact-blob-repeat-tail5') ? await probe.runEscapedBlobReturningExact(true,8388635,5) : params.has('exact-blob-repeat-tail4') ? await probe.runEscapedBlobReturningExact(true,8388634,4) : params.has('exact-blob-repeat-tail3') ? await probe.runEscapedBlobReturningExact(true,8388633,3) : params.has('exact-blob-repeat-tail2') ? await probe.runEscapedBlobReturningExact(true,8388632,2) : params.has('exact-blob-repeat-tail') ? await probe.runEscapedBlobReturningExact(true,8388631,1) : params.has('exact-blob-repeat-safe') ? await probe.runEscapedBlobReturningExact(true,8000001) : params.has('exact-blob-repeat') ? await probe.runEscapedBlobReturningExact(true) : params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };

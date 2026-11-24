@@ -86,7 +86,21 @@ function compactReturningColumn(column) {
   return direct.length <= nested.length ? direct : nested;
 }
 
-function decodeReturning(value, unified = false) {
+// Last-resort wide codec: keep large non-colliding BLOBs unchanged and
+// escape only values that collide with the reserved integer-width grammar.
+function terseReturningColumn(column) {
+  const marker = "X'4D615069233921403F'", widths = "(0,1,2,3,4,6,8)";
+  const remainder = "length(CAST(replace(CAST(v AS TEXT),CAST(m AS TEXT),'') AS BLOB))";
+  const width = "substr('12346688',(length(printf('%x',(iif(v<0,~v,v)<<1)|1))+1)/2,1)";
+  const value = `CASE typeof(v) WHEN 'integer' THEN iif(v=0,X'',substr(unhex(printf('%016llx',v)),9-(${width}))) WHEN 'blob' THEN iif(l IN${widths} OR (substr(v,1,9)=m AND ${remainder} IN${widths}),CAST(m||v AS BLOB),v) ELSE v END`;
+  const direct = `(SELECT ${value} FROM (SELECT ${column} AS v,length(${column}) AS l,${marker} AS m))`;
+  const nested = `(SELECT ${value} FROM (SELECT v,length(v) AS l,${marker} AS m FROM (SELECT ${column} AS v)))`;
+  return direct.length <= nested.length ? direct : nested;
+}
+
+const terseMarkerBytes = [77, 97, 80, 105, 35, 57, 33, 64, 63];
+
+function decodeReturning(value, unified = false, terse = false) {
   if (typeof value === 'string' || typeof value === 'number' || value === null) return value;
   const blob = new Uint8Array(value);
   const widths = [0, 1, 2, 3, 4, 6, 8];
@@ -97,7 +111,12 @@ function decodeReturning(value, unified = false) {
     return { integer: integer.toString() };
   }
   const markerAt = index => {
-    if (blob[index] !== 255 || index + 9 > blob.length) return false;
+    if (index + 9 > blob.length) return false;
+    if (terse) {
+      for (let i = 0; i < 9; i++) if (blob[index + i] !== terseMarkerBytes[i]) return false;
+      return true;
+    }
+    if (blob[index] !== 255) return false;
     for (let i = 1; i < 9; i++) if (blob[index + i] !== 0) return false;
     return true;
   };
@@ -130,7 +149,7 @@ function decodeReturning(value, unified = false) {
         return { blob: repeated.toBase64() };
       }
     }
-  } else {
+  } else if (!terse) {
     // In this tag each count byte precedes a marker run, so the bytes after
     // the first marker cannot themselves start with a marker (FF is followed
     // by the next marker's FF). The two runs encode the high count and suffix.
@@ -331,6 +350,7 @@ export function execute(storage, { statement, args, query }) {
   let wide;
   const isReturning = !!returning;
   let unified = false;
+  let terse = false;
   if (returning) {
     columns = returning[1].split(/\s*,\s*/);
     wide = columns.length > 50;
@@ -344,6 +364,14 @@ export function execute(storage, { statement, args, query }) {
       if (new TextEncoder().encode(shorter).length < new TextEncoder().encode(prepared).length) {
         unified = false;
         prepared = shorter;
+      }
+    }
+    if (wide && new TextEncoder().encode(prepared).length > 100000) {
+      const fallback = prefix + columns.map(column => terseReturningColumn(column)).join(", ");
+      if (new TextEncoder().encode(fallback).length < new TextEncoder().encode(prepared).length) {
+        unified = false;
+        terse = true;
+        prepared = fallback;
       }
     }
   } else {
@@ -361,7 +389,7 @@ export function execute(storage, { statement, args, query }) {
       "\n) SELECT " + aliases.map(wide ? packedColumn : columnPair).join(", ") + " FROM " + rowSource;
   }
   const rows = storage.sql.exec(prepared, ...values).raw().toArray().map((row) =>
-    columns.map((_column, index) => isReturning ? decodeReturning(row[index], unified) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
+    columns.map((_column, index) => isReturning ? decodeReturning(row[index], unified, terse) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
   return { columns, rows };
 }
 
