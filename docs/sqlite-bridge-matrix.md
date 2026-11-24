@@ -357,9 +357,9 @@ fences, actual owner/driver integration, and independent review. In particular,
 wide RETURNING still needs a lossless type channel without a live cursor after
 commit; the staging probe by itself only tested a BLOB and a small integer.
 
-For the exact-width RETURNING edge, the local prototype found that a
+For the exact-width RETURNING edge, an earlier local prototype found that a
 100-column `INSERT ... RETURNING value, NULL, ...` accepts 8,388,538 bytes of
-TEXT, while the existing one-byte tag fails at that size; the same tagged
+TEXT, while the earlier one-byte tag failed at that size; the same tagged
 statement tops out one byte lower. Both probes roll back and leave no rows.
 An AFTER-trigger side channel separately captured types without adding bytes
 to the RETURNING row, but an existing same-table trigger that inserts a nested
@@ -393,7 +393,7 @@ this source trace is not a proof that a generic driver contract may change.
 A local table reproducing the pinned `json_schemas` column and primary-key
 shape was also tested with the six columns in
 `deleteByIDJSONSchemaStmt`. An 8,388,602-byte valid JSON string was returned
-by the original DELETE, while the bridge's narrow paired value/`typeof`
+by the original DELETE, while the earlier bridge's narrow paired value/`typeof`
 projection failed with `SQLITE_TOOBIG`; both probes rolled back cleanly. This
 replicates the SQL and table shape, not the foreign key, the handler's request
 limits, or hosted behavior. The pinned application therefore contains the
@@ -402,12 +402,26 @@ has not been demonstrated. The prototype tests also show that matching a
 trigger sidecar by row identity is insufficient: a nested update to the same
 row yields two different type records for one returned row.
 
-`npm run test:sql-returning-exact` is the tracked bridge regression for that
-pinned-shape boundary. It currently **fails** with `SQLITE_TOOBIG`: the test
-first proves the direct DELETE returns the full 8,388,602-byte value and then
-confirms the rejected bridge call rolls back both business and audit changes.
-`npm run test:sql-limits` still passes its existing cases. The exact-size test
-is intentionally not marked as passing or skipped.
+`npm run test:sql-returning-exact` now passes the pinned-shape boundary using
+compact RETURNING encoding. The test proves that the direct DELETE returns
+the full 8,388,602-byte value, verifies rollback, and separately commits the
+bridge delete with exactly one audit effect. `npm run test:sql-returning-exact-int64`
+and `npm run test:sql-returning-exact-real` pass variants with the maximum
+signed 64-bit integer and a REAL. `npm run test:sql-returning-exact-many`
+passes a synthetic result with five zero integers. Integers are represented
+as minimally sized signed BLOBs and colliding BLOBs are escaped; REALs and
+TEXT remain unchanged. `npm run test:sql-limits` passed signed-width boundary
+values, BLOB widths and escape-prefix collisions, embedded-NUL text, REAL
+edge values and 2,048 deterministic binary64 inputs. A separate disposable
+experiment passed 10,000 binary64 inputs. These checks do not prove all
+possible values or eliminate every record-size overhead.
+
+`npm run test:sql-returning-exact-blob` is a distinct **failing regression**:
+an 8,388,630-byte synthetic BLOB with the reserved escape prefix is returned
+by a direct DELETE, but adding the prefix for type safety causes
+`SQLITE_TOOBIG`. Both attempted transactions roll back business and audit
+changes. Wide SELECT materialization may also add overhead. Exact-size
+compatibility remains an open Phase 1 gate.
 
 The observed rollback incompatibility is specific to the tested synchronous
 single-object staging approach. Re-execution after rollback cannot reproduce

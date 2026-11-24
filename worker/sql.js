@@ -25,6 +25,35 @@ function decodePacked(encoded) {
   return { blob: new Uint8Array(encoded).toBase64() };
 }
 
+// RETURNING cannot use a materialized CTE, and adding a type column per value
+// can push a platform-valid returned row over SQLite's record-size limit.
+// Integers use a minimal-width signed big-endian BLOB (zero uses an empty
+// BLOB). Escape actual BLOBs that would collide with those reserved widths or
+// the escape prefix. REALs and TEXT pass through unchanged. An escaped BLOB
+// or integer one can still enlarge a valid result row, so exact-size
+// compatibility remains a separate open gate.
+function returningColumn(column) {
+  const type = "typeof(" + column + ")", hex = "unhex(printf('%016llx', " + column + "))";
+  const width = "CASE WHEN " + column + " BETWEEN -128 AND 127 THEN 1 WHEN " + column + " BETWEEN -32768 AND 32767 THEN 2 WHEN " + column + " BETWEEN -8388608 AND 8388607 THEN 3 WHEN " + column + " BETWEEN -2147483648 AND 2147483647 THEN 4 WHEN " + column + " BETWEEN -140737488355328 AND 140737488355327 THEN 6 ELSE 8 END";
+  return "CASE WHEN " + type + " = 'integer' AND " + column + " = 0 THEN zeroblob(0)" +
+    " WHEN " + type + " = 'integer' THEN substr(" + hex + ", 9 - (" + width + "))" +
+    " WHEN " + type + " = 'blob' AND (length(" + column + ") IN (0,1,2,3,4,6,8) OR (length(" + column + ") >= 9 AND substr(" + column + ", 1, 9) = X'FF0000000000000000')) THEN CAST(X'FF0000000000000000' || " + column + " AS BLOB)" +
+    " ELSE " + column + " END";
+}
+
+function decodeReturning(value) {
+  if (typeof value === 'string' || typeof value === 'number' || value === null) return value;
+  const blob = new Uint8Array(value);
+  if ([0, 1, 2, 3, 4, 6, 8].includes(blob.length)) {
+    let integer = 0n;
+    for (const byte of blob) integer = (integer << 8n) | BigInt(byte);
+    if (blob.length && (blob[0] & 128)) integer -= 1n << BigInt(blob.length * 8);
+    return { integer: integer.toString() };
+  }
+  const escaped = blob.length >= 9 && blob[0] === 255 && blob.subarray(1, 9).every(byte => byte === 0);
+  return { blob: (escaped ? blob.subarray(9) : blob).toBase64() };
+}
+
 function bind(statement, args) {
   let highest = 0;
   const sql = statement.replace(/'(?:''|[^'])*(?:'|$)|"(?:""|[^"])*(?:"|$)|`(?:``|[^`])*(?:`|$)|\[[^\]]*(?:\]|$)|--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|\?(\d*)/g, (part, numbered) => {
@@ -169,10 +198,11 @@ export function execute(storage, { statement, args, query }) {
   let columns;
   let prepared;
   let wide;
+  const isReturning = !!returning;
   if (returning) {
     columns = returning[1].split(/\s*,\s*/);
     wide = columns.length > 50;
-    prepared = sql.slice(0, returningToken.start) + "RETURNING " + columns.map(wide ? packedColumn : columnPair).join(", ");
+    prepared = sql.slice(0, returningToken.start) + "RETURNING " + columns.map(returningColumn).join(", ");
   } else {
     if (kind !== "SELECT") throw new Error("Unsupported row-producing SQLite statement");
     const cursor = storage.sql.exec(metadataQuery(sql, tokens, verb), ...values);
@@ -188,7 +218,7 @@ export function execute(storage, { statement, args, query }) {
       "\n) SELECT " + aliases.map(wide ? packedColumn : columnPair).join(", ") + " FROM " + rowSource;
   }
   const rows = storage.sql.exec(prepared, ...values).raw().toArray().map((row) =>
-    columns.map((_column, index) => wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
+    columns.map((_column, index) => isReturning ? decodeReturning(row[index]) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
   return { columns, rows };
 }
 

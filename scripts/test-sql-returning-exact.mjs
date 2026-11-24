@@ -9,6 +9,7 @@ import { setTimeout } from 'node:timers/promises';
 
 async function freePort() { const server = createServer().listen(0, '127.0.0.1'); await once(server, 'listening'); const port = server.address().port; await new Promise(done => server.close(done)); return port; }
 const directory = await mkdtemp(resolve(tmpdir(), 'mapi-sql-limits-'));
+const variant = process.env.MAPI_SQL_RETURNING_EXACT_BLOB === '1' ? 'exact-blob' : process.env.MAPI_SQL_RETURNING_EXACT_MANY === '1' ? 'exact-many' : process.env.MAPI_SQL_RETURNING_EXACT_REAL === '1' ? 'exact-real' : process.env.MAPI_SQL_RETURNING_EXACT_INT64 === '1' ? 'exact64' : 'exact';
 const envFile = resolve(directory, 'empty.env'); await writeFile(envFile, '');
 const port = await freePort(), inspector = await freePort();
 const server = spawn(process.execPath, [resolve('node_modules/wrangler/bin/wrangler.js'), 'dev', '--local', '--config', 'scripts/phase1-sql-limit-probe.wrangler.jsonc', '--env-file', envFile, '--ip', '127.0.0.1', '--port', String(port), '--inspector-port', String(inspector), '--persist-to', directory], { stdio: ['ignore', 'ignore', 'inherit'], env: { ...process.env, WRANGLER_LOG_PATH: resolve(directory, 'wrangler.log'), WRANGLER_SEND_METRICS: 'false' } });
@@ -16,16 +17,17 @@ try {
   let response;
   for (let attempt = 0; attempt < 100; attempt++) {
     if (server.exitCode !== null) throw new Error('workerd exited before SQL limit test');
-    try { response = await fetch(`http://127.0.0.1:${port}/?exact=1`, { signal: AbortSignal.timeout(60000) }); break; }
+    try { response = await fetch(`http://127.0.0.1:${port}/?${variant}=1`, { signal: AbortSignal.timeout(60000) }); break; }
     catch (error) { if (error.name === 'TimeoutError') throw error; await setTimeout(200); }
   }
   if (!response) throw new Error('workerd did not start');
   assert.equal(response.status, 200);
   const result = await response.json();
-  assert.equal(result.directLength, 8388602);
+  assert.equal(result.directLength, variant === 'exact-blob' ? 8388630 : 8388602);
   assert.equal(result.rows, 0); assert.equal(result.audit, 0);
-  assert.equal(result.ok, true, `Pinned JSON-schema RETURNING should preserve the exact-size value; bridge error: ${result.error}`);
-  console.log('Pinned JSON-schema RETURNING exact-size result passed.');
+  const fixture = variant === 'exact-blob' ? 'Synthetic escaped-BLOB' : variant === 'exact-many' ? 'Synthetic multi-integer' : 'Pinned JSON-schema';
+  assert.equal(result.ok, true, `${fixture} RETURNING should preserve the exact-size value; bridge error: ${result.error}`);
+  console.log(`${fixture} RETURNING exact-size ${variant} result passed.`);
 } finally {
   if (server.exitCode === null && server.signalCode === null) { const stopped = once(server, 'exit'); server.kill('SIGTERM'); await stopped; }
   await rm(directory, { recursive: true, force: true });

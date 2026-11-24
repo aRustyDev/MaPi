@@ -67,7 +67,11 @@
     "dev": "wrangler dev --env-file .dev.vars.poc",
     "prepare:staging": "node scripts/staging-secrets.mjs",
     "deploy:staging": "wrangler deploy --env staging --secrets-file .mapi/staging-secrets.json",
-    "test:sql-returning-exact": "node scripts/test-sql-returning-exact.mjs"
+    "test:sql-returning-exact": "node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-int64": "MAPI_SQL_RETURNING_EXACT_INT64=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-real": "MAPI_SQL_RETURNING_EXACT_REAL=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-many": "MAPI_SQL_RETURNING_EXACT_MANY=1 node scripts/test-sql-returning-exact.mjs",
+    "test:sql-returning-exact-blob": "MAPI_SQL_RETURNING_EXACT_BLOB=1 node scripts/test-sql-returning-exact.mjs"
   },
   "devDependencies": {
     "@zitadel/api": "0.7.0",

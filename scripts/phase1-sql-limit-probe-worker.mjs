@@ -19,14 +19,52 @@ const sizedSQL = (prefix, suffix, size) => {
 const request = (statement, args = [], query = true) => ({ statement, args, query });
 
 export class SQLLimitProbe extends DurableObject {
-  runPinnedReturningExact() {
+  runEscapedBlobReturningExact() {
+    const storage=this.ctx.storage, sql=storage.sql, blobBytes=8388630, abort='rollback boundary proof';
+    sql.exec('CREATE TABLE IF NOT EXISTS pinned_blob_shape(value BLOB)');
+    sql.exec('CREATE TABLE IF NOT EXISTS pinned_blob_audit(count INTEGER NOT NULL)');
+    sql.exec('DELETE FROM pinned_blob_shape'); sql.exec('DELETE FROM pinned_blob_audit'); sql.exec('INSERT INTO pinned_blob_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_blob_delete_audit AFTER DELETE ON pinned_blob_shape BEGIN UPDATE pinned_blob_audit SET count=count+1; END');
+    const insert=()=>sql.exec(`INSERT INTO pinned_blob_shape VALUES (CAST(X'FF0000000000000000'||zeroblob(${blobBytes-9}) AS BLOB))`);
+    const statement='DELETE FROM pinned_blob_shape RETURNING value';
+    let directLength, bridgeError;
+    try { storage.transactionSync(()=>{insert();directLength=sql.exec(statement).raw().toArray()[0][0].byteLength;throw Error(abort);}); }
+    catch(error) { if(error.message!==abort) throw error; }
+    assert(directLength===blobBytes,'Direct escaped-BLOB payload length changed');
+    try { storage.transactionSync(()=>{insert();const result=execute(storage,request(statement));const value=Uint8Array.fromBase64(result.rows[0][0].blob);assert(value.length===blobBytes && value[0]===255 && value.subarray(1).every(byte=>byte===0),'Bridge escaped BLOB changed');throw Error(abort);}); }
+    catch(error) { if(error.message!==abort) bridgeError=String(error); }
+    const rows=sql.exec('SELECT count(*) AS n FROM pinned_blob_shape').one().n, audit=sql.exec('SELECT count FROM pinned_blob_audit').one().count;
+    assert(rows===0 && audit===0,'Escaped-BLOB boundary probe did not roll back business and audit rows');
+    return {ok:!bridgeError,error:bridgeError||null,directLength,rows,audit};
+  }
+  runManyIntegerReturningExact() {
+    const storage=this.ctx.storage, sql=storage.sql;
+    sql.exec('CREATE TABLE IF NOT EXISTS pinned_many_shape(a,b,c,d,e,payload)');
+    sql.exec('CREATE TABLE IF NOT EXISTS pinned_many_audit(count INTEGER NOT NULL)');
+    sql.exec('DELETE FROM pinned_many_shape'); sql.exec('DELETE FROM pinned_many_audit'); sql.exec('INSERT INTO pinned_many_audit VALUES(0)');
+    sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_many_delete_audit AFTER DELETE ON pinned_many_shape BEGIN UPDATE pinned_many_audit SET count=count+1; END');
+    const payloadBytes=8388602, n=payloadBytes-2, abort='rollback boundary proof';
+    const insert=()=>sql.exec(`INSERT INTO pinned_many_shape VALUES (0,0,0,0,0,'"'||substr(hex(zeroblob((?+1)/2)),1,?)||'"')`,n,n);
+    const statement='DELETE FROM pinned_many_shape RETURNING a,b,c,d,e,payload';
+    let directLength, bridgeError;
+    try { storage.transactionSync(()=>{insert();directLength=sql.exec(statement).raw().toArray()[0][5].length;throw Error(abort);}); }
+    catch(error) { if(error.message!==abort) throw error; }
+    assert(directLength===payloadBytes,'Direct multi-integer payload length changed');
+    try { storage.transactionSync(()=>{insert();const result=execute(storage,request(statement));assert(result.rows.length===1 && result.rows[0][5].length===payloadBytes && result.rows[0].slice(0,5).every(value=>value?.integer==='0'),'Bridge multi-integer values changed');throw Error(abort);}); }
+    catch(error) { if(error.message!==abort) bridgeError=String(error); }
+    const rows=sql.exec('SELECT count(*) AS n FROM pinned_many_shape').one().n, audit=sql.exec('SELECT count FROM pinned_many_audit').one().count;
+    assert(rows===0 && audit===0,'Multi-integer boundary probe did not roll back business and audit rows');
+    return {ok:!bridgeError,error:bridgeError||null,directLength,rows,audit};
+  }
+  runPinnedReturningExact(kind = 'safe') {
     const storage = this.ctx.storage, sql = storage.sql;
     sql.exec('CREATE TABLE IF NOT EXISTS pinned_json_shape(project_id TEXT NOT NULL, url TEXT NOT NULL, object_type TEXT, kind TEXT NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(project_id,url))');
     sql.exec('CREATE TABLE IF NOT EXISTS pinned_json_audit(count INTEGER NOT NULL)');
     sql.exec('DELETE FROM pinned_json_shape'); sql.exec('DELETE FROM pinned_json_audit'); sql.exec('INSERT INTO pinned_json_audit VALUES(0)');
     sql.exec('CREATE TRIGGER IF NOT EXISTS pinned_json_delete_audit AFTER DELETE ON pinned_json_shape BEGIN UPDATE pinned_json_audit SET count=count+1; END');
     const payloadBytes=8388602, n=payloadBytes-2;
-    const insert = () => sql.exec(`INSERT INTO pinned_json_shape VALUES ('p','u',NULL,'user-schema',1, '"'||substr(hex(zeroblob((?+1)/2)),1,?)||'"')`,n,n);
+    const createdAt = kind === 'int64' ? '9223372036854775807' : kind === 'real' ? '1.2345678901234567' : '1';
+    const insert = () => sql.exec(`INSERT INTO pinned_json_shape VALUES ('p','u',NULL,'user-schema',${createdAt}, '"'||substr(hex(zeroblob((?+1)/2)),1,?)||'"')`,n,n);
     const statement = "DELETE FROM pinned_json_shape WHERE project_id='p' AND url='u' RETURNING project_id,url,object_type,kind,created_at,payload";
     const abort='rollback boundary proof';
     let directLength;
@@ -39,6 +77,16 @@ export class SQLLimitProbe extends DurableObject {
     const rows=sql.exec('SELECT count(*) AS n FROM pinned_json_shape').one().n;
     const audit=sql.exec('SELECT count FROM pinned_json_audit').one().count;
     assert(rows===0 && audit===0,'Boundary probe did not roll back business and audit rows');
+    if (!bridgeError) {
+      storage.transactionSync(() => {
+        insert();
+        const result=execute(storage,request(statement));
+        assert(result.rows.length===1 && result.rows[0][0]==='p' && result.rows[0][1]==='u' && result.rows[0][2]===null &&
+          result.rows[0][3]==='user-schema' && (kind === 'real' ? result.rows[0][4]===Number(createdAt) : result.rows[0][4]?.integer===createdAt) && result.rows[0][5].length===payloadBytes &&
+          result.rows[0][5][0]==='"' && result.rows[0][5][payloadBytes-1]==='"','Committed bridge RETURNING values changed');
+      });
+      assert(sql.exec('SELECT count(*) AS n FROM pinned_json_shape').one().n===0 && sql.exec('SELECT count FROM pinned_json_audit').one().count===1,'Committed delete or audit count changed');
+    }
     return {ok:!bridgeError, error:bridgeError || null, directLength, rows, audit};
   }
   run() {
@@ -89,6 +137,50 @@ export class SQLLimitProbe extends DurableObject {
     const duplicates = execute(storage, request(`SELECT ${wideNames.map(name => `${name} AS repeated`).join(',')} FROM limit_probe_wide`));
     assert(duplicates.columns.length === 100 && duplicates.columns.every(name => name === 'repeated'), 'Duplicate column names changed');
     assert(JSON.stringify(duplicates.rows) === JSON.stringify(inserted.rows), 'Duplicate-name result values changed');
+    // RETURNING uses compact type tags so an ordinary near-limit TEXT value
+    // is not copied into a wider record merely to carry its SQLite type.
+    // Exercise SQLite's dynamic types, tag collisions and binary64 round trips.
+    sql.exec('CREATE TABLE IF NOT EXISTS compact_returning_integer (value)');
+    for (const decimal of ['-9223372036854775808', '-9007199254740992', '-140737488355329', '-140737488355328', '-2147483649', '-2147483648', '-8388609', '-8388608', '-32769', '-32768', '-129', '-128', '-1', '0', '1', '127', '128', '32767', '32768', '8388607', '8388608', '2147483647', '2147483648', '140737488355327', '140737488355328', '9007199254740991', '9007199254740992', '9223372036854775807']) {
+      const result = execute(storage, request(`INSERT INTO compact_returning_integer VALUES (CAST('${decimal}' AS INTEGER)) RETURNING value`));
+      assert(result.rows[0][0]?.integer === decimal, `Compact RETURNING integer changed: ${decimal}`);
+    }
+    sql.exec('CREATE TABLE IF NOT EXISTS compact_returning_text (value TEXT)');
+    for (const value of ['', '\0', '\0i1', '\0r3', '\0tfoo', 'i42', '🙂', 'x\0y']) {
+      const result = execute(storage, request('INSERT INTO compact_returning_text VALUES (?1) RETURNING value', [{ kind: 'value', value }]));
+      assert(result.rows[0][0] === value, 'Compact RETURNING text tag collided');
+    }
+    sql.exec('CREATE TABLE IF NOT EXISTS compact_returning_blob (value BLOB)');
+    for (let length = 0; length <= 24; length++) for (const first of [0, 127, 255]) {
+      const value = new Uint8Array(length);
+      for (let i = 0; i < length; i++) value[i] = (first + i * 73) & 255;
+      const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
+      assert(result.rows[0][0]?.blob === value.toBase64(), `Compact RETURNING BLOB tag collided at length ${length}`);
+    }
+    for (const suffix of [[], [255], [0, 255, 0]]) {
+      const value = Uint8Array.from([255, 0, 0, 0, 0, 0, 0, 0, 0, ...suffix]);
+      const result = execute(storage, request('INSERT INTO compact_returning_blob VALUES (?1) RETURNING value', [{ kind: 'blob', value: value.toBase64() }]));
+      assert(result.rows[0][0]?.blob === value.toBase64(), 'Compact RETURNING BLOB escape-prefix collision');
+    }
+    sql.exec('CREATE TABLE IF NOT EXISTS compact_returning_real (id INTEGER PRIMARY KEY, value REAL)');
+    const bits = new DataView(new ArrayBuffer(8));
+    let seed = 0x7fa31c42;
+    for (let i = 0; i < 2048; i++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; bits.setUint32(0, seed);
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; bits.setUint32(4, seed);
+      const value = bits.getFloat64(0);
+      if (!Number.isFinite(value)) continue;
+      sql.exec('INSERT INTO compact_returning_real VALUES (?, ?)', i, value);
+      const expected = sql.exec('SELECT value FROM compact_returning_real WHERE id = ?', i).one().value;
+      const actual = execute(storage, request('DELETE FROM compact_returning_real WHERE id = ?1 RETURNING value', [{ kind: 'value', value: i }])).rows[0][0];
+      assert(Object.is(actual, expected), `Compact RETURNING REAL changed at sample ${i}`);
+    }
+    for (const expression of ['1e999', '-1e999', '-0.0', '0.0', '1.0', '-1.0', '4.9406564584124654e-324']) {
+      sql.exec(`INSERT INTO compact_returning_real VALUES (1, ${expression})`);
+      const expected = sql.exec('SELECT value FROM compact_returning_real').one().value;
+      const actual = execute(storage, request('DELETE FROM compact_returning_real RETURNING value')).rows[0][0];
+      assert(Object.is(actual, expected), `Compact RETURNING REAL edge changed: ${expression}`);
+    }
     const largeBlob = execute(storage, request('SELECT ' + Array.from({ length: 51 }, (_, index) => index === 0 ? 'zeroblob(8000000) AS c0' : `${index} AS c${index}`).join(',')));
     assert(largeBlob.rows[0][0]?.blob?.length === 10666668, 'Wide BLOB was not preserved');
     const largeText = execute(storage, request('SELECT ' + Array.from({ length: 51 }, (_, index) => index === 0 ? 'CAST(zeroblob(8000000) AS TEXT) AS c0' : `${index} AS c${index}`).join(',')));
@@ -276,4 +368,4 @@ export class SQLLimitProbe extends DurableObject {
     return { ok: true, wideColumns: 100, directSQLBytes: 100000, rewrittenSelectBytes: 100000, rewrittenReturningBytes: 100000, rejectedBytes: 100001, function33, largeRows };
   }
 }
-export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()); return Response.json(new URL(request.url).searchParams.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
+export default { async fetch(request, env) { const probe=env.PROBE.getByName(crypto.randomUUID()), params=new URL(request.url).searchParams; return Response.json(params.has('exact-blob') ? await probe.runEscapedBlobReturningExact() : params.has('exact-many') ? await probe.runManyIntegerReturningExact() : params.has('exact-real') ? await probe.runPinnedReturningExact('real') : params.has('exact64') ? await probe.runPinnedReturningExact('int64') : params.has('exact') ? await probe.runPinnedReturningExact() : await probe.run()); } };
