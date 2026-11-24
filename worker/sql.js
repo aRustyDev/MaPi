@@ -34,15 +34,16 @@ function decodePacked(encoded) {
 // still exceed the limit.
 function returningColumn(column, allowEight = true) {
   const length = `length(${column})`, marker = "X'FF0000000000000000'", widths = "(0,1,2,3,4,6,8)";
-  // Removing 9-byte markers preserves length modulo 9, so a remainder in a
-  // reserved width already proves the original length has the same residue.
+  // Removing 9-byte markers preserves length modulo 9, so the outer BLOB
+  // collision check proves any eligible residue is a reserved width. Values
+  // shorter than a marker cannot satisfy the later marker comparison.
   const remainder = `length(CAST(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'') AS BLOB))`;
   // The eight-byte tag stores the first two suffix bytes in marker-run
   // lengths. Its remaining bytes plus the two count bytes have a reserved
   // width, so a source BLOB shaped like the tag is escaped as data.
   const byte = index => {
     const h = `hex(substr(${column},${index},1))`;
-    return `(16*instr('0123456789ABCDEF',substr(${h},1,1))+instr('0123456789ABCDEF',substr(${h},2,1))-17)`;
+    return `(16*instr('0123456789ABCDEF',substr(${h},1,1))+instr('0123456789ABCDEF',substr(${h},2))-17)`;
   };
   const run = n => `unhex(replace(hex(zeroblob(${n})),'00','FF0000000000000000'))`;
   const count = `${length}/9`;
@@ -50,7 +51,7 @@ function returningColumn(column, allowEight = true) {
   const width = `CASE WHEN (${column}>>7) IN(-1,0) THEN 1 WHEN (${column}>>15) IN(-1,0) THEN 2 WHEN (${column}>>23) IN(-1,0) THEN 3 WHEN (${column}>>31) IN(-1,0) THEN 4 WHEN (${column}>>47) IN(-1,0) THEN 6 ELSE 8 END`;
   return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN zeroblob(0) ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
     ` WHEN 'blob' THEN CASE WHEN ${length} IN ${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN ${widths}) THEN` +
-    ` CASE WHEN ${length}/9<=8388607 AND ${length}%9 IN(0,1,2,3,4,6${allowEight ? ',8' : ''}) AND substr(${column},-9-${length}%9,9)=${marker} THEN ${allowEight ? `CASE WHEN ${length}%9=8 THEN ${eightTag} ELSE ` : ''}CAST(${marker}||unhex(printf('%04x',(${length}/9)&65535))||unhex(replace(hex(zeroblob(1+2*(${length}/9>>16)+(${length}%9=3))),'00','FF0000000000000000'))||substr(${column},-${length}%9,${length}%9)||CASE WHEN ${length}%9=3 THEN X'53' ELSE X'' END AS BLOB)${allowEight ? ' END' : ''} ELSE CAST(${marker}||${column} AS BLOB) END` +
+    ` CASE WHEN ${length}/9<=8388607 AND ${allowEight ? '' : `${length}%9<>8 AND `}substr(${column},-9-${length}%9,9)=${marker} THEN ${allowEight ? `CASE WHEN ${length}%9=8 THEN ${eightTag} ELSE ` : ''}CAST(${marker}||unhex(printf('%04x',(${length}/9)&65535))||unhex(replace(hex(zeroblob(1+2*(${length}/9>>16)+(${length}%9=3))),'00','FF0000000000000000'))||substr(${column},-${length}%9,${length}%9)||CASE WHEN ${length}%9=3 THEN X'53' ELSE X'' END AS BLOB)${allowEight ? ' END' : ''} ELSE CAST(${marker}||${column} AS BLOB) END` +
     ` ELSE ${column} END ELSE ${column} END`;
 }
 
