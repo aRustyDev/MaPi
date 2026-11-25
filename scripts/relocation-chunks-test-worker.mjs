@@ -22,6 +22,16 @@ export class ChunkProject extends DurableObject {
  oversized(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); const data = new Uint8Array(300_000); for (let i = 0; i < data.length; i++) data[i] = i % 251; this.s.sql.exec("INSERT INTO users VALUES ('large', 9223372036854775807, ?)", data.buffer); }); }
  beyondRowLimit(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO users VALUES ('large', 0, ?)", new Uint8Array(7_996_000).buffer); }); }
  seedWideText(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", 'é😀\n'.repeat(45_000)); }); }
+ seedRelocationText(id, invalid) {
+  this.s.transactionSync(() => {
+   assertProjectWritable(this.s, id, 1);
+   this.s.sql.exec("INSERT INTO wide_text VALUES ('a', ?)", 'é😀\uFFFD');
+   if (invalid) this.s.sql.exec("INSERT INTO wide_text VALUES ('z', CAST(X'80' AS TEXT))");
+  });
+ }
+ relocationTextRows() {
+  return this.s.sql.exec('SELECT id, typeof(value) AS kind, hex(value) AS bytes FROM wide_text ORDER BY id').toArray();
+ }
  seedReal(id, value) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); if (value === 'positive') this.s.sql.exec("INSERT INTO real_values VALUES ('value', 1e999)"); else if (value === 'negative') this.s.sql.exec("INSERT INTO real_values VALUES ('value', -1e999)"); else if (value === 'null') this.s.sql.exec("INSERT INTO real_values VALUES ('value', NULL)"); else throw Error('Unknown REAL fixture'); }); }
  realState() { const row = this.s.sql.exec('SELECT typeof(value) AS kind, value FROM real_values').one(); return { kind: row.kind, positive: row.value === Infinity, negative: row.value === -Infinity }; }
  realRows() { return this.s.sql.exec('SELECT id, typeof(value) AS kind, value FROM real_values ORDER BY id').toArray(); }
@@ -184,6 +194,27 @@ export default { async fetch(request, env) {
    if (nChunks > 100) throw Error('Too many chunks');
   }
   check(total > 512 * 1024 && nChunks > 4, 'fixture did not exceed previous limit');
+  for (const invalid of [false, true]) {
+   const id = invalid ? 'invalid-text' : 'valid-text';
+   const name = `${id}-${n}`, owner = env.PROJECT.getByName(name);
+   await owner.init(id, name);
+   await owner.seedRelocationText(id, invalid);
+   await owner.freeze(id, 1, 'text-move');
+   await owner.beginExport(id, 1, 'text-move', ['wide_text']);
+   const before = await owner.relocationTextRows();
+   if (invalid) {
+    const checkpoint = await owner.exportStatus(id);
+    await rejectsWith(() => owner.chunk(id, 1, 'text-move', 0, false), 'Invalid UTF-8 TEXT');
+    check(JSON.stringify(await owner.exportStatus(id)) === JSON.stringify(checkpoint), 'invalid TEXT advanced export');
+    check(JSON.stringify(await owner.relocationTextRows()) === JSON.stringify(before), 'invalid TEXT changed the source bytes');
+   } else {
+    const destinationName = `text-destination-${n}`, destination = env.PROJECT.getByName(destinationName);
+    await destination.beginImport(id, 1, 'text-move', destinationName, ['wide_text']);
+    const chunk = await owner.chunk(id, 1, 'text-move', 0, false);
+    await destination.receive(id, chunk, 0);
+    check(JSON.stringify(await destination.relocationTextRows()) === JSON.stringify(before), 'valid multibyte or replacement character changed in relocation');
+   }
+  }
   for (const value of ['positive', 'negative']) {
    const owner = env.PROJECT.getByName(`nonfinite-${value}-${n}`);
    await owner.init(`nonfinite-${value}`, `nonfinite-${value}-${n}`); await owner.seedReal(`nonfinite-${value}`, value); await owner.freeze(`nonfinite-${value}`, 1, 'nonfinite-move');

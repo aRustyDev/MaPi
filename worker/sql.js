@@ -365,6 +365,34 @@ export function execute(storage, { statement, args, query }) {
   return { columns, rows };
 }
 
+// Relocation selects one row by its primary-key order inside a synchronous
+// storage transaction. Check stored TEXT bytes before the normal Workerd
+// result conversion can replace malformed bytes with U+FFFD. Keeping the
+// validation projection separate avoids adding columns or bytes to the row.
+export function readRelocationRow(storage, names, source, args) {
+  const columns = names.map(name => '"' + name.replaceAll('"', '""') + '"');
+  const textColumns = columns.map(column => `CASE typeof(${column}) WHEN 'text' THEN CAST(${column} AS BLOB) END`);
+  const { sql, values } = bind(`SELECT ${textColumns.join(', ')} ${source}`, args);
+  const row = storage.sql.exec(sql, ...values).raw().toArray()[0];
+  if (!row) return undefined;
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const sliceBytes = 64 * 1024;
+  try {
+    for (const cell of row) {
+      if (cell === null) continue;
+      const bytes = new Uint8Array(cell);
+      for (let start = 0; start < bytes.length; start += sliceBytes) {
+        decoder.decode(bytes.subarray(start, start + sliceBytes), { stream: true });
+      }
+      decoder.decode();
+    }
+  } catch {
+    throw new Error("Invalid UTF-8 TEXT in relocation row");
+  }
+  return execute(storage, { statement: `SELECT ${columns.join(', ')} ${source}`, args, query: true }).rows[0];
+}
+
 export function sqliteError(error) {
   const message = error instanceof Error ? error.message : String(error);
   const codes = [

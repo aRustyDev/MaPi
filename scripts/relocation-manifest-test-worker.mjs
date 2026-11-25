@@ -34,6 +34,11 @@ export class ManifestProject extends NextgenApplication {
   destination(manifest) { return inspectRelocationDestination(this.ctx.storage, manifest); }
   restoreMetadata(manifest) { return restoreRelocationMetadata(this.ctx.storage, manifest); }
   digest(manifest, role, table, cursor) { return digestRelocationPage(this.ctx.storage, manifest, role, table, cursor); }
+  installTextDigestFixtures() {
+    const sql = this.ctx.storage.sql;
+    sql.exec('CREATE TABLE test_relocation_text (id INTEGER PRIMARY KEY, value TEXT)');
+    sql.exec("INSERT INTO test_relocation_text VALUES (1, CAST(X'80' AS TEXT)), (2, CAST(X'EFBFBD' AS TEXT)), (3, 'é😀')");
+  }
   installRealDigestFixtures() {
     this.ctx.storage.sql.exec('CREATE TABLE test_real_infinity (id INTEGER PRIMARY KEY, value REAL)');
     this.ctx.storage.sql.exec('INSERT INTO test_real_infinity VALUES (1, 1e999), (2, -1e999)');
@@ -212,6 +217,11 @@ export default {
       const left = await source.digest(manifest, 'source', 'events', null);
       const right = await target.digest(manifest, 'destination', 'events', null);
       check(left.digest !== right.digest || left.count !== right.count, 'Missing audit rows were not detected');
+      await source.installTextDigestFixtures();
+      const textManifest = { version: 1, ...route, moveId: 'move', tables: ['test_relocation_text'] };
+      await reject(() => source.digest(textManifest, 'source', 'test_relocation_text', null), 'Invalid UTF-8 TEXT');
+      const validTextDigest = await source.digest(textManifest, 'source', 'test_relocation_text', [{ integer: '1' }]);
+      check(validTextDigest.count === 2 && validTextDigest.done === true, 'valid TEXT digest was rejected');
       await source.installRealDigestFixtures();
       const realManifest = { version: 1, ...route, moveId: 'move', tables: ['test_real_infinity', 'test_real_null'] };
       await reject(() => source.digest(realManifest, 'source', 'test_real_infinity', null), 'Non-finite REAL');
