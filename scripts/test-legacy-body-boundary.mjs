@@ -18,7 +18,7 @@ const modules = {
   './login-ui.js': { renderLogin: noop },
   './flow-proxy.js': { handleFlowProxy: noop },
   './oauth-ingress.js': { handleOAuthIngress: noop, isOAuthRoute: () => false },
-  './runtime-diagnostics.js': { logOverload: noop, logReactorLifecycle: noop, observeWasmHighWater: noop },
+  './runtime-diagnostics.js': { logOverload: noop, logReactorLifecycle: noop, logRuntimeDiagnostic: noop, logRuntimeError: noop, observeWasmHighWater: noop },
   './flow-diagnostics.js': { classifyFlowSubmission: noop },
   './owner-fence.js': { assertOwnerFence: noop, createOwnerFenceTable: noop, freezeOwnerFence: noop, initializeOwnerFence: noop, reserveMoveDestination: noop, retireOwnerFence: noop, withOwnerFence: noop },
   './relocation-source-identity.js': { sourceIdentityMatches: noop },
