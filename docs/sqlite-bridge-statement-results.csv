@@ -107,7 +107,7 @@ TestIDPConnectionStatements_CreateAndGet,pass,pass,0,0
 TestIDPConnectionStatements_FailedCreateLeavesNothing,pass,pass,0,0
 TestIDPConnectionStatements_GetMissesAreNoRowFound,pass,pass,0,0
 TestIDPConnectionStatements_LateReviseInEarlyTransactionStampsLast,pass,pass,0,0
-TestIDPConnectionStatements_ListFiltersBySlugAndCreatedAt,pass,pass,0,2
+TestIDPConnectionStatements_ListFiltersBySlugAndCreatedAt,pass,pass,0,1
 TestIDPConnectionStatements_ListIsProjectScopedOldestFirst,pass,pass,0,0
 TestIDPConnectionStatements_ListRevisionsNewestFirst,pass,pass,0,0
 TestIDPConnectionStatements_ListServesLatestDocument,pass,pass,0,0
@@ -169,7 +169,7 @@ TestProjectStatements_Create,pass,pass,0,0
 TestProjectStatements_Delete,pass,pass,0,0
 TestProjectStatements_Delete_removesResourceScope,pass,pass,0,0
 TestProjectStatements_Get,pass,pass,0,0
-TestProjectStatements_List,pass,pass,0,1
+TestProjectStatements_List,pass,pass,0,0
 TestProjectStatements_ListCursorTie,pass,pass,0,0
 TestProjectStatements_LockProject,pass,pass,0,0
 TestProjectStatements_PasswordHashPolicy,pass,pass,0,0

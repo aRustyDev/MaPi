@@ -44,9 +44,26 @@ as exit code zero for the selected suite, concurrent-owner, and bulk tests.
 `node scripts/test-upstream-sqlite-test-result.mjs` checks that absent, skipped,
 similarly named, failing, and nonzero-exit results do not count as passing.
 
+### Final bounded-contract candidate
+
+The [final per-test matrix](sqlite-bridge-statement-results.csv) covers MaPi
+`4e76f307ddf29bf63de1baaaa77f96876f4a39ec` and Nextgen
+`b0b74cd4a198428ea9b82910c217259ffc62b65c` with Go 1.26.9, Node 26.9.0,
+Wrangler 4.165.0 and workerd 1.20261118.1. Native SQLite passed 285/285,
+including both connection-lock schedules. The native dialect and migration
+packages also passed. Local workerd passed 283/285 with the two documented
+held-lock failures. The independent concurrent-owner and escaped-rows checks
+passed with strict test classification. All 39 workerd migrations and the
+production-tagged owner fence test passed.
+
+Names, outcomes and per-test workerd exit codes match the earlier run.
+Four passing tests used simulated timer polls. The IDP list test used one poll
+and the project list test used zero in this run. This evidence covers local
+statement behavior and leaves hosted runtime measurements in #4.
+
 ### Pinned statement rerun after the wide RETURNING fix
 
-The [per-test results](sqlite-bridge-statement-results.csv) map all 285 original
+The [earlier per-test results](https://github.com/aRustyDev/MaPi/blob/8dac39430ba7e6dff8d82543f241878c040af6c9/docs/sqlite-bridge-statement-results.csv) map all 285 original
 pinned statement functions on MaPi `5d0b6dd70d26e66768f04ab35f05fa6096647c1a`
 and Nextgen `b0b74cd4a198428ea9b82910c217259ffc62b65c`. The local run used
 Go 1.26.9, Node 26.9.0, Wrangler 4.165.0 and workerd 1.20261118.1. The native

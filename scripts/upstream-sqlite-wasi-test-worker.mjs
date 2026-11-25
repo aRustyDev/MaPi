@@ -3,7 +3,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { isLocalSQLiteTestRequest } from './upstream-sqlite-local-guard.mjs';
 import wasm from '../worker/generated/upstream-sqlite-stmttest.wasm';
 import baseline from '../worker/generated/baseline.json';
-import { execute, sqliteError } from '../worker/sql.js';
+import { execute, sqliteHost } from '../worker/sql.js';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -20,7 +20,6 @@ export class UpstreamSQLiteTest extends DurableObject {
       });
     }
     let instance;
-    let resultBytes;
     let exitCode;
     let logs = '';
     let advancedNanos = 0n;
@@ -108,14 +107,8 @@ export class UpstreamSQLiteTest extends DurableObject {
     }
     const storage = this.ctx.storage;
     const host = {
-      sql(pointer, size) {
-        const query = JSON.parse(decoder.decode(new Uint8Array(memory(), pointer, size)));
-        let result;
-        try { result = execute(storage, query); } catch (error) { result = { error: sqliteError(error) }; }
-        resultBytes = encoder.encode(JSON.stringify(result));
-        return resultBytes.length;
-      },
-      result(pointer, size) { new Uint8Array(memory(), pointer, size).set(resultBytes); resultBytes = undefined; },
+      ...sqliteHost(memory, (pointer, size) => instance.exports.mapi_sql_frame(pointer, size),
+        (query, resultSink) => execute(storage, query, resultSink)),
       transaction() {
         try {
           storage.transactionSync(() => {

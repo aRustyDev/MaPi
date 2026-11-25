@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"unsafe"
 )
 
@@ -52,13 +53,61 @@ func Transaction(fn func() error) error {
 	return callbackError
 }
 
-func callSQL(input any, output any) error {
+type frameReceiver struct {
+	buffer   *[resultFrameBytes]byte
+	snapshot *frameSnapshot
+}
+
+var activeReceivers sync.Map
+var reusableFrameBuffer = sync.Pool{New: func() any { return new([resultFrameBytes]byte) }}
+
+//go:wasmexport mapi_sql_frame
+func receiveSQLFrame(pointer, size uint32) uint32 {
+	value, ok := activeReceivers.Load(pointer)
+	if !ok || size == 0 || size > resultFrameBytes {
+		return 1
+	}
+	receiver := value.(frameReceiver)
+	if !receiver.snapshot.receive(receiver.buffer[:size]) {
+		return 2
+	}
+	return 0
+}
+
+func callSQL(input sqlRequest, output *sqlResponse) error {
+	var snapshot *frameSnapshot
+	if input.Query {
+		buffer := reusableFrameBuffer.Get().(*[resultFrameBytes]byte)
+		snapshot = new(frameSnapshot)
+		input.FramePointer = uint32(uintptr(unsafe.Pointer(buffer)))
+		activeReceivers.Store(input.FramePointer, frameReceiver{buffer, snapshot})
+		defer func() {
+			activeReceivers.Delete(input.FramePointer)
+			clear(buffer[:])
+			reusableFrameBuffer.Put(buffer)
+			if output.snapshot != snapshot {
+				snapshot.close()
+			}
+		}()
+	}
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return err
 	}
 	size := hostSQL(unsafe.Pointer(&encoded[0]), uint32(len(encoded)))
+	if size == 0 {
+		return errors.New("missing SQLite response")
+	}
 	result := make([]byte, size)
 	hostResult(unsafe.Pointer(&result[0]), size)
-	return json.Unmarshal(result, output)
+	if err := json.Unmarshal(result, output); err != nil {
+		return err
+	}
+	if output.FrameRows != nil && output.Error == nil {
+		if snapshot == nil || len(output.Rows) != 0 || (*output.FrameRows == 0) != (snapshot.remaining == 0) {
+			return errors.New("invalid framed SQLite response")
+		}
+		output.snapshot = snapshot
+	}
+	return nil
 }

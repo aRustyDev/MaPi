@@ -15,14 +15,18 @@ function packedColumn(column) {
     ") WHEN " + type + " = 'text' THEN 't' || " + column + " ELSE " + column + " END";
 }
 
-function decodePacked(encoded) {
+function jsonBlob(bytes) {
+  return { blob: bytes.toBase64() };
+}
+
+function decodePacked(encoded, formatBlob) {
   if (typeof encoded === "string") {
     if (encoded[0] === "i") return { integer: encoded.slice(1) };
     if (encoded[0] === "t") return encoded.slice(1);
     throw new Error("Unexpected wide SQLite value tag");
   }
   if (encoded === null || typeof encoded === "number") return encoded;
-  return { blob: new Uint8Array(encoded).toBase64() };
+  return formatBlob(new Uint8Array(encoded));
 }
 
 const sparseZeroNodeLimit = 2048;
@@ -154,7 +158,7 @@ function terseReturningColumn(column) {
 
 const terseMarkerBytes = [77, 97, 80, 105, 35, 57, 33, 64, 63];
 
-function decodeReturning(value, unified = false, terse = false) {
+function decodeReturning(value, unified = false, terse = false, formatBlob = jsonBlob) {
   if (typeof value === 'string' || typeof value === 'number' || value === null) return value;
   const blob = new Uint8Array(value);
   const widths = [0, 1, 2, 3, 4, 6, 8];
@@ -182,7 +186,7 @@ function decodeReturning(value, unified = false, terse = false) {
       while (blob[position] === 81) position++; // literal Q bytes
       const header = '@MaPiRun1';
       const hasHeader = [...header].every((c, i) => blob[position + i] === c.charCodeAt(0));
-      if (hasHeader && markers > 1) return { blob: blob.subarray(9).toBase64() };
+      if (hasHeader && markers > 1) return formatBlob(blob.subarray(9));
       if (hasHeader && markers === 1 && position === 9) {
         const sentinel = blob[position + header.length];
         if (sentinel === 75) {
@@ -207,7 +211,7 @@ function decodeReturning(value, unified = false, terse = false) {
             seen.add(offset);
             expanded[prefixLength + offset] = value;
           }
-          return { blob: expanded.toBase64() };
+          return formatBlob(expanded);
         }
         if (sentinel === 74) {
           const start = position + header.length + 1;
@@ -219,7 +223,7 @@ function decodeReturning(value, unified = false, terse = false) {
           const expanded = new Uint8Array(payload.length + count);
           expanded.set(payload.subarray(0, prefixLength));
           expanded.set(payload.subarray(prefixLength), prefixLength + count);
-          return { blob: expanded.toBase64() };
+          return formatBlob(expanded);
         }
         if (sentinel < 65 || sentinel > 73) throw new Error('Invalid sparse SQLite BLOB sentinel');
         const payload = blob.subarray(position + header.length + 1);
@@ -231,7 +235,7 @@ function decodeReturning(value, unified = false, terse = false) {
           if (byte === sentinel) { expanded[out] = 255; out += 9; }
           else expanded[out++] = byte;
         }
-        return { blob: expanded.toBase64() };
+        return formatBlob(expanded);
       }
     }
     // Two bounded marker runs encode the high count, suffix bytes and flag.
@@ -258,7 +262,7 @@ function decodeReturning(value, unified = false, terse = false) {
         } else {
           repeated.set(blob.subarray(position, position + tail), count * 9);
         }
-        return { blob: repeated.toBase64() };
+        return formatBlob(repeated);
       }
     }
   } else if (!terse) {
@@ -278,7 +282,7 @@ function decodeReturning(value, unified = false, terse = false) {
         repeated[count * 9] = (first - 1) % 256;
         repeated[count * 9 + 1] = second - 1;
         repeated.set(blob.subarray(position), count * 9 + 2);
-        return { blob: repeated.toBase64() };
+        return formatBlob(repeated);
       }
     }
     // A compact tag is marker + two low count bytes + one or more markers
@@ -300,7 +304,7 @@ function decodeReturning(value, unified = false, terse = false) {
         const repeated = new Uint8Array(count * 9 + tail);
         for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
         repeated.set(blob.subarray(position, position + tail), count * 9);
-        return { blob: repeated.toBase64() };
+        return formatBlob(repeated);
       }
     }
   }
@@ -313,7 +317,7 @@ function decodeReturning(value, unified = false, terse = false) {
     }
     escaped = position === blob.length && widths.includes(remainder);
   }
-  return { blob: (escaped ? blob.subarray(9) : blob).toBase64() };
+  return formatBlob(escaped ? blob.subarray(9) : blob);
 }
 
 function bind(statement, args) {
@@ -336,9 +340,9 @@ function bind(statement, args) {
   return { sql, values };
 }
 
-function decodePair(value, type) {
+function decodePair(value, type, formatBlob) {
   if (type === "integer") return { integer: value };
-  if (type === "blob") return { blob: new Uint8Array(value).toBase64() };
+  if (type === "blob") return formatBlob(new Uint8Array(value));
   return value;
 }
 
@@ -438,14 +442,196 @@ function adaptSearchEntriesMigration(statement) {
   return statement.slice(0, start) + "\nSELECT * FROM (" + first + ")\nUNION ALL\nSELECT * FROM (" + second + ")" + statement.slice(end);
 }
 
-export function execute(storage, { statement, args, query }) {
+// Returning mutations share 4 MiB of logical payload across at most 64
+// selected rows. SELECT uses a co-routine source with the same per-row ceiling.
+// The Go receiver caps each snapshot and all outstanding snapshots.
+const resultPayloadBytes = 4 * 1024 * 1024;
+const maxReturningRows = 64;
+const maxSelectRows = 4096;
+const maxColumnNameBytes = 128 * 1024;
+const resultSizePath = "$mapi_result_bytes";
+const exactTextDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+// A single output cell carries its type without inspecting an imprecise JS
+// number. TEXT and BLOB are disjoint tagged byte sequences, INTEGER is
+// decimal text, and only SQLite REAL crosses the bridge as a JS number.
+function boundedColumn(name) {
+  return `(SELECT CASE typeof(v) WHEN 'integer' THEN printf('%lld',v)` +
+    ` WHEN 'text' THEN CAST(X'54'||v AS BLOB) WHEN 'blob' THEN CAST(X'42'||v AS BLOB)` +
+    ` ELSE v END FROM (SELECT ${name} AS v))`;
+}
+
+function boundedProjection(columns, limit) {
+  const encoded = columns.map(boundedColumn);
+  // Group additions so a wide projection fits SQLite's expression-depth limit.
+  const groups = [];
+  for (let i = 0; i < columns.length; i += 10) {
+    groups.push("(" + columns.slice(i, i + 10).map(name => `coalesce(length(CAST(${name} AS BLOB)),0)`).join("+") + ")");
+  }
+  encoded[0] = `CASE WHEN ${groups.join("+")}>${limit} THEN json_extract('{}','${resultSizePath}') ELSE ${encoded[0]} END`;
+  return encoded.join(", ");
+}
+
+function decodeBounded(value) {
+  if (value === null || typeof value === "number") return value;
+  if (typeof value === "string") return { integer: value };
+  const bytes = new Uint8Array(value);
+  if (bytes[0] === 66) return bytes.subarray(1);
+  if (bytes[0] === 84) return exactTextDecoder.decode(bytes.subarray(1));
+  throw new Error("Invalid MaPi SQLite result type");
+}
+
+function resultColumnNames(columns) {
+  if (!columns.length || columns.length > 100 ||
+      columns.reduce((total, name) => total + frameEncoder.encode(name).length, 0) > maxColumnNameBytes) {
+    throw new Error("MaPi SQLite result column metadata limit exceeded");
+  }
+}
+
+function returningInsertRows(sql, tokens, verb, returningToken) {
+  const source = tokens.filter(token => token.start > verb.end && token.start < returningToken.start);
+  const values = source.findIndex(token => token.word === "VALUES" || token.word === "SELECT");
+  if (source[values]?.word !== "VALUES") {
+    // The pinned password insert uses an ungrouped aggregate. It emits one
+    // row even when there is no password history and takes the write lock
+    // before reading that history.
+    const normalized = returningProjection(sql.slice(verb.start, returningToken.start))
+      .toLowerCase().replace(/cast\(\?(\d+) as integer\)/g, "?$1").replace(/\s+/g, " ").trim();
+    if (normalized === "insert into user_passwords ( project_id, id, user_id, encoded_hash, created_at ) select ?1, ?2, ?3, ?4, max(?5, ifnull(max(created_at) + 1000, 0)) from user_passwords where project_id = ?6 and user_id = ?7") return 1;
+    throw new Error("MaPi SQLite RETURNING requires an admitted INSERT source");
+  }
+  if (source[values - 1]?.word === "DEFAULT") return 1;
+  let i = values + 1;
+  let rows = 0;
+  while (source[i]?.word === "(" && source[i + 1]?.word === ")") {
+    rows++;
+    i += 2;
+    if (source[i]?.word !== ",") break;
+    i++;
+  }
+  if (!rows || (source[i] && source[i].word !== "ON")) {
+    throw new Error("MaPi SQLite RETURNING requires a finite VALUES list");
+  }
+  if (rows > maxReturningRows) throw new Error("MaPi SQLite RETURNING row limit exceeded");
+  return rows;
+}
+
+// Capture the actual candidate rowids once inside the write transaction.
+// The mutation can affect only those identities, including when a predicate
+// is volatile or a trigger changes whether other rows match it.
+function boundedReturningTargets(storage, sql, tokens, verb, returningToken, values) {
+  const prefix = sql.slice(verb.start, returningToken.start);
+  const target = (verb.word === "DELETE" ? /^DELETE\s+FROM\s+([a-z_]\w*)\b/di : /^UPDATE\s+([a-z_]\w*)\s+SET\b/di).exec(prefix);
+  const inner = tokens.filter(token => token.start >= verb.start + (target?.[0].length ?? 0) && token.start < returningToken.start);
+  const where = inner.find(token => token.word === "WHERE");
+  if (!target || inner.some(token => token.word === "FROM" || token.word === "ORDER" || token.word === "LIMIT")) {
+    throw new Error("MaPi SQLite RETURNING requires a simple rowid mutation");
+  }
+  if (verb.word === "DELETE" && returningProjection(sql.slice(verb.start + target[0].length, where?.start ?? returningToken.start)).trim()) {
+    throw new Error("MaPi SQLite RETURNING requires an unqualified DELETE target");
+  }
+  const name = target[1];
+  const table = `main."${name}"`;
+  const tables = storage.sql.exec("SELECT sql FROM main.sqlite_schema WHERE name=? COLLATE NOCASE AND type='table'", name).toArray();
+  if (tables.length !== 1 || !/^CREATE TABLE\b/i.test(tables[0].sql) ||
+      storage.sql.exec(`PRAGMA main.table_xinfo("${name}")`).toArray().some(column => column.name.toLowerCase() === "_rowid_")) {
+    throw new Error("MaPi SQLite RETURNING requires an unshadowed rowid");
+  }
+  const predicate = where ? sql.slice(where.end, returningToken.start) : "1";
+  // Retain the original numbered-parameter count without evaluating any
+  // parameters removed from the preflight query or rewritten mutation.
+  const preserveBindings = values.length ? ` AND CASE WHEN 0 THEN ?${values.length} ELSE 1 END` : "";
+  const rows = storage.sql.exec(`SELECT printf('%lld',_rowid_) FROM ${table} WHERE (${predicate}
+)${preserveBindings} LIMIT ${maxReturningRows + 1}`, ...values).raw().toArray();
+  if (rows.length > maxReturningRows) throw new Error("MaPi SQLite RETURNING row limit exceeded");
+  const ids = rows.map(([id]) => {
+    if (!/^-?\d+$/.test(id)) throw new Error("Invalid MaPi SQLite rowid");
+    return id;
+  });
+  const [start, end] = target.indices[1].map(index => index + verb.start);
+  const write = sql.slice(0, start) + table + sql.slice(end, where?.start ?? returningToken.start);
+  return { rows: rows.length, prefix: `${write}
+ WHERE _rowid_ IN (${ids.join(",")})${preserveBindings} RETURNING ` };
+}
+
+function streamBounded(storage, statement, values, columns, rowLimit, sink) {
+  if (frameEncoder.encode(statement).length > 100_000) throw new Error("MaPi SQLite rewritten statement exceeds SQL byte limit");
+  const cursor = storage.sql.exec(statement, ...values);
+  const raw = cursor.raw();
+  let frameRows = 0;
+  try {
+    for (const row of raw) {
+      if (++frameRows > rowLimit) throw new Error("MaPi SQLite result row limit exceeded");
+      sink.writeRow(row.map(decodeBounded));
+    }
+    sink.finish();
+    return { columns, frameRows };
+  } catch (error) {
+    // Older workerd runtimes expose only draining. The SQL statement itself
+    // bounds the number of additional rows that may be drained.
+    try {
+      if (typeof cursor.close === "function") cursor.close();
+      else for (const _row of raw) { /* Discard pending rows. */ }
+    } catch { /* Preserve the original failure. */ }
+    throw error;
+  }
+}
+
+function executeBounded(storage, sql, values, tokens, verb, returningToken, returning, sink) {
+  if (returning) {
+    const columns = returning[1].split(/\s*,\s*/);
+    resultColumnNames(columns);
+    if (tokens[0] !== verb) throw new Error("MaPi SQLite RETURNING requires a direct mutation");
+    return storage.transactionSync(() => {
+      let prefix, rows;
+      if (verb.word === "INSERT" || verb.word === "REPLACE") {
+        rows = returningInsertRows(sql, tokens, verb, returningToken);
+        prefix = sql.slice(0, returningToken.start) + "RETURNING ";
+      } else {
+        ({ rows, prefix } = boundedReturningTargets(storage, sql, tokens, verb, returningToken, values));
+      }
+      const limit = Math.floor(resultPayloadBytes / Math.max(rows, 1));
+      return streamBounded(storage, prefix + boundedProjection(columns, limit), values, columns, rows, sink);
+    });
+  }
+  if (verb?.word !== "SELECT") throw new Error("Unsupported row-producing SQLite statement");
+
+  const metadata = storage.sql.exec(metadataQuery(sql, tokens, verb), ...values);
+  const columns = metadata.columnNames;
+  for (const _row of metadata.raw()) { /* Release the zero-row cursor. */ }
+  resultColumnNames(columns);
+  const aliases = columns.map((_column, i) => "column_" + i);
+  let source = "mapi_rows";
+  while (new RegExp("\\b" + source + "\\b", "i").test(sql)) source += "_";
+
+  // OFFSET keeps SQLite from flattening the source into its outer typed
+  // projection. The source is scanned once and never materialized just to
+  // encode it. The extra row reports exhaustion without truncating the result.
+  const prepared = `WITH ${source}(${aliases.join(", ")}) AS NOT MATERIALIZED (` +
+    `SELECT * FROM (
+${sql.trim()}
+) LIMIT -1 OFFSET 0) SELECT ` +
+    boundedProjection(aliases, resultPayloadBytes) + ` FROM ${source} LIMIT ${maxSelectRows + 1}`;
+  return streamBounded(storage, prepared, values, columns, maxSelectRows, sink);
+}
+
+export function execute(storage, { statement, args, query }, resultSink) {
   statement = adaptSearchEntriesMigration(statement);
   const bound = bind(statement, args);
   const values = bound.values;
   const sql = query ? singleQueryStatement(bound.sql) : bound.sql;
   if (!query) {
+    if (resultSink === null) {
+      const tokens = queryTokens(sql);
+      if (tokens.some(token => token.word === "RETURNING")) throw new Error("MaPi SQLite RETURNING requires query mode");
+      if (["SELECT", "VALUES", "EXPLAIN"].includes(queryVerb(tokens)?.word)) {
+        throw new Error("MaPi SQLite reads require query mode");
+      }
+    }
     const cursor = storage.sql.exec(sql, ...values);
-    cursor.toArray();
+    if (resultSink === null) {
+      for (const _row of cursor.raw()) { /* Exec callers discard result rows. */ }
+    } else cursor.toArray();
     // rowsWritten is a billing counter that also includes index writes.
     // database/sql requires SQLite's logical affected-row count instead.
     const changes = storage.sql.exec("SELECT changes() AS count").one().count;
@@ -457,6 +643,9 @@ export function execute(storage, { statement, args, query }) {
   const kind = verb?.word ?? "";
   const returningToken = ["INSERT", "UPDATE", "DELETE", "REPLACE"].includes(kind) ? tokens.find(token => token.start > verb.end && token.word === "RETURNING") : undefined;
   const returning = returningToken ? /^\s*([a-z_]\w*(?:\s*,\s*[a-z_]\w*)*)\s*$/i.exec(returningProjection(sql.slice(returningToken.end))) : null;
+  if (resultSink) {
+    return executeBounded(storage, sql, values, tokens, verb, returningToken, returning, resultSink);
+  }
   let columns;
   let prepared;
   let wide;
@@ -507,16 +696,136 @@ export function execute(storage, { statement, args, query }) {
     prepared = "WITH " + rowSource + "(" + aliases.join(", ") + ") AS MATERIALIZED (" + sql.trim() +
       "\n) SELECT " + aliases.map(wide ? packedColumn : columnPair).join(", ") + " FROM " + rowSource;
   }
-  const rows = storage.sql.exec(prepared, ...values).raw().toArray().map((row) =>
-    columns.map((_column, index) => isReturning ? decodeReturning(row[index], unified, terse) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
+  const rows = storage.sql.exec(prepared, ...values).raw().toArray().map(row =>
+    columns.map((_column, index) => {
+      if (isReturning) return decodeReturning(row[index], unified, terse);
+      if (wide) return decodePacked(row[index], jsonBlob);
+      return decodePair(row[index * 2], row[index * 2 + 1], jsonBlob);
+    }));
   return { columns, rows };
 }
 
 export function sqliteError(error) {
-  const message = error instanceof Error ? error.message : String(error);
+  let message = error instanceof Error ? error.message : String(error);
+  if (message.includes(resultSizePath) && /json path/i.test(message)) message = "MaPi SQLite result row byte limit exceeded";
   const codes = [
     [/UNIQUE constraint failed/, 2067], [/FOREIGN KEY constraint failed/, 787],
     [/NOT NULL constraint failed/, 1299], [/CHECK constraint failed/, 275],
+    [/MaPi SQLite (?:result|RETURNING).*limit exceeded/, 18],
   ];
   return { message, code: codes.find(([match]) => match.test(message))?.[1] ?? 0 };
+}
+
+const frameEncoder = new TextEncoder();
+const frameDecoder = new TextDecoder();
+const frameBytes = 32 * 1024;
+
+// The receiver supplies a reusable scratch region. Go callbacks may grow its
+// memory, so every flush invalidates the JavaScript view of that region.
+function resultSink(memory, receiveFrame, pointer) {
+  let bytes = new Uint8Array(memory(), pointer, frameBytes);
+  let view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let used = 0;
+
+  function flush() {
+    if (!used) return;
+    const status = receiveFrame(pointer, used);
+    if (status === 2) throw new Error("MaPi SQLite result snapshot byte limit exceeded");
+    if (status !== 0) throw new Error("SQLite result frame was rejected");
+    used = 0;
+    bytes = new Uint8Array(memory(), pointer, frameBytes);
+    view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
+
+  function reserve(size) {
+    if (used + size > bytes.length) flush();
+    const start = used;
+    used += size;
+    return start;
+  }
+
+  function writeText(value) {
+    // Each UTF-8 segment has a little-endian uint16 byte length. A zero
+    // length terminates the cell. Do not split a UTF-16 surrogate pair.
+    for (let offset = 0; offset < value.length;) {
+      if (bytes.length - used < 6) flush();
+      const start = used + 2;
+      let end = Math.min(value.length, offset + bytes.length - start);
+      const last = value.charCodeAt(end - 1);
+      if (end < value.length && last >= 0xd800 && last <= 0xdbff) end--;
+      const { read, written } = frameEncoder.encodeInto(value.slice(offset, end), bytes.subarray(start));
+      view.setUint16(used, written, true);
+      used = start + written;
+      offset += read;
+    }
+    const end = reserve(2);
+    view.setUint16(end, 0, true);
+  }
+
+  function writeBlob(value) {
+    const lengthOffset = reserve(4);
+    view.setUint32(lengthOffset, value.length, true);
+    for (let offset = 0; offset < value.length;) {
+      if (used === bytes.length) flush();
+      const count = Math.min(bytes.length - used, value.length - offset);
+      bytes.set(value.subarray(offset, offset + count), used);
+      used += count;
+      offset += count;
+    }
+  }
+
+  return {
+    writeRow(row) {
+      for (const value of row) {
+        const tag = reserve(1);
+        if (value === null) {
+          bytes[tag] = 0;
+        } else if (typeof value === "number") {
+          bytes[tag] = 2;
+          const offset = reserve(8);
+          view.setFloat64(offset, value, true);
+        } else if (typeof value === "string") {
+          bytes[tag] = 3;
+          writeText(value);
+        } else if (value instanceof Uint8Array) {
+          bytes[tag] = 4;
+          writeBlob(value);
+        } else {
+          bytes[tag] = 1;
+          const offset = reserve(8);
+          view.setBigInt64(offset, BigInt(value.integer), true);
+        }
+      }
+    },
+    finish: flush,
+  };
+}
+
+// Application reads always use bounded frames. The ordinary JSON envelope
+// carries metadata, write counts and errors.
+export function sqliteHost(memory, receiveFrame, runQuery, logError) {
+  let response;
+  return {
+    sql(pointer, size) {
+      const query = JSON.parse(frameDecoder.decode(new Uint8Array(memory(), pointer, size)));
+      let result;
+      try {
+        if (query.query && (!query.framePointer || !receiveFrame)) {
+          throw new Error("MaPi SQLite requires a framed result receiver");
+        }
+        const sink = query.query ? resultSink(memory, receiveFrame, query.framePointer) : null;
+        result = runQuery(query, sink);
+      } catch (error) {
+        logError?.(query, error);
+        result = { error: sqliteError(error) };
+      }
+      response = frameEncoder.encode(JSON.stringify(result));
+      return response.length;
+    },
+    result(pointer, size) {
+      new Uint8Array(memory(), pointer, size).set(response);
+      response.fill(0);
+      response = undefined;
+    },
+  };
 }

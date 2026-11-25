@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import baseline from "./generated/baseline.json";
 import wasm from "./wasm-module.js";
 import { instantiateReactor } from "./wasi.js";
-import { execute, sqliteError } from "./sql.js";
+import { execute, sqliteHost } from "./sql.js";
 import { canonicalOrigin, ProjectRegistry } from "./registry.js";
 import { renderLogin } from "./login-ui.js";
 import { handleFlowProxy } from "./flow-proxy.js";
@@ -611,44 +611,31 @@ export class NextgenApplication extends DurableObject {
       try { logReactorLifecycle(diagnostics, phase, this.#bootId, diagnostics ? this.ctx.id.toString() : undefined, attempt, this.#reactorInitializations, this.#wasmHighWaterBytes); } catch {}
     };
     logLifecycle("start");
-    let output;
     try {
       this.#reactor = instantiateReactor(wasm, (memory) => {
         this.#memory = memory;
         return {
-          sql: (ptr, size) => {
-            const query = JSON.parse(decoder.decode(new Uint8Array(memory(), ptr, size)));
-            let result;
-            try {
-              if (this.#failAudit > 0 && /\bINSERT INTO events\b/i.test(query.statement)) {
-                this.#failAudit--;
-                if (this.#failAudit === 0) throw new Error("Injected mutation audit write failure");
-              }
-              if (this.#recoveryAuthority && this.#insideTransaction) { this.#assertRecoveryInvalidation(); result = execute(this.ctx.storage, query); }
-              else if (this.#recoveryAuthority) result = this.ctx.storage.transactionSync(() => { this.#assertRecoveryInvalidation(); return execute(this.ctx.storage, query); });
-              else if (this.#pendingAuthority && this.#insideTransaction) { this.#assertPendingAuthority(); result = execute(this.ctx.storage, query); }
-              else if (this.#pendingAuthority) result = this.ctx.storage.transactionSync(() => { this.#assertPendingAuthority(); return execute(this.ctx.storage, query); });
-              else if (!this.#fenceArmed && this.#recoveryObjectEpoch === null) result = execute(this.ctx.storage, query);
-              else if (!this.#fenceArmed) result = this.ctx.storage.transactionSync(() => { this.#assertRecoveryObjectEpoch(); return execute(this.ctx.storage, query); });
-              else if (this.#insideTransaction) {
-                this.#assertRecoveryObjectEpoch();
-                assertOwnerFence(this.ctx.storage, this.#authority);
-                result = execute(this.ctx.storage, query);
-              } else {
-                result = withOwnerFence(this.ctx.storage, this.#authority, () => { this.#assertRecoveryObjectEpoch(); return execute(this.ctx.storage, query); });
-              }
-            } catch (error) {
-              if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
-              result = { error: sqliteError(error) };
+          ...sqliteHost(memory, (pointer, size) => this.#reactor.mapi_sql_frame(pointer, size), (query, resultSink) => {
+            if (this.#failAudit > 0 && /\bINSERT INTO events\b/i.test(query.statement)) {
+              this.#failAudit--;
+              if (this.#failAudit === 0) throw new Error("Injected mutation audit write failure");
             }
-            output = encoder.encode(JSON.stringify(result));
-            return output.length;
-          },
-          result: (ptr, size) => {
-            new Uint8Array(memory(), ptr, size).set(output);
-            output.fill(0);
-            output = undefined;
-          },
+            const run = () => execute(this.ctx.storage, query, resultSink);
+            if (this.#recoveryAuthority && this.#insideTransaction) { this.#assertRecoveryInvalidation(); return run(); }
+            if (this.#recoveryAuthority) return this.ctx.storage.transactionSync(() => { this.#assertRecoveryInvalidation(); return run(); });
+            if (this.#pendingAuthority && this.#insideTransaction) { this.#assertPendingAuthority(); return run(); }
+            if (this.#pendingAuthority) return this.ctx.storage.transactionSync(() => { this.#assertPendingAuthority(); return run(); });
+            if (!this.#fenceArmed && this.#recoveryObjectEpoch === null) return run();
+            if (!this.#fenceArmed) return this.ctx.storage.transactionSync(() => { this.#assertRecoveryObjectEpoch(); return run(); });
+            if (this.#insideTransaction) {
+              this.#assertRecoveryObjectEpoch();
+              assertOwnerFence(this.ctx.storage, this.#authority);
+              return run();
+            }
+            return withOwnerFence(this.ctx.storage, this.#authority, () => { this.#assertRecoveryObjectEpoch(); return run(); });
+          }, (query, error) => {
+            if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
+          }),
           transaction: () => {
             try {
               this.ctx.storage.transactionSync(() => {

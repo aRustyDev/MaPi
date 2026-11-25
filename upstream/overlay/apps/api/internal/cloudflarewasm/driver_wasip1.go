@@ -31,11 +31,20 @@ type sqlValue struct {
 	Value any    `json:"value"`
 }
 
+type sqlRequest struct {
+	Statement    string     `json:"statement"`
+	Args         []sqlValue `json:"args"`
+	Query        bool       `json:"query"`
+	FramePointer uint32     `json:"framePointer,omitempty"`
+}
+
 type sqlResponse struct {
-	Columns []string            `json:"columns"`
-	Rows    [][]json.RawMessage `json:"rows"`
-	Changes int64               `json:"changes"`
-	Error   *SQLError           `json:"error"`
+	Columns   []string            `json:"columns"`
+	Rows      [][]json.RawMessage `json:"rows"`
+	Changes   int64               `json:"changes"`
+	Error     *SQLError           `json:"error"`
+	FrameRows *uint64             `json:"frameRows"`
+	snapshot  *frameSnapshot
 }
 
 type SQLError struct {
@@ -72,11 +81,7 @@ func execute(ctx context.Context, statement string, args []driver.NamedValue, qu
 		}
 	}
 	var response sqlResponse
-	err := callSQL(struct {
-		Statement string     `json:"statement"`
-		Args      []sqlValue `json:"args"`
-		Query     bool       `json:"query"`
-	}{statement, values, query}, &response)
+	err := callSQL(sqlRequest{Statement: statement, Args: values, Query: query}, &response)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +103,9 @@ func (conn) QueryContext(ctx context.Context, sql string, args []driver.NamedVal
 	result, err := execute(ctx, sql, args, true)
 	if err != nil {
 		return nil, err
+	}
+	if result.FrameRows != nil {
+		return &framedRows{columns: result.Columns, data: result.snapshot, remainingRows: *result.FrameRows}, nil
 	}
 	return &rows{columns: result.Columns, data: result.Rows}, nil
 }
