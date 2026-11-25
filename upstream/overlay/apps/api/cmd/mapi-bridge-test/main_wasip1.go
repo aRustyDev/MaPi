@@ -20,6 +20,20 @@ import (
 
 var output []byte
 
+//go:wasmexport check_bound_real_values
+func checkBoundREALValues() uint32 {
+	db := cloudflarewasm.Open()
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "CREATE TABLE bridge_types (id INTEGER PRIMARY KEY, value)"); err != nil {
+		return 1
+	}
+	if err := checkBoundREAL(ctx, db); err != nil {
+		return 2
+	}
+	return 0
+}
+
 //go:wasmexport check_relocation_real_values
 func checkRelocationREALValues(fragmented uint32) uint32 {
 	db := cloudflarewasm.Open()
@@ -389,6 +403,9 @@ func checkStoredValues(ctx context.Context, db *sql.DB) error {
 			}
 		}
 	}
+	if err := checkBoundREAL(ctx, db); err != nil {
+		return err
+	}
 	var first, second, repeated int64
 	if err := db.QueryRowContext(ctx, "SELECT ?2, ?1, ?2", int64(math.MinInt64), int64(math.MaxInt64)).Scan(&first, &second, &repeated); err != nil {
 		return err
@@ -420,6 +437,28 @@ func checkStoredValues(ctx context.Context, db *sql.DB) error {
 	}
 	if count != 0 {
 		return errors.New("unsupported RETURNING expression mutated data")
+	}
+	return nil
+}
+
+func checkBoundREAL(ctx context.Context, db *sql.DB) error {
+	for _, want := range []float64{math.Inf(1), math.Inf(-1), math.Copysign(0, -1), 1.5} {
+		var inserted, selected any
+		if err := db.QueryRowContext(ctx, "INSERT INTO bridge_types (id, value) VALUES (14, ?) RETURNING value", want).Scan(&inserted); err != nil {
+			return fmt.Errorf("bind SQLite REAL: %w", err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT value FROM bridge_types WHERE id = 14").Scan(&selected); err != nil {
+			return fmt.Errorf("read bound SQLite REAL: %w", err)
+		}
+		for _, value := range []any{inserted, selected} {
+			got, ok := value.(float64)
+			if !ok || math.Float64bits(got) != math.Float64bits(want) {
+				return fmt.Errorf("bound SQLite REAL changed: got %#v, want %v", value, want)
+			}
+		}
+		if _, err := db.ExecContext(ctx, "DELETE FROM bridge_types WHERE id = 14"); err != nil {
+			return err
+		}
 	}
 	return nil
 }

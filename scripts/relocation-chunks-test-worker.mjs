@@ -38,7 +38,7 @@ export class ChunkProject extends DurableObject {
   });
  }
  prepareRealFragments() { this.s.sql.exec('CREATE TABLE real_fragments (id TEXT PRIMARY KEY, value, payload BLOB)'); }
- verifyRealValuesThroughGo(fragmented) {
+ verifyRealValuesThroughGo(fragmented, bound = false) {
   let memory, output;
   const encoder = new TextEncoder(), decoder = new TextDecoder();
   const reactor = instantiateReactor(bridgeWasm, getMemory => {
@@ -56,7 +56,7 @@ export class ChunkProject extends DurableObject {
     transaction: () => { throw Error('Unexpected Go fixture transaction'); },
    };
   });
-  return reactor.check_relocation_real_values(fragmented ? 1 : 0);
+  return bound ? reactor.check_bound_real_values() : reactor.check_relocation_real_values(fragmented ? 1 : 0);
  }
  realRows(table = 'real_values') {
   if (!['real_values', 'real_fragments'].includes(table)) throw Error('Invalid REAL fixture table');
@@ -177,6 +177,8 @@ export class ChunkRegistry extends DurableObject {
 export default { async fetch(request, env) {
  try {
   const n = crypto.randomUUID(), a = `source-${n}`, b = `destination-${n}`, r = `registry-${n}`; let source = env.PROJECT.getByName(a), target = env.PROJECT.getByName(b); const registry = env.REGISTRY.getByName(r);
+  const bridge = env.PROJECT.getByName(`bridge-${n}`);
+  check(await bridge.verifyRealValuesThroughGo(false, true) === 0, 'Go/Wasm bound REAL values differ');
   const stale = env.PROJECT.getByName(`stale-${n}`); await stale.init('stale', `stale-${n}`);
   const beforeStale = await stale.controlSchema(), beforeState = await stale.status('stale'), beforeRows = await stale.evidence();
   await rejects(() => stale.beginExport('stale', 1, 'not-frozen'), 'unfrozen export initialization succeeded');

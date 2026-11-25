@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"strconv"
 )
 
@@ -67,6 +68,17 @@ func execute(ctx context.Context, statement string, args []driver.NamedValue, qu
 				integer = 1
 			}
 			values = append(values, sqlValue{"", integer})
+		case float64:
+			switch {
+			case math.IsInf(value, 1):
+				values = append(values, sqlValue{"real", "inf"})
+			case math.IsInf(value, -1):
+				values = append(values, sqlValue{"real", "-inf"})
+			case value == 0 && math.Signbit(value):
+				values = append(values, sqlValue{"real", "-0"})
+			default:
+				values = append(values, sqlValue{"", value})
+			}
 		default:
 			values = append(values, sqlValue{"", value})
 		}

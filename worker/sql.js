@@ -201,7 +201,15 @@ function bind(statement, args) {
     return args[index - 1].kind === "int" ? `CAST(${placeholder} AS INTEGER)` : placeholder;
   });
   if (highest !== args.length) throw new Error("SQLite argument count mismatch");
-  const values = args.map(({ kind, value }) => kind === "blob" ? Uint8Array.fromBase64(value).buffer : value);
+  const realValues = { inf: Infinity, "-inf": -Infinity, "-0": -0 };
+  const values = args.map(({ kind, value }) => {
+    if (kind === "blob") return Uint8Array.fromBase64(value).buffer;
+    if (kind === "real") {
+      if (typeof value !== "string" || !Object.hasOwn(realValues, value)) throw new Error("Invalid SQLite REAL argument");
+      return realValues[value];
+    }
+    return value;
+  });
   return { sql, values };
 }
 

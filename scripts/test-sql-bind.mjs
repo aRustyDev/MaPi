@@ -36,4 +36,11 @@ assert.throws(() => bind("UPDATE t SET x=?101", [...hundred, text("101")]), /par
 assert.throws(() => bind("UPDATE t SET x=?0", []), /parameter index/);
 assert.throws(() => bind("UPDATE t SET x=?2", [text("missing")]), /Missing SQLite argument/);
 assert.throws(() => bind("UPDATE t SET x=?1", [text("extra"), text("argument")]), /count mismatch/);
+for (const [tag, expected] of [["inf", Infinity], ["-inf", -Infinity], ["-0", -0]]) {
+  bind("UPDATE t SET x=?", [{ kind: "real", value: tag }]);
+  assert.ok(Object.is(seen.values[0], expected));
+}
+for (const value of ["Infinity", "NaN", "__proto__", null, 0]) {
+  assert.throws(() => bind("UPDATE t SET x=?", [{ kind: "real", value }]), /Invalid SQLite REAL argument/);
+}
 console.log("SQLite numbered binding tests passed.");
