@@ -1,3 +1,14 @@
+// A failed diagnostic sink must never change a request or initialization.
+export function logRuntimeDiagnostic(event) {
+  try { console.log(JSON.stringify(event)); }
+  catch { /* Keep the original request outcome. */ }
+}
+
+export function logRuntimeError(...details) {
+  try { console.error(...details); }
+  catch { /* Keep the original request outcome. */ }
+}
+
 // Log only the platform's boolean overload classification. Error messages can
 // contain request details and are intentionally excluded.
 export function logOverload(error, component) {

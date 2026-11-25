@@ -15,7 +15,7 @@ const modules = {
   './wasi.js': { instantiateReactor: noop }, './sql.js': { execute: noop, sqliteHost: () => ({}) },
   './registry.js': { canonicalOrigin: noop, ProjectRegistry: class {} }, './login-ui.js': { renderLogin: noop },
   './flow-proxy.js': { handleFlowProxy: noop }, './oauth-ingress.js': { handleOAuthIngress: noop, isOAuthRoute: noop },
-  './runtime-diagnostics.js': { logOverload: noop, logReactorLifecycle: noop, observeWasmHighWater: noop }, './flow-diagnostics.js': { classifyFlowSubmission: noop },
+  './runtime-diagnostics.js': { logOverload: noop, logReactorLifecycle: noop, logRuntimeDiagnostic: noop, logRuntimeError: noop, observeWasmHighWater: noop }, './flow-diagnostics.js': { classifyFlowSubmission: noop },
   './owner-fence.js': fence, './relocation-source-identity.js': { sourceIdentityMatches: noop },
   './relocation-manifest.js': { digestRelocationPage: noop, inspectRelocationDestination: noop, inspectRelocationSource: noop, prepareRelocationDestination: noop, restoreRelocationMetadata: noop, validateRelocationSourceSchema: noop },
   './relocation-chunks.js': { beginChunkExport: noop, beginChunkImport: noop, chunkImportStatus: noop, exportChunk: noop, importChunk: noop },

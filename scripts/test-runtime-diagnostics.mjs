@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { logOverload, logReactorLifecycle, observeWasmHighWater } from '../worker/runtime-diagnostics.js';
+import { logOverload, logReactorLifecycle, logRuntimeError, observeWasmHighWater } from '../worker/runtime-diagnostics.js';
 const messages = [];
 const original = console.error;
 try {
@@ -9,6 +9,8 @@ try {
   assert.equal(messages.length, 1);
   assert.deepEqual(JSON.parse(messages[0]), { event: 'mapi.overload', component: 'management' });
   assert.ok(!messages[0].includes('private'));
+  console.error = () => { throw new Error('injected error sink failure'); };
+  assert.doesNotThrow(() => logRuntimeError('synthetic runtime error'));
 } finally {
   console.error = original;
 }
