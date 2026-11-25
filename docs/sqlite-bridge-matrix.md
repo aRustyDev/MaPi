@@ -36,17 +36,52 @@ and supplies test-only WASI open/seed/nullability adapters. Each function
 runs in its own object. The JSON result includes the test logs and simulated
 timer-poll count. In recent runs five passes used simulated WASI timer waits:
 workerd cannot block in a synchronous host import, so those passes do not
-establish real scheduling or elapsed-time behavior. The original native
-connection-lock tests cannot be interpreted as workerd failures or passes.
+establish real scheduling or elapsed-time behavior. The held-lock cases
+below require separately controlled transactions on native connections.
 
 The runner now requires an exact top-level Go `RUN` and `PASS` marker as well
 as exit code zero for the selected suite, concurrent-owner, and bulk tests.
 `node scripts/test-upstream-sqlite-test-result.mjs` checks that absent, skipped,
 similarly named, failing, and nonzero-exit results do not count as passing.
-These are local result-classification tests; the owner-concurrency run with the
-new check was aborted before dispatch and has not been rerun. Earlier reported
-results above used the preceding runner and are not newly verified by this
-change.
+
+### Pinned statement rerun after the wide RETURNING fix
+
+The [per-test results](sqlite-bridge-statement-results.csv) map all 285 original
+pinned statement functions on MaPi `5d0b6dd70d26e66768f04ab35f05fa6096647c1a`
+and Nextgen `b0b74cd4a198428ea9b82910c217259ffc62b65c`. The local run used
+Go 1.26.9, Node 26.9.0, Wrangler 4.165.0 and workerd 1.20261118.1. The native
+oracle used the pinned modernc.org/sqlite v1.61.1 dependency. All 285 native
+statement functions passed, as did the native dialect and migration packages.
+The Go/Wasm bridge passed with all 39 workerd migrations.
+
+The first full workerd run recorded 282 passes, both native lock-schedule
+failures and a runner-level `TypeError: terminated` for
+`TestSignupProofSpentOnMutationFailure`. That case passed in isolation and in
+the repeat full run. The repeat recorded 283 passes and two held-lock failures,
+with exit code 1 for the suite.
+`TestIDPConnectionStatements_LockSerializesRevisions` saw B finish while A's
+lock was held. `TestUserPasswordStatements_SetWaitsForConcurrentSet` saw B
+finish while A's transaction was open. Both tests passed with separate native
+connections.
+
+The five simulated-timer results are identified in the CSV. The synchronous
+WASI harness advances its test clock on timer polls. Those passes cover the
+assertions reached under the simulated schedule. Real waiter timing and held
+locks remain outside that evidence.
+
+A separate local concurrent-owner rerun passed with the exact top-level
+`RUN` and `PASS` classifier and zero process exit codes. Two independent calls
+to the same object serialized IDP revisions, retained all three password
+versions with the last writer current, and accepted exactly one of two
+user updates with the same expected version. The separately selected
+`TestMaPiRowsRemainReadableAfterRollback` passed with zero simulated timers.
+To repeat these checks, run:
+
+```sh
+MAPI_OWNER_CONCURRENCY=1 MAPI_ESCAPED_ROWS_CONTRACT=1 \
+  MAPI_STMTTEST_FILTER='^(TestMaPiOwnerSeed|TestMaPiRowsRemainReadableAfterRollback)$' \
+  node scripts/test-upstream-sqlite-wasi.mjs
+```
 
 IDP, application and policy revisions, JSON schemas, flow definitions,
 password history, origin insertion, users, teams, projects and event cursor
@@ -91,17 +126,6 @@ SSO test with `MAPI_EXPIRY_CONTRACT=1 MAPI_FREEZE_TEST_CLOCK=1
 MAPI_STMTTEST_FILTER='^TestMaPiAuthAttemptExpiryPrecision$|^TestAuthAttemptStatements_SSOState$'`
 followed by the command above. The test checks 1 ns, just under, exactly at,
 and just over 1 ms, a five-minute TTL, nil TTL, and an uninitialized attempt.
-
-The two unsupported native lock schedules are
-`TestIDPConnectionStatements_LockSerializesRevisions` and
-`TestUserPasswordStatements_SetWaitsForConcurrentSet`. Their workerd
-observable equivalent passed with concurrent independent calls to one
-disposable SQLite owner, using the real Go transaction and statement methods.
-Both calls commit, the second IDP revision reads the first, the newest
-revision is the second, and password history retains both writes and the
-initial hash with the last writer current. Run this separately with
-`MAPI_OWNER_CONCURRENCY=1 MAPI_STMTTEST_FILTER=^TestMaPiOwnerSeed$` followed
-by the command above. This does not simulate a deliberately held native lock.
 
 Before the scoped revision change, an explicitly experimental scratch-only global logical clock gave 283/285,
 but changes expiry-sensitive clock reads and has no recovery high-water
