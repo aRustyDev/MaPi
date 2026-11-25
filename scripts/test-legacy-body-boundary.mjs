@@ -13,7 +13,7 @@ const modules = {
   './generated/baseline.json': { default: {} },
   './wasm-module.js': { default: {} },
   './wasi.js': { instantiateReactor: noop },
-  './sql.js': { execute: noop, sqliteError: noop },
+  './sql.js': { execute: noop, sqliteHost: () => ({}) },
   './registry.js': { canonicalOrigin: value => new URL(value).origin, ProjectRegistry: class {} },
   './login-ui.js': { renderLogin: noop },
   './flow-proxy.js': { handleFlowProxy: noop },

@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import wasm from "./generated/nextgen.wasm";
 import fixture from "./generated/fixture.json";
 import { instantiateReactor } from "./wasi.js";
-import { execute, sqliteError } from "./sql.js";
+import { execute, sqliteHost } from "./sql.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -46,32 +46,19 @@ export class NextgenProject extends DurableObject {
       for (const statement of fixture.statements) this.ctx.storage.sql.exec(statement);
       this.ctx.storage.sql.exec("INSERT INTO mapi_fixture VALUES (1)");
     });
-    let output;
     try {
       this.#reactor = instantiateReactor(wasm, (memory) => {
         this.#memory = memory;
         return {
-          sql: (ptr, size) => {
-            const query = JSON.parse(decoder.decode(new Uint8Array(memory(), ptr, size)));
-            let result;
-            try {
-              if (this.#failAudit && /\bINSERT INTO events\b/i.test(query.statement)) {
-                this.#failAudit = false;
-                throw new Error("Injected mutation audit write failure");
-              }
-              result = execute(this.ctx.storage, query);
-            } catch (error) {
-              if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
-              result = { error: sqliteError(error) };
+          ...sqliteHost(memory, (pointer, size) => this.#reactor.mapi_sql_frame(pointer, size), (query, resultSink) => {
+            if (this.#failAudit && /\bINSERT INTO events\b/i.test(query.statement)) {
+              this.#failAudit = false;
+              throw new Error("Injected mutation audit write failure");
             }
-            output = encoder.encode(JSON.stringify(result));
-            return output.length;
-          },
-          result: (ptr, size) => {
-            new Uint8Array(memory(), ptr, size).set(output);
-            output.fill(0);
-            output = undefined;
-          },
+            return execute(this.ctx.storage, query, resultSink);
+          }, (query, error) => {
+            if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
+          }),
           transaction: () => {
             try {
               this.ctx.storage.transactionSync(() => {

@@ -15,14 +15,18 @@ function packedColumn(column) {
     ") WHEN " + type + " = 'text' THEN 't' || " + column + " ELSE " + column + " END";
 }
 
-function decodePacked(encoded) {
+function jsonBlob(bytes) {
+  return { blob: bytes.toBase64() };
+}
+
+function decodePacked(encoded, formatBlob) {
   if (typeof encoded === "string") {
     if (encoded[0] === "i") return { integer: encoded.slice(1) };
     if (encoded[0] === "t") return encoded.slice(1);
     throw new Error("Unexpected wide SQLite value tag");
   }
   if (encoded === null || typeof encoded === "number") return encoded;
-  return { blob: new Uint8Array(encoded).toBase64() };
+  return formatBlob(new Uint8Array(encoded));
 }
 
 const sparseZeroNodeLimit = 2048;
@@ -154,7 +158,7 @@ function terseReturningColumn(column) {
 
 const terseMarkerBytes = [77, 97, 80, 105, 35, 57, 33, 64, 63];
 
-function decodeReturning(value, unified = false, terse = false) {
+function decodeReturning(value, unified = false, terse = false, formatBlob = jsonBlob) {
   if (typeof value === 'string' || typeof value === 'number' || value === null) return value;
   const blob = new Uint8Array(value);
   const widths = [0, 1, 2, 3, 4, 6, 8];
@@ -182,7 +186,7 @@ function decodeReturning(value, unified = false, terse = false) {
       while (blob[position] === 81) position++; // literal Q bytes
       const header = '@MaPiRun1';
       const hasHeader = [...header].every((c, i) => blob[position + i] === c.charCodeAt(0));
-      if (hasHeader && markers > 1) return { blob: blob.subarray(9).toBase64() };
+      if (hasHeader && markers > 1) return formatBlob(blob.subarray(9));
       if (hasHeader && markers === 1 && position === 9) {
         const sentinel = blob[position + header.length];
         if (sentinel === 75) {
@@ -207,7 +211,7 @@ function decodeReturning(value, unified = false, terse = false) {
             seen.add(offset);
             expanded[prefixLength + offset] = value;
           }
-          return { blob: expanded.toBase64() };
+          return formatBlob(expanded);
         }
         if (sentinel === 74) {
           const start = position + header.length + 1;
@@ -219,7 +223,7 @@ function decodeReturning(value, unified = false, terse = false) {
           const expanded = new Uint8Array(payload.length + count);
           expanded.set(payload.subarray(0, prefixLength));
           expanded.set(payload.subarray(prefixLength), prefixLength + count);
-          return { blob: expanded.toBase64() };
+          return formatBlob(expanded);
         }
         if (sentinel < 65 || sentinel > 73) throw new Error('Invalid sparse SQLite BLOB sentinel');
         const payload = blob.subarray(position + header.length + 1);
@@ -231,7 +235,7 @@ function decodeReturning(value, unified = false, terse = false) {
           if (byte === sentinel) { expanded[out] = 255; out += 9; }
           else expanded[out++] = byte;
         }
-        return { blob: expanded.toBase64() };
+        return formatBlob(expanded);
       }
     }
     // Two bounded marker runs encode the high count, suffix bytes and flag.
@@ -258,7 +262,7 @@ function decodeReturning(value, unified = false, terse = false) {
         } else {
           repeated.set(blob.subarray(position, position + tail), count * 9);
         }
-        return { blob: repeated.toBase64() };
+        return formatBlob(repeated);
       }
     }
   } else if (!terse) {
@@ -278,7 +282,7 @@ function decodeReturning(value, unified = false, terse = false) {
         repeated[count * 9] = (first - 1) % 256;
         repeated[count * 9 + 1] = second - 1;
         repeated.set(blob.subarray(position), count * 9 + 2);
-        return { blob: repeated.toBase64() };
+        return formatBlob(repeated);
       }
     }
     // A compact tag is marker + two low count bytes + one or more markers
@@ -300,7 +304,7 @@ function decodeReturning(value, unified = false, terse = false) {
         const repeated = new Uint8Array(count * 9 + tail);
         for (let i = 0; i < count * 9; i += 9) repeated[i] = 255;
         repeated.set(blob.subarray(position, position + tail), count * 9);
-        return { blob: repeated.toBase64() };
+        return formatBlob(repeated);
       }
     }
   }
@@ -313,7 +317,7 @@ function decodeReturning(value, unified = false, terse = false) {
     }
     escaped = position === blob.length && widths.includes(remainder);
   }
-  return { blob: (escaped ? blob.subarray(9) : blob).toBase64() };
+  return formatBlob(escaped ? blob.subarray(9) : blob);
 }
 
 function bind(statement, args) {
@@ -336,9 +340,9 @@ function bind(statement, args) {
   return { sql, values };
 }
 
-function decodePair(value, type) {
+function decodePair(value, type, formatBlob) {
   if (type === "integer") return { integer: value };
-  if (type === "blob") return { blob: new Uint8Array(value).toBase64() };
+  if (type === "blob") return formatBlob(new Uint8Array(value));
   return value;
 }
 
@@ -438,7 +442,7 @@ function adaptSearchEntriesMigration(statement) {
   return statement.slice(0, start) + "\nSELECT * FROM (" + first + ")\nUNION ALL\nSELECT * FROM (" + second + ")" + statement.slice(end);
 }
 
-export function execute(storage, { statement, args, query }) {
+export function execute(storage, { statement, args, query }, resultSink) {
   statement = adaptSearchEntriesMigration(statement);
   const bound = bind(statement, args);
   const values = bound.values;
@@ -507,9 +511,44 @@ export function execute(storage, { statement, args, query }) {
     prepared = "WITH " + rowSource + "(" + aliases.join(", ") + ") AS MATERIALIZED (" + sql.trim() +
       "\n) SELECT " + aliases.map(wide ? packedColumn : columnPair).join(", ") + " FROM " + rowSource;
   }
-  const rows = storage.sql.exec(prepared, ...values).raw().toArray().map((row) =>
-    columns.map((_column, index) => isReturning ? decodeReturning(row[index], unified, terse) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
-  return { columns, rows };
+  const formatBlob = resultSink ? bytes => bytes : jsonBlob;
+  const decodeRow = row => columns.map((_column, index) => {
+    if (isReturning) return decodeReturning(row[index], unified, terse, formatBlob);
+    if (wide) return decodePacked(row[index], formatBlob);
+    return decodePair(row[index * 2], row[index * 2 + 1], formatBlob);
+  });
+  if (!resultSink) {
+    const rows = storage.sql.exec(prepared, ...values).raw().toArray().map(decodeRow);
+    return { columns, rows };
+  }
+
+  // Fully consume the statement within its existing transaction and fence.
+  // The Go side owns the snapshot before it can leave this synchronous call.
+  const frameResult = () => {
+    const cursor = storage.sql.exec(prepared, ...values);
+    const raw = cursor.raw();
+    let frameRows = 0;
+    try {
+      for (const row of raw) {
+        resultSink.writeRow(decodeRow(row));
+        frameRows++;
+      }
+      resultSink.finish();
+      return { columns, frameRows };
+    } catch (error) {
+      // Discard the cursor before unwinding the transaction. Older runtimes
+      // only support draining the remaining rows.
+      try {
+        if (typeof cursor.close === "function") cursor.close();
+        else for (const _row of raw) { /* Discard pending rows. */ }
+      } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  };
+  // RETURNING executes its writes before delivering the first row. A transfer
+  // error must abort this statement even if Go catches it and commits its
+  // enclosing transaction.
+  return isReturning ? storage.transactionSync(frameResult) : frameResult();
 }
 
 export function sqliteError(error) {
@@ -519,4 +558,115 @@ export function sqliteError(error) {
     [/NOT NULL constraint failed/, 1299], [/CHECK constraint failed/, 275],
   ];
   return { message, code: codes.find(([match]) => match.test(message))?.[1] ?? 0 };
+}
+
+const frameEncoder = new TextEncoder();
+const frameDecoder = new TextDecoder();
+const frameBytes = 32 * 1024;
+
+// The receiver supplies a reusable scratch region. Go callbacks may grow its
+// memory, so every flush invalidates the JavaScript view of that region.
+function resultSink(memory, receiveFrame, pointer) {
+  let bytes = new Uint8Array(memory(), pointer, frameBytes);
+  let view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let used = 0;
+
+  function flush() {
+    if (!used) return;
+    if (receiveFrame(pointer, used) !== 0) throw new Error("SQLite result frame was rejected");
+    used = 0;
+    bytes = new Uint8Array(memory(), pointer, frameBytes);
+    view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
+
+  function reserve(size) {
+    if (used + size > bytes.length) flush();
+    const start = used;
+    used += size;
+    return start;
+  }
+
+  function writeText(value) {
+    // Each UTF-8 segment has a little-endian uint16 byte length. A zero
+    // length terminates the cell. Do not split a UTF-16 surrogate pair.
+    for (let offset = 0; offset < value.length;) {
+      if (bytes.length - used < 6) flush();
+      const start = used + 2;
+      let end = Math.min(value.length, offset + bytes.length - start);
+      const last = value.charCodeAt(end - 1);
+      if (end < value.length && last >= 0xd800 && last <= 0xdbff) end--;
+      const { read, written } = frameEncoder.encodeInto(value.slice(offset, end), bytes.subarray(start));
+      view.setUint16(used, written, true);
+      used = start + written;
+      offset += read;
+    }
+    const end = reserve(2);
+    view.setUint16(end, 0, true);
+  }
+
+  function writeBlob(value) {
+    const lengthOffset = reserve(4);
+    view.setUint32(lengthOffset, value.length, true);
+    for (let offset = 0; offset < value.length;) {
+      if (used === bytes.length) flush();
+      const count = Math.min(bytes.length - used, value.length - offset);
+      bytes.set(value.subarray(offset, offset + count), used);
+      used += count;
+      offset += count;
+    }
+  }
+
+  return {
+    writeRow(row) {
+      for (const value of row) {
+        const tag = reserve(1);
+        if (value === null) {
+          bytes[tag] = 0;
+        } else if (typeof value === "number") {
+          bytes[tag] = 2;
+          const offset = reserve(8);
+          view.setFloat64(offset, value, true);
+        } else if (typeof value === "string") {
+          bytes[tag] = 3;
+          writeText(value);
+        } else if (value instanceof Uint8Array) {
+          bytes[tag] = 4;
+          writeBlob(value);
+        } else {
+          bytes[tag] = 1;
+          const offset = reserve(8);
+          view.setBigInt64(offset, BigInt(value.integer), true);
+        }
+      }
+    },
+    finish: flush,
+  };
+}
+
+// Framed rows are used when both the Go driver and the host support them.
+// The ordinary JSON envelope still carries metadata, write counts and errors.
+export function sqliteHost(memory, receiveFrame, runQuery, logError) {
+  let response;
+  return {
+    sql(pointer, size) {
+      const query = JSON.parse(frameDecoder.decode(new Uint8Array(memory(), pointer, size)));
+      let result;
+      try {
+        const sink = query.query && query.framePointer && receiveFrame
+          ? resultSink(memory, receiveFrame, query.framePointer)
+          : undefined;
+        result = runQuery(query, sink);
+      } catch (error) {
+        logError?.(query, error);
+        result = { error: sqliteError(error) };
+      }
+      response = frameEncoder.encode(JSON.stringify(result));
+      return response.length;
+    },
+    result(pointer, size) {
+      new Uint8Array(memory(), pointer, size).set(response);
+      response.fill(0);
+      response = undefined;
+    },
+  };
 }

@@ -3,7 +3,7 @@ import wasm from "../worker/generated/sqlite-bridge-test.wasm";
 import baseline from "../worker/generated/baseline.json";
 import migrations from "../worker/generated/sqlite-bridge-migrations.json";
 import { instantiateReactor } from "../worker/wasi.js";
-import { execute, sqliteError } from "../worker/sql.js";
+import { execute, sqliteHost } from "../worker/sql.js";
 import { snapshotSchema, snapshotSchemaObjects } from "./sqlite-bridge-schema.mjs";
 
 const encoder = new TextEncoder();
@@ -175,23 +175,30 @@ export class BridgeTest extends DurableObject {
     const written = write.rowsWritten;
     const changes = this.ctx.storage.sql.exec("SELECT changes() AS count").one().count;
     let reactor;
-    let output;
     let memory;
+    let frameCount = 0, maxFrameBytes = 0;
+    let rejectFrame = true;
     reactor = instantiateReactor(wasm, (getMemory) => {
       memory = getMemory;
       return {
-        sql: (pointer, size) => {
-          const query = JSON.parse(decoder.decode(new Uint8Array(memory(), pointer, size)));
-          let result;
-          try { result = execute(this.ctx.storage, query); }
-          catch (error) { result = { error: sqliteError(error) }; }
-          output = encoder.encode(JSON.stringify(result));
-          return output.length;
-        },
-        result: (pointer, size) => {
-          new Uint8Array(memory(), pointer, size).set(output);
-          output = undefined;
-        },
+        ...sqliteHost(memory, (pointer, size) => {
+          frameCount++;
+          maxFrameBytes = Math.max(maxFrameBytes, size);
+          return reactor.mapi_sql_frame(pointer, size);
+        }, (query, resultSink) => {
+          if (rejectFrame && query.statement.startsWith("DELETE FROM mapi_bridge_frame_failure")) {
+            rejectFrame = false;
+            const sink = resultSink;
+            resultSink = {
+              ...sink,
+              writeRow(row) {
+                sink.writeRow(row);
+                throw new Error("injected frame transfer failure");
+              },
+            };
+          }
+          return execute(this.ctx.storage, query, resultSink);
+        }),
         transaction: () => {
           try {
             this.ctx.storage.transactionSync(() => {
@@ -208,7 +215,7 @@ export class BridgeTest extends DurableObject {
     const packed = reactor.run_bridge_tests();
     const pointer = Number(packed >> 32n);
     const length = Number(packed & 0xffffffffn);
-    return { ...JSON.parse(decoder.decode(new Uint8Array(memory(), pointer, length))), written, changes };
+    return { ...JSON.parse(decoder.decode(new Uint8Array(memory(), pointer, length))), written, changes, frameCount, maxFrameBytes };
   }
 }
 

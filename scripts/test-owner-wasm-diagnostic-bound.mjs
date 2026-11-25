@@ -21,7 +21,7 @@ const noop=()=>{throw Error('Unexpected dependency');};
 const modules={
   'cloudflare:workers':{DurableObject:class {constructor(ctx,env){this.ctx=ctx;this.env=env;}}},
   './generated/baseline.json':{default:{}},'./wasm-module.js':{default:{}},
-  './wasi.js':{instantiateReactor:instantiate},'./sql.js':{execute:noop,sqliteError:noop},
+  './wasi.js':{instantiateReactor:instantiate},'./sql.js':{execute:noop,sqliteHost:()=>({})},
   './registry.js':{canonicalOrigin:noop,ProjectRegistry:class {}},'./login-ui.js':{renderLogin:noop},
   './flow-proxy.js':{handleFlowProxy:noop},'./oauth-ingress.js':{handleOAuthIngress:noop,isOAuthRoute:noop},
   './runtime-diagnostics.js':diagnostics,'./flow-diagnostics.js':{classifyFlowSubmission:noop},

@@ -92,6 +92,9 @@ try {
   ]);
   console.log("Pinned upstream adapted assertion matrix:", result.upstreamCases.join(", "));
   assert.equal(result.wideReturning, true);
+  assert.ok(result.frameCount >= 512, "Expected framed transfer of both near-limit BLOB snapshots");
+  assert.equal(result.maxFrameBytes, 32 * 1024);
+  console.log(`Go/Wasm used ${result.frameCount} binary result frames, maximum ${result.maxFrameBytes} bytes.`);
   console.log("100-column RETURNING preserved the 8,388,530-byte sparse BLOB, column order, and NULLs after rollback and commit in Go/Wasm.");
   const migrationResponse = await fetch(`http://127.0.0.1:${port}/migrations`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tables: nativeSchema, objects: nativeObjects }),

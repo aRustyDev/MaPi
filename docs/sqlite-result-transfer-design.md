@@ -6,6 +6,37 @@ driver. The separate experiment in `experiments/sql-result-spill/` explores a
 transfer boundary for a known BLOB. The general SQLite type channel, bounded
 total memory, and spill authority remain open Phase 1 gates.
 
+## Synchronous Go/Wasm transport
+
+The owner and pinned Go driver can transfer rows in binary frames at most
+32 KiB each. The host drains the SQLite cursor synchronously under the
+existing owner authority and, for `RETURNING`, a statement transaction.
+The JSON envelope contains column names, write counts or errors. The
+binary snapshot preserves typed int64 and IEEE-754 values, TEXT, BLOB and
+NULL from the existing SQL projections. The Go iterator releases consumed
+chunks and drops the unread snapshot on close. SQLite has finished before
+Go returns `Rows`, so reading an escaped result requires no database access
+after rollback. There is no spill store or application result cap.
+
+The pinned bridge test observed 600 frames with a maximum of 32,768 bytes.
+It covers a near-limit 100-column sparse BLOB, UTF-8 across frame boundaries,
+both infinities, int64 extrema, cancellation and SQLite connection counters.
+A frame error partway through a multi-row DELETE rolled back the rows and
+trigger audit even when the enclosing Go callback handled the error and
+committed. Retrying then committed two deletes and two audit writes.
+
+The frame bound applies to the host transfer region. Go still retains the
+compact encoded snapshot, so memory scales with the full result. The
+original SQL rewrites remain in place. A local workerd probe returned an
+8,388,530-byte dense reserved-prefix BLOB from direct 100-column
+`DELETE ... RETURNING` but the bridge rewrite returned `SQLITE_TOOBIG` before
+any frame. Raw workerd results also made INTEGER 9007199254740992,
+INTEGER 9007199254740993 and REAL 9007199254740992.0 indistinguishable.
+An exact type channel and a bound on SQLite's first-step accumulation
+remain separate requirements. See the
+[Workerd conversion](https://raw.githubusercontent.com/cloudflare/workerd/main/src/workerd/api/sql.c%2B%2B)
+and [SQLite processing order](https://sqlite.org/lang_returning.html#processing_order).
+
 ## Goal and constraints
 
 A result must preserve SQLite storage classes, exact signed 64-bit integers,
@@ -16,8 +47,8 @@ audit behavior. Results already returned by `QueryContext` must remain readable
 after rollback, including rows that existed only inside the aborted transaction.
 A stopped or cancelled consumer must not leave a live write cursor undrained.
 
-The bridge currently serializes a complete result across JS, JSON, Wasm and
-Go. Its exact-value encodings can exceed a valid SQLite row's size. The
+The bridge retains a complete snapshot for escaped Go rows. Its
+SQLite-side exact-value encodings can exceed a valid SQLite row's size. The
 [SQLite storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
 exposes no per-cell storage-class metadata on its cursor, and JavaScript numbers
 cannot represent all SQLite int64 values. Adding a type column can exceed the
