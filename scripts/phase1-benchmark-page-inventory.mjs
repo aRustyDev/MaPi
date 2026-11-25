@@ -38,13 +38,55 @@ export async function allPages(get, endpoint, requested, validate, identity) {
   }
 }
 
+function validateScript(row) {
+  if (!row || typeof row.id !== 'string' || !row.id ||
+      typeof row.script_name !== 'string' || !row.script_name ||
+      (row.environment_name !== undefined && typeof row.environment_name !== 'string') ||
+      (row.service_name !== undefined && (typeof row.service_name !== 'string' || !row.service_name))) {
+    throw Error('Unknown Worker script identity');
+  }
+}
+
+export async function readBenchmarkScripts(get) {
+  const endpoint = '/workers/scripts-search';
+  const firstPath = `${endpoint}?page=1&per_page=${LIMITS.scripts}`;
+  const first = await get(firstPath);
+  const info = first?.result_info;
+  const missingPagination = info === undefined ||
+    (info !== null && typeof info === 'object' && !Array.isArray(info) && Object.keys(info).length === 0);
+  if (!missingPagination) {
+    // Present but incomplete metadata still fails the normal pagination
+    // check. Only the API's absent/empty optional object takes the other path.
+    return allPages(path => path === firstPath ? first : get(path), endpoint, LIMITS.scripts,
+      validateScript, row => JSON.stringify([row.id, row.script_name, row.environment_name ?? null]));
+  }
+
+  // Script Search can omit its optional pagination object. Corroborate
+  // identities against the paginated List Workers endpoint before using
+  // the search rows, which also carry service and environment aliases.
+  if (!Array.isArray(first?.result)) throw Error('Invalid Worker script inventory');
+  const searched = new Map();
+  for (const row of first.result) {
+    validateScript(row);
+    if (searched.has(row.id)) throw Error('Ambiguous Worker script identity');
+    searched.set(row.id, row.script_name);
+  }
+  const listed = await allPages(get, '/workers/workers', LIMITS.scripts, row => {
+    if (!row || typeof row.id !== 'string' || !row.id || typeof row.name !== 'string' || !row.name) {
+      throw Error('Unknown listed Worker identity');
+    }
+  }, row => row.id);
+  if (searched.size !== listed.length || listed.some(row => searched.get(row.id) !== row.name)) {
+    throw Error('Worker inventory sources differ');
+  }
+  return first.result;
+}
+
 export async function readFreshInventory(get, names) {
   if (!names || typeof names !== 'object' || Array.isArray(names)) throw Error('Invalid generated names');
   const values = Object.values(names);
   if (values.length !== 4 || values.some(name => typeof name !== 'string' || !name) || new Set(values).size !== values.length) throw Error('Invalid generated names');
-  const scripts = await allPages(get, '/workers/scripts-search', LIMITS.scripts, row => {
-    if (!row || typeof row.id !== 'string' || !row.id || typeof row.script_name !== 'string' || !row.script_name || (row.environment_name !== undefined && typeof row.environment_name !== 'string') || (row.service_name !== undefined && (typeof row.service_name !== 'string' || !row.service_name))) throw Error('Unknown Worker script identity');
-  }, row => JSON.stringify([row.id, row.script_name, row.environment_name ?? null]));
+  const scripts = await readBenchmarkScripts(get);
   if (scripts.some(row => values.includes(row.script_name) || (typeof row.service_name === 'string' && values.includes(row.service_name)))) throw Error('Worker name already exists');
   const namespaces = await allPages(get, '/workers/durable_objects/namespaces', LIMITS.namespaces, row => {
     if (!row || typeof row.id !== 'string' || !/^[0-9a-f]{32}$/i.test(row.id) || typeof row.script !== 'string' || !row.script || typeof row.class !== 'string' || !row.class) throw Error('Unknown Durable Object namespace identity');

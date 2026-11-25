@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { open, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { allPages, readFreshInventory } from './phase1-benchmark-page-inventory.mjs';
+import { allPages, readBenchmarkScripts, readFreshInventory } from './phase1-benchmark-page-inventory.mjs';
 
 const roles = ['owner', 'router', 'control', 'caller'];
 const classes = ['NextgenApplication', 'ProjectRegistry', 'RelocationCoordinator'];
@@ -156,8 +156,8 @@ export function checkBenchmarkInventory(manifest, configs, account, before, inve
 export async function collectBenchmarkInventory(account, token, manifest, fetcher = fetch) {
   const api = 'https://api.cloudflare.com/client/v4', root = `${api}/accounts/${account}`;
   async function request(url) { let r; try { r = await fetcher(url, { headers: { authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30000) }); } catch { throw Error('Inventory request failed'); } if (!r.ok) throw Error(`Inventory HTTP ${r.status}`); const j = await readBenchmarkJsonResponse(r); if (j.success !== true) throw Error('Inventory rejected'); return j; }
-  const get = path => request(root + path), scriptCheck = row => { if (!row || typeof row.id !== 'string' || !row.id || typeof row.script_name !== 'string' || !row.script_name) throw Error('Unknown script identity'); };
-  const scripts = await allPages(get, '/workers/scripts-search', 100, scriptCheck, row => JSON.stringify([row.id, row.script_name, row.environment_name ?? null]));
+  const get = path => request(root + path);
+  const scripts = await readBenchmarkScripts(get);
   const namespaces = await allPages(get, '/workers/durable_objects/namespaces', 1000, row => { if (!row || !/^[0-9a-f]{32}$/i.test(row.id ?? '') || !row.script || !row.class) throw Error('Unknown namespace identity'); }, row => row.id.toLowerCase());
   const accountSubdomain = (await get('/workers/subdomain')).result;
   const controlSubdomain = (await get(`/workers/scripts/${encodeURIComponent(manifest.names.control)}/subdomain`)).result;
