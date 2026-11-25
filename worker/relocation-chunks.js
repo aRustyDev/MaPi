@@ -323,10 +323,15 @@ export async function importChunk(storage, id, envelope, failAfterRows = 0) {
    const end = fragment.offset + part.length;
    storage.sql.exec('UPDATE mapi_chunk_import_fragment SET next_offset = ? WHERE project_id = ?', end, id);
    if (end === fragment.total) {
-    const pieces = storage.sql.exec('SELECT data FROM mapi_chunk_import_fragment_data WHERE project_id = ? ORDER BY chunk_index', id).raw().toArray();
+    // Return at most one bounded BLOB to JavaScript at a time. Reject
+    // corrupt persisted pieces before copying them into the assembly buffer.
+    const pieces = storage.sql.exec(`
+     SELECT CASE WHEN typeof(data) = 'blob' AND length(data) BETWEEN 1 AND ? THEN data END
+     FROM mapi_chunk_import_fragment_data WHERE project_id = ? ORDER BY chunk_index`, FRAGMENT_BYTES, id).raw();
     const encoded = new Uint8Array(fragment.total);
     let position = 0;
     for (const [data] of pieces) {
+     if (data === null) throw Error('Invalid stored row fragment');
      const piece = new Uint8Array(data);
      if (position + piece.length > encoded.length) throw Error('Fragment overflow');
      encoded.set(piece, position);
