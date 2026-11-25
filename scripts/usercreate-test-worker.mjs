@@ -1,6 +1,13 @@
-import { NextgenProject } from '../worker/generated/usercreate-test-object.js';
+import { NextgenProject as UserCreateProject } from '../worker/generated/usercreate-test-object.js';
 import fixture from '../worker/generated/fixture.json';
-export { NextgenProject };
+export class NextgenProject extends UserCreateProject {
+  test(command, id) {
+    if (command === 'text_probe_bytes') {
+      return this.ctx.storage.sql.exec("SELECT hex(value) AS bytes FROM user_attributes WHERE project_id = ? AND user_id = ? AND key = 'text_probe'", fixture.projectId, id).toArray()[0] ?? null;
+    }
+    return super.test(command, id);
+  }
+}
 export default { async fetch(request, env) {
   if (new URL(request.url).pathname === '/__mapi/test') {
     if(env.MAPI_LOCAL_TEST!=='1' || !['localhost','127.0.0.1'].includes(new URL(request.url).hostname)) return new Response(null,{status:404});

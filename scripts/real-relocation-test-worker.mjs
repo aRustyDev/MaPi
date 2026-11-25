@@ -1,3 +1,4 @@
+import { RELOCATION_RECONCILIATION_VERSION } from '../worker/relocation-values.js';
 // Local-only rehearsal. Control methods trust bindings in this isolated harness.
 import { RelocationCoordinator } from "../worker/relocation-coordinator.js";
 import { NextgenApplication } from "../worker/app.js";
@@ -132,7 +133,7 @@ export class RealCoordinator extends RelocationCoordinator {
 export default {
   async fetch(_request, env) {
     try {
-      const page = (count, cursor, done) => ({ guardVersion: 2, count, cursor, done, digest: 'a'.repeat(64) });
+      const page = (count, cursor, done) => ({ guardVersion: RELOCATION_RECONCILIATION_VERSION, count, cursor, done, digest: 'a'.repeat(64) });
       validateReconciliationPage(page(0, null, true), null);
       validateReconciliationPage(page(0, [{ integer: '-9223372036854775808' }], true), [{ integer: '-9223372036854775808' }]);
       validateReconciliationPage(page(64, [{ integer: '9223372036854775807' }, { blob: 'AAE=' }, { blob: 'AA==' }, { blob: '' }, 'key', 1.5], false), null);
@@ -259,7 +260,7 @@ export default {
       await registry.reconcileRelocation('move-secret', projectId, 'move-1');
       check(await registry.evidenceCount(projectId) === originalEvidenceCount + 1, 'Valid page retry did not advance exactly once');
       checkpoint = await registry.journal(projectId);
-      await registry.journalVersion(projectId, 1);
+      await registry.journalVersion(projectId, 2);
       const oldPartial = async () => {
         await rejectsWith(() => registry.reconcileRelocation('move-secret', projectId, 'move-1'), 'Legacy reconciliation');
         await rejectsWith(() => registry.commitRelocation('move-secret', projectId, 'move-1'), 'Reconciliation is incomplete');
@@ -267,13 +268,13 @@ export default {
         check((await registry.resolve(otherOrigin)).state === 'active', 'Legacy checkpoint affected other project');
       };
       await oldPartial(); await rejects(() => registry.evict()); registry = env.REGISTRY.getByName('projects'); await oldPartial();
-      await registry.journalVersion(projectId, 2);
+      await registry.journalVersion(projectId, RELOCATION_RECONCILIATION_VERSION);
       await rejects(() => coordinator.evict()); coordinator = env.COORDINATOR.getByName("coordinator");
       await rejectsWith(() => resume("secret", "reconcile"), "Injected interruption after reconciliation page");
       await rejectsWith(() => registry.commitRelocation("move-secret", projectId, "move-1"), "Reconciliation is incomplete");
       await rejects(() => coordinator.evict()); coordinator = env.COORDINATOR.getByName("coordinator");
       while (!(await registry.reconcileRelocation('move-secret', projectId, 'move-1')).done) {}
-      await registry.journalVersion(projectId, 1);
+      await registry.journalVersion(projectId, 2);
       const oldComplete = async () => {
         await rejectsWith(() => registry.reconcileRelocation('move-secret', projectId, 'move-1'), 'Legacy reconciliation');
         await rejectsWith(() => registry.commitRelocation('move-secret', projectId, 'move-1'), 'Reconciliation is incomplete');
@@ -282,9 +283,9 @@ export default {
         check((await target.stagedStatus(projectId)).state === 'staged', 'Legacy complete destination activated');
       };
       await oldComplete(); await rejects(() => registry.evict()); registry = env.REGISTRY.getByName('projects'); await oldComplete();
-      await registry.journalVersion(projectId, 2);
+      await registry.journalVersion(projectId, RELOCATION_RECONCILIATION_VERSION);
       await rejectsWith(() => resume("secret", "committed"), "Injected interruption after registry commit");
-      await registry.journalVersion(projectId, 1);
+      await registry.journalVersion(projectId, 2);
       const oldCommitted = async () => {
         await rejectsWith(() => coordinator.advance('move-secret', origin, projectId, 'move-1'), 'Legacy committed relocation');
         await rejectsWith(() => target.activateRelocation('move-secret', projectId, 'move-1'), 'Legacy committed relocation');
@@ -296,7 +297,7 @@ export default {
         check((await registry.resolve(otherOrigin)).state === 'active', 'Legacy committed move affected other project');
       };
       await oldCommitted(); await rejects(() => registry.evict()); registry = env.REGISTRY.getByName('projects'); await oldCommitted();
-      await registry.journalVersion(projectId, 2);
+      await registry.journalVersion(projectId, RELOCATION_RECONCILIATION_VERSION);
       await rejectsWith(() => registry.beginProjectRecovery("move-secret", origin, projectId, "recovery-race", "era-race"), "Project relocation is pending");
       await rejectsWith(() => registry.finalizeRelocation("move-secret", projectId, "move-1"), "Relocation is not finalized by owners");
       await rejectsWith(() => registry.beginRelocation("move-secret", origin, projectId, "move-2"), "Previous move has not been finalized");
@@ -311,7 +312,7 @@ export default {
       check((await registry.resolve(otherOrigin)).state === 'active', "Post-activation recovery attempt affected the other project");
       const final = await coordinator.advance("move-secret", origin, projectId, "move-1");
       check(final.done && final.phase === "retired", "Coordinator did not complete retirement");
-      await registry.journalVersion(projectId, 1);
+      await registry.journalVersion(projectId, 2);
       const historical = await coordinator.advance('move-secret', origin, projectId, 'move-1');
       check(historical.done && historical.phase === 'retired', 'Completed legacy history was not preserved');
       await target.activateRelocation('move-secret', projectId, 'move-1');

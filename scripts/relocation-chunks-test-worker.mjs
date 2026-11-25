@@ -21,7 +21,7 @@ export class ChunkProject extends DurableObject {
  seedMany(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); for (let i = 0; i < 130; i++) this.s.sql.exec('INSERT INTO users VALUES (?, ?, ?)', `key-${String(i).padStart(4, '0')}`, i, new Uint8Array([i % 256]).buffer); }); }
  oversized(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); const data = new Uint8Array(300_000); for (let i = 0; i < data.length; i++) data[i] = i % 251; this.s.sql.exec("INSERT INTO users VALUES ('large', 9223372036854775807, ?)", data.buffer); }); }
  beyondRowLimit(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO users VALUES ('large', 0, ?)", new Uint8Array(7_996_000).buffer); }); }
- seedWideText(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", 'é😀\n'.repeat(45_000)); }); }
+ seedWideText(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", '\uFEFF' + 'é😀\n'.repeat(45_000)); }); }
  seedRelocationText(id, invalid) {
   this.s.transactionSync(() => {
    assertProjectWritable(this.s, id, 1);
@@ -43,6 +43,10 @@ export class ChunkProject extends DurableObject {
  chunk(id, gen, move, n, fail) { return exportChunk(this.s, id, gen, move, n, fail); }
  beginImport(id, gen, move, dest, order = tables) { beginChunkImport(this.s, id, gen, move, dest, order); }
  receive(id, env, fail) { return importChunk(this.s, id, env, fail); }
+ clearTextGuardForTest(role) {
+  const table = role === 'source' ? 'mapi_chunk_export' : 'mapi_chunk_import';
+  this.s.sql.exec(`ALTER TABLE ${table} DROP COLUMN text_guard`);
+ }
  exportStatus(id) { return chunkExportStatus(this.s, id); }
  importStatus(id) { return chunkImportStatus(this.s, id); }
  controlSchema() { return this.s.sql.exec("SELECT name, sql FROM sqlite_schema WHERE name LIKE 'mapi_%' ORDER BY name").toArray(); }
@@ -67,7 +71,7 @@ export class ChunkProject extends DurableObject {
    mapi_relocation_project: "INSERT INTO mapi_relocation_project VALUES (?, 2, 'importing', 'foreign-move', NULL, 'foreign-object')",
    mapi_chunk_export: "INSERT INTO mapi_chunk_export (project_id,generation,move_id,tables,table_index,row_offset,next_chunk,chain,done) VALUES (?, 1, 'foreign-move', '[]', 0, 0, 0, '', 0)",
    mapi_chunk_export_data: "INSERT INTO mapi_chunk_export_data VALUES (?, 999999, 'foreign', NULL)",
-   mapi_chunk_import: "INSERT INTO mapi_chunk_import VALUES (?, 1, 'foreign-move', 'foreign-object', '[]', 0, 0, 0, '', 0)",
+   mapi_chunk_import: "INSERT INTO mapi_chunk_import VALUES (?, 1, 'foreign-move', 'foreign-object', '[]', 0, 0, 0, '', 0, 1)",
    mapi_chunk_import_data: "INSERT INTO mapi_chunk_import_data VALUES (?, 999999, 'foreign')",
    mapi_chunk_import_fragment: "INSERT INTO mapi_chunk_import_fragment VALUES (?, 'users', 0, 1, 0, '[]')",
    mapi_chunk_import_fragment_data: "INSERT INTO mapi_chunk_import_fragment_data VALUES (?, 999999, X'01')",
@@ -211,10 +215,45 @@ export default { async fetch(request, env) {
     const destinationName = `text-destination-${n}`, destination = env.PROJECT.getByName(destinationName);
     await destination.beginImport(id, 1, 'text-move', destinationName, ['wide_text']);
     const chunk = await owner.chunk(id, 1, 'text-move', 0, false);
+    const unpaired = JSON.parse(chunk.content);
+    unpaired.rows[0][1] = '\uD800';
+    const content = JSON.stringify(unpaired);
+    const unpairedChunk = { content, digest: await hash(content) };
+    await rejectsWith(() => destination.receive(id, unpairedChunk, 0), 'Invalid UTF-8 TEXT');
+    check((await destination.importStatus(id)).next_chunk === 0 && (await destination.relocationTextRows()).length === 0, 'invalid TEXT advanced import');
     await destination.receive(id, chunk, 0);
     check(JSON.stringify(await destination.relocationTextRows()) === JSON.stringify(before), 'valid multibyte or replacement character changed in relocation');
    }
   }
+  const oldSourceName = `old-text-source-${n}`, oldTargetName = `old-text-target-${n}`;
+  const oldSource = env.PROJECT.getByName(oldSourceName), oldTarget = env.PROJECT.getByName(oldTargetName);
+  const oldId = 'legacy-text', oldMove = 'legacy-text-move';
+  await oldSource.init(oldId, oldSourceName);
+  await oldSource.seedRelocationText(oldId, false);
+  await oldSource.freeze(oldId, 1, oldMove);
+  await oldSource.beginExport(oldId, 1, oldMove, ['wide_text']);
+  const guardedChunk = await oldSource.chunk(oldId, 1, oldMove, 0, false);
+  await oldTarget.beginImport(oldId, 1, oldMove, oldTargetName, ['wide_text']);
+  await oldTarget.clearTextGuardForTest('destination');
+  const oldImport = await oldTarget.importStatus(oldId);
+  await rejectsWith(() => oldTarget.beginImport(oldId, 1, oldMove, oldTargetName, ['wide_text']), 'Legacy relocation transfer');
+  await rejectsWith(() => oldTarget.receive(oldId, guardedChunk, 0), 'Legacy relocation transfer');
+  check(JSON.stringify(await oldTarget.importStatus(oldId)) === JSON.stringify(oldImport), 'legacy import advanced');
+  await oldSource.clearTextGuardForTest('source');
+  const oldExport = await oldSource.exportStatus(oldId);
+  await rejectsWith(() => oldSource.beginExport(oldId, 1, oldMove, ['wide_text']), 'Legacy relocation transfer');
+  await rejectsWith(() => oldSource.chunk(oldId, 1, oldMove, 0, false), 'Legacy relocation transfer');
+  check(JSON.stringify(await oldSource.exportStatus(oldId)) === JSON.stringify(oldExport), 'legacy export advanced');
+  const pendingName = `old-pending-${n}`, pending = env.PROJECT.getByName(pendingName);
+  await pending.init(oldId, pendingName);
+  await pending.seedRelocationText(oldId, false);
+  await pending.freeze(oldId, 1, oldMove);
+  await pending.beginExport(oldId, 1, oldMove, ['wide_text']);
+  await rejectsWith(() => pending.chunk(oldId, 1, oldMove, 0, true), 'Injected export interruption');
+  await pending.clearTextGuardForTest('source');
+  const pendingExport = await pending.exportStatus(oldId);
+  await rejectsWith(() => pending.chunk(oldId, 1, oldMove, 0, false), 'Legacy relocation transfer');
+  check(JSON.stringify(await pending.exportStatus(oldId)) === JSON.stringify(pendingExport), 'legacy pending export advanced');
   for (const value of ['positive', 'negative']) {
    const owner = env.PROJECT.getByName(`nonfinite-${value}-${n}`);
    await owner.init(`nonfinite-${value}`, `nonfinite-${value}-${n}`); await owner.seedReal(`nonfinite-${value}`, value); await owner.freeze(`nonfinite-${value}`, 1, 'nonfinite-move');
@@ -430,7 +469,7 @@ export default { async fetch(request, env) {
    if (JSON.parse(part.content).done) break;
    if (index === 19) throw Error('Text transfer did not finish');
   }
-  check(await textTarget.readWideText() === 'é😀\n'.repeat(45_000), 'fragmented Unicode text changed');
+  check(await textTarget.readWideText() === '\uFEFF' + 'é😀\n'.repeat(45_000), 'fragmented Unicode text changed');
   const tooLarge = env.PROJECT.getByName(`too-large-${n}`);
   await tooLarge.init('too-large', `too-large-${n}`); await tooLarge.beyondRowLimit('too-large'); await tooLarge.freeze('too-large', 1, 'too-large-move');
   await tooLarge.beginExport('too-large', 1, 'too-large-move', ['users']);

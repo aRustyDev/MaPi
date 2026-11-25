@@ -14,6 +14,7 @@ const setup = [
   "INSERT INTO projects (id,name,created_at,updated_at) VALUES ('p','P',1,1)",
   "INSERT INTO users (project_id,id,schema_url,created_at,updated_at) VALUES ('p','u','s',1,1)",
   "INSERT INTO user_attributes (project_id,user_id,key,value) VALUES ('p','u','invalid',CAST(X'228022' AS TEXT))",
+  "INSERT INTO user_attributes (project_id,user_id,key,value) VALUES ('p','u','multibyte',CAST(X'22C3A9F09F988022' AS TEXT))",
   "INSERT INTO user_attributes (project_id,user_id,key,value) VALUES ('p','u','replacement',CAST(X'22EFBFBD22' AS TEXT))",
 ];
 const nativeProgram = `
@@ -31,6 +32,7 @@ const native = JSON.parse(execFileSync('python3', ['-c', nativeProgram], {
 }));
 assert.deepEqual(native.rows.map(row => [row.key, row.type, row.hex, row.bytesHex]), [
   ['invalid', 'text', '228022', '228022'],
+  ['multibyte', 'text', '22C3A9F09F988022', '22C3A9F09F988022'],
   ['replacement', 'text', '22EFBFBD22', '22EFBFBD22'],
 ]);
 
@@ -68,10 +70,11 @@ try {
   const local = await response.json();
   assert.deepEqual(local.before, [
     { key: 'invalid', type: 'text', hex: '228022' },
+    { key: 'multibyte', type: 'text', hex: '22C3A9F09F988022' },
     { key: 'replacement', type: 'text', hex: '22EFBFBD22' },
   ]);
   assert.deepEqual(local.after, local.before);
-  assert.deepEqual(local.direct, [[34, 65533, 34], [34, 65533, 34]]);
+  assert.deepEqual(local.direct, [[34, 65533, 34], [34, 233, 128512, 34], [34, 65533, 34]]);
   assert.deepEqual(local.bridge, local.direct);
   console.log(JSON.stringify({ native, local }));
 } finally {

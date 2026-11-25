@@ -12,8 +12,9 @@ import { classifyFlowSubmission } from "./flow-diagnostics.js";
 import { assertOwnerFence, createOwnerFenceTable, freezeOwnerFence, initializeOwnerFence, reserveMoveDestination, retireOwnerFence, withOwnerFence } from "./owner-fence.js";
 import { sourceIdentityMatches } from "./relocation-source-identity.js";
 import { digestRelocationPage, inspectRelocationDestination, inspectRelocationSource, prepareRelocationDestination, restoreRelocationMetadata, validateRelocationSourceSchema } from "./relocation-manifest.js";
-import { beginChunkExport, beginChunkImport, chunkImportStatus, exportChunk, importChunk } from "./relocation-chunks.js";
+import { beginChunkExport, beginChunkImport, chunkExportStatus, chunkImportStatus, exportChunk, importChunk } from "./relocation-chunks.js";
 import { destinationTransferHistory, sourceTransferHistory, transferHistoryStatus } from "./relocation-history.js";
+import { assertRelocationTextGuard, RELOCATION_TEXT_GUARD_VERSION } from "./relocation-values.js";
 import { assertRecoveryEnvelope, readOwnerRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScope } from "./recovery-scopes.js";
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
 import { authorizeSchemaMigration } from "./schema-migration.js";
@@ -242,8 +243,8 @@ export class NextgenApplication extends DurableObject {
     if (!sourceIdentityMatches(this.ctx.storage, 'owner', route.projectId) || !sourceIdentityMatches(this.ctx.storage, 'origin', route.origin)) throw new Error("Source identity mismatch");
     const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
     const existing = hasFence ? sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0] : null;
+    validateRelocationSourceSchema(this.ctx.storage, route);
     if (!(existing?.state === "frozen" && existing.project_id === route.projectId && existing.origin === route.origin && existing.object_name === route.objectName && existing.generation === route.generation && existing.move_id === moveId)) {
-      validateRelocationSourceSchema(this.ctx.storage, route);
       initializeOwnerFence(this.ctx.storage, route);
       this.#fenceArmed = true;
       freezeOwnerFence(this.ctx.storage, route, moveId);
@@ -452,6 +453,9 @@ export class NextgenApplication extends DurableObject {
     const manifest = objectId === sourceId
       ? await this.relocationManifest(secret, projectId, moveId)
       : await namespace.getByName(move.source_object).relocationManifest(secret, projectId, moveId);
+    const checkpoint = objectId === sourceId ? chunkExportStatus(this.ctx.storage, projectId) : chunkImportStatus(this.ctx.storage, projectId);
+    if (checkpoint?.move_id !== moveId || !checkpoint.done) throw new Error("Relocation transfer is incomplete");
+    assertRelocationTextGuard(checkpoint);
     if (objectId === destinationId) {
       const destination = this.relocationAttestation(secret, projectId);
       if (destination?.state !== "staged" || destination.move_id !== moveId || destination.generation !== move.generation + 1 || destination.object_name !== move.destination_object) throw new Error("Destination is not staged for this move");
@@ -487,7 +491,8 @@ export class NextgenApplication extends DurableObject {
 
   async exportRelocationChunk(secret, projectId, moveId, index) {
     const manifest = await this.relocationManifest(secret, projectId, moveId);
-    return exportChunk(this.ctx.storage, projectId, manifest.generation, moveId, index);
+    const chunk = await exportChunk(this.ctx.storage, projectId, manifest.generation, moveId, index);
+    return { ...chunk, text_guard: RELOCATION_TEXT_GUARD_VERSION };
   }
 
   async relocationSourceHistoryStatus(secret, projectId, moveId, digest) {
@@ -523,12 +528,14 @@ export class NextgenApplication extends DurableObject {
     await this.#relocationDestination(secret, projectId, moveId);
     const status = chunkImportStatus(this.ctx.storage, projectId);
     if (!status || status.move_id !== moveId) throw new Error("Relocation import is not initialized");
+    assertRelocationTextGuard(status);
     return status;
   }
 
   async importRelocationChunk(secret, projectId, moveId, index) {
     const { move } = await this.#relocationDestination(secret, projectId, moveId);
     const chunk = await this.env.NEXTGEN_APPLICATION.getByName(move.source_object).exportRelocationChunk(secret, projectId, moveId, index);
+    assertRelocationTextGuard(chunk);
     return importChunk(this.ctx.storage, projectId, chunk);
   }
 

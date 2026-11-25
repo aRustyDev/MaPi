@@ -2,7 +2,7 @@
 // baseline. Control calls that use it must be private and authenticated.
 import baseline from './generated/baseline.json';
 import issuerSchema from './relocation-issuer-schema.json';
-import { execute, readRelocationRow } from './sql.js';
+import { assertRelocationTableText, execute, readRelocationRow } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { sourceIdentityMatches } from './relocation-source-identity.js';
 import { assertRelocationValuesRepresentable, RELOCATION_RECONCILIATION_VERSION } from './relocation-values.js';
@@ -107,13 +107,21 @@ function schemaInventory(storage) {
 
 // Advisory schema check before the fence; full inspection repeats after freezing.
 export function validateRelocationSourceSchema(storage, route) {
-  const metadata = readSourceSchemaMetadata(storage, schemaInventory(storage));
+  const schema = schemaInventory(storage);
+  const metadata = readSourceSchemaMetadata(storage, schema);
   validateSourceRecoveryEpoch(storage);
   validateSourceOrigin(storage, route.origin);
   validateSourceProjectIdentity(storage, route.projectId);
   assertSourceSchemaHistory(metadata);
   if (metadata.clockPresent) validateSourceClockRecord(storage);
   assertSourceClockPair(metadata);
+  validateSourceText(storage, schema);
+}
+
+function validateSourceText(storage, schema) {
+  for (const { type, name } of schema) {
+    if (type === 'table') assertRelocationTableText(storage, name);
+  }
 }
 
 // A single-project owner must not freeze until its two project identities
@@ -296,6 +304,7 @@ export function inspectRelocationSource(storage, route, moveId) {
   return storage.transactionSync(() => {
     assertSourceFence(storage, route, moveId);
     const schema = schemaInventory(storage);
+    validateSourceText(storage, schema);
     const pinnedTables = schema.filter(item => item.type === 'table' && !RUNTIME_TABLES.has(item.name)).map(item => item.name);
     validateOwnership(storage, route.projectId, pinnedTables);
     const { schemaVersion, historyPresent, clockPresent, scopesPresent } = readSourceSchemaMetadata(storage, schema);

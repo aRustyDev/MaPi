@@ -3,7 +3,7 @@
 import { execute, readRelocationRow } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { projectFenceStatus } from './relocation.js';
-import { assertRelocationValuesRepresentable } from './relocation-values.js';
+import { assertRelocationTextGuard, assertRelocationValuesRepresentable, RELOCATION_TEXT_GUARD_VERSION } from './relocation-values.js';
 const MAX_BYTES = 128 * 1024;
 const MAX_ROWS = 64;
 const FRAGMENT_BYTES = 80 * 1024;
@@ -57,7 +57,7 @@ function decodeFragmentRow(encoded) {
  if (!Array.isArray(values)) throw Error('Invalid fragment row');
  const row = values.map(value => {
   if (value && typeof value === 'object' && Object.keys(value).length === 1 && typeof value.text === 'string') {
-   try { return new TextDecoder('utf-8', { fatal: true }).decode(decodePrivateBase64(value.text, 'Invalid fragment row')); }
+   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(decodePrivateBase64(value.text, 'Invalid fragment row')); }
    catch { throw Error('Invalid fragment row'); }
   }
   return value;
@@ -70,11 +70,18 @@ function schema(storage) {
  storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_chunk_export (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, move_id TEXT NOT NULL, tables TEXT NOT NULL, table_index INTEGER NOT NULL, row_offset INTEGER NOT NULL, next_chunk INTEGER NOT NULL, chain TEXT NOT NULL, done INTEGER NOT NULL)`);
  if (!storage.sql.exec('PRAGMA table_info(mapi_chunk_export)').toArray().some(column => column.name === 'cursor')) storage.sql.exec('ALTER TABLE mapi_chunk_export ADD COLUMN cursor TEXT');
  if (!storage.sql.exec('PRAGMA table_info(mapi_chunk_export)').toArray().some(column => column.name === 'fragment_offset')) storage.sql.exec('ALTER TABLE mapi_chunk_export ADD COLUMN fragment_offset INTEGER NOT NULL DEFAULT 0');
+ addTextGuardColumn(storage, 'mapi_chunk_export');
  storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_chunk_export_data (project_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, content TEXT NOT NULL, digest TEXT, PRIMARY KEY(project_id, chunk_index))`);
  storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_chunk_import (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, move_id TEXT NOT NULL, object_name TEXT NOT NULL, tables TEXT NOT NULL, table_index INTEGER NOT NULL, row_offset INTEGER NOT NULL, next_chunk INTEGER NOT NULL, chain TEXT NOT NULL, done INTEGER NOT NULL)`);
+ addTextGuardColumn(storage, 'mapi_chunk_import');
  storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_chunk_import_data (project_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(project_id, chunk_index))`);
  storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_chunk_import_fragment (project_id TEXT PRIMARY KEY, table_name TEXT NOT NULL, row_offset INTEGER NOT NULL, total INTEGER NOT NULL, next_offset INTEGER NOT NULL, cursor TEXT NOT NULL)`);
  storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_chunk_import_fragment_data (project_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (project_id, chunk_index))`);
+}
+function addTextGuardColumn(storage, table) {
+ if (!storage.sql.exec(`PRAGMA table_info(${table})`).toArray().some(column => column.name === 'text_guard')) {
+  storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN text_guard INTEGER NOT NULL DEFAULT 0`);
+ }
 }
 function validateTables(tables) {
  if (!Array.isArray(tables) || !tables.length || tables.some(t => typeof t !== 'string' || !t)) throw Error('Invalid chunk table list');
@@ -86,9 +93,9 @@ function validateTables(tables) {
 }
 const controlDefinitions = {
  mapi_relocation_project: 'CREATE TABLE mapi_relocation_project (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, state TEXT NOT NULL, move_id TEXT, digest TEXT, object_name TEXT NOT NULL)',
- mapi_chunk_export: 'CREATE TABLE mapi_chunk_export (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, move_id TEXT NOT NULL, tables TEXT NOT NULL, table_index INTEGER NOT NULL, row_offset INTEGER NOT NULL, next_chunk INTEGER NOT NULL, chain TEXT NOT NULL, done INTEGER NOT NULL, cursor TEXT, fragment_offset INTEGER NOT NULL DEFAULT 0)',
+ mapi_chunk_export: 'CREATE TABLE mapi_chunk_export (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, move_id TEXT NOT NULL, tables TEXT NOT NULL, table_index INTEGER NOT NULL, row_offset INTEGER NOT NULL, next_chunk INTEGER NOT NULL, chain TEXT NOT NULL, done INTEGER NOT NULL, cursor TEXT, fragment_offset INTEGER NOT NULL DEFAULT 0, text_guard INTEGER NOT NULL DEFAULT 0)',
  mapi_chunk_export_data: 'CREATE TABLE mapi_chunk_export_data (project_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, content TEXT NOT NULL, digest TEXT, PRIMARY KEY(project_id, chunk_index))',
- mapi_chunk_import: 'CREATE TABLE mapi_chunk_import (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, move_id TEXT NOT NULL, object_name TEXT NOT NULL, tables TEXT NOT NULL, table_index INTEGER NOT NULL, row_offset INTEGER NOT NULL, next_chunk INTEGER NOT NULL, chain TEXT NOT NULL, done INTEGER NOT NULL)',
+ mapi_chunk_import: 'CREATE TABLE mapi_chunk_import (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, move_id TEXT NOT NULL, object_name TEXT NOT NULL, tables TEXT NOT NULL, table_index INTEGER NOT NULL, row_offset INTEGER NOT NULL, next_chunk INTEGER NOT NULL, chain TEXT NOT NULL, done INTEGER NOT NULL, text_guard INTEGER NOT NULL DEFAULT 0)',
  mapi_chunk_import_data: 'CREATE TABLE mapi_chunk_import_data (project_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(project_id, chunk_index))',
  mapi_chunk_import_fragment: 'CREATE TABLE mapi_chunk_import_fragment (project_id TEXT PRIMARY KEY, table_name TEXT NOT NULL, row_offset INTEGER NOT NULL, total INTEGER NOT NULL, next_offset INTEGER NOT NULL, cursor TEXT NOT NULL)',
  mapi_chunk_import_fragment_data: 'CREATE TABLE mapi_chunk_import_fragment_data (project_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (project_id, chunk_index))',
@@ -150,12 +157,17 @@ export function beginChunkExport(storage, id, generation, move, tables) {
   schema(storage);
   validFence(storage, id, generation, move);
   const previous = one(storage, 'SELECT * FROM mapi_chunk_export WHERE project_id = ?', id);
-  if (previous) { if (previous.generation !== generation || previous.move_id !== move || previous.tables !== JSON.stringify(tables)) throw Error('Conflicting export'); return; }
+  if (previous) {
+   assertRelocationTextGuard(previous);
+   if (previous.generation !== generation || previous.move_id !== move || previous.tables !== JSON.stringify(tables)) throw Error('Conflicting export');
+   return;
+  }
+  if (one(storage, 'SELECT 1 FROM mapi_chunk_export_data WHERE project_id = ? LIMIT 1', id)) throw Error('Legacy relocation transfer requires manual review');
   for (const table of tables) {
    if (!columns(storage, table).length) throw Error('Missing export table');
    if (!primaryKey(storage, table).length) throw Error('Export table requires a primary key');
   }
-  storage.sql.exec('INSERT INTO mapi_chunk_export (project_id, generation, move_id, tables, table_index, row_offset, next_chunk, chain, done, cursor, fragment_offset) VALUES (?, ?, ?, ?, 0, 0, 0, ?, 0, NULL, 0)', id, generation, move, JSON.stringify(tables), '');
+  storage.sql.exec('INSERT INTO mapi_chunk_export (project_id, generation, move_id, tables, table_index, row_offset, next_chunk, chain, done, cursor, fragment_offset, text_guard) VALUES (?, ?, ?, ?, 0, 0, 0, ?, 0, NULL, 0, ?)', id, generation, move, JSON.stringify(tables), '', RELOCATION_TEXT_GUARD_VERSION);
  });
 }
 
@@ -167,6 +179,7 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
   validFence(storage, id, generation, move);
   const c = one(storage, 'SELECT * FROM mapi_chunk_export WHERE project_id = ?', id);
   if (!c || c.generation !== generation || c.move_id !== move || index > c.next_chunk) throw Error('Export cursor mismatch');
+  assertRelocationTextGuard(c);
   const existing = one(storage, 'SELECT content, digest FROM mapi_chunk_export_data WHERE project_id = ? AND chunk_index = ?', id, index);
   if (existing) {
    // Check while it is still the immediate predecessor: the cursor can
@@ -231,6 +244,7 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
   const state = validFence(storage, id, generation, move), c = one(storage, 'SELECT * FROM mapi_chunk_export WHERE project_id = ?', id);
   const entry = one(storage, 'SELECT content, digest FROM mapi_chunk_export_data WHERE project_id = ? AND chunk_index = ?', id, index);
   if (!c || c.generation !== generation || c.move_id !== move || !Number.isSafeInteger(c.next_chunk) || c.next_chunk < 0) throw Error('Export cursor changed');
+  assertRelocationTextGuard(c);
   if (!entry || entry.content !== content) throw Error('Export chunk changed');
   if (index < c.next_chunk) {
    if (entry.digest !== digest) throw Error('Finalized export digest differs');
@@ -264,6 +278,7 @@ export function beginChunkImport(storage, id, generation, move, destination, tab
   const hasImport = one(storage, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_chunk_import'");
   const prior = hasImport ? one(storage, 'SELECT * FROM mapi_chunk_import WHERE project_id = ?', id) : null;
   if (prior) {
+   assertRelocationTextGuard(prior);
    validateControlSchema(storage);
    validateControlOwnership(storage, id);
    if (prior.generation !== generation || prior.move_id !== move || prior.object_name !== destination || prior.tables !== JSON.stringify(tables)) throw Error('Conflicting import');
@@ -277,7 +292,7 @@ export function beginChunkImport(storage, id, generation, move, destination, tab
   for (const table of Object.keys(controlDefinitions)) if (one(storage, `SELECT 1 FROM ${quote(table)} LIMIT 1`)) throw Error('Destination control state is not empty');
   for (const table of tables) if (!columns(storage, table).length || one(storage, `SELECT 1 FROM ${quote(table)} LIMIT 1`)) throw Error('Destination table is not empty');
   storage.sql.exec("INSERT INTO mapi_relocation_project VALUES (?, ?, 'importing', ?, NULL, ?)", id, generation + 1, move, destination);
-  storage.sql.exec('INSERT INTO mapi_chunk_import VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, 0)', id, generation, move, destination, JSON.stringify(tables), '');
+  storage.sql.exec('INSERT INTO mapi_chunk_import VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, 0, ?)', id, generation, move, destination, JSON.stringify(tables), '', RELOCATION_TEXT_GUARD_VERSION);
  });
 }
 
@@ -291,6 +306,7 @@ export async function importChunk(storage, id, envelope, failAfterRows = 0) {
   const c = one(storage, 'SELECT * FROM mapi_chunk_import WHERE project_id = ?', id);
   const project = projectFenceStatus(storage, id);
   if (!c || p.projectId !== id || p.generation !== c.generation || p.moveId !== c.move_id || !Number.isSafeInteger(p.index) || p.index < 0) throw Error('Import identity mismatch');
+  assertRelocationTextGuard(c);
   if (one(storage, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'") || !project || !['importing', 'staged'].includes(project.state) || project.project_id !== id || project.generation !== c.generation + 1 || project.move_id !== c.move_id || project.object_name !== c.object_name || c.done !== (project.state === 'staged' ? 1 : 0)) throw Error('Destination import is not active');
   const tables = parsePrivateJSON(c.tables, 'Invalid import table checkpoint');
   validateTables(tables);

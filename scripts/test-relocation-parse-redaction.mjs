@@ -25,7 +25,7 @@ assert.equal(transactions, 0);
 // attempted write fails the test. The fake is not migration or fence evidence.
 function exportStorage({ tables = '["users"]', cursor = null, content = null } = {}) {
   let writes = 0;
-  const checkpoint = { project_id:'p', generation:1, move_id:'m', next_chunk:0, done:0,
+  const checkpoint = { text_guard: 1, project_id:'p', generation:1, move_id:'m', next_chunk:0, done:0,
     tables, table_index:0, row_offset:0, cursor, chain:'', fragment_offset:0 };
   const state = { project_id:'p', generation:1, move_id:'m', state:'frozen', digest:null, object_name:'source' };
   return { get writes() { return writes; }, transactionSync(fn) { return fn(); }, sql:{ exec(statement) {
