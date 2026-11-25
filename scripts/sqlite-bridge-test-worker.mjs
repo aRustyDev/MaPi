@@ -10,6 +10,22 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const rejected = Symbol("Go transaction failed");
 
+function seedWideReturning(sql) {
+  const extra = Array.from({ length: 99 }, (_, i) => `column_identifier_for_test_${i}${"_".repeat(512)}`);
+  const payload = new Uint8Array(8_388_530);
+  payload[0] = 255;
+  payload.set(encoder.encode("@MaPiRun1"), 9);
+  const span = payload.length - 18 - 64;
+  for (let i = 1; i <= 65; i++) payload[18 + Math.floor(span * i / 66)] = i;
+
+  sql.exec(`CREATE TABLE mapi_bridge_wide_returning (value BLOB, ${extra.join(",")})`);
+  sql.exec("CREATE TABLE mapi_bridge_wide_audit (n INTEGER NOT NULL)");
+  sql.exec("INSERT INTO mapi_bridge_wide_audit VALUES (0)");
+  sql.exec(`CREATE TRIGGER mapi_bridge_wide_delete AFTER DELETE ON mapi_bridge_wide_returning
+    BEGIN UPDATE mapi_bridge_wide_audit SET n = n + 1; END`);
+  sql.exec("INSERT INTO mapi_bridge_wide_returning (value) VALUES (?)", payload.buffer);
+}
+
 export class BridgeTest extends DurableObject {
   runMigrations(expected) {
     try {
@@ -150,6 +166,7 @@ export class BridgeTest extends DurableObject {
   run() {
     this.ctx.storage.transactionSync(() => {
       for (const statement of baseline.statements) this.ctx.storage.sql.exec(statement);
+      seedWideReturning(this.ctx.storage.sql);
     });
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS mapi_rows_written_probe (a TEXT, b TEXT, PRIMARY KEY (a, b))");
     this.ctx.storage.sql.exec("DELETE FROM mapi_rows_written_probe");

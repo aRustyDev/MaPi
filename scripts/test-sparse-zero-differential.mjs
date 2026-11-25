@@ -25,18 +25,24 @@ const size = 8_388_000;
 const sample = new Uint8Array(prefix.length + size + 64);
 sample.set(prefix);
 for (let i = 0; i < 64; i++) sample[prefix.length + size + i] = i * 3;
+const spaced = count => Array.from({ length: count }, (_, i) => Math.floor((i + 1) * size / (count + 1)));
+const clustered = count => Array.from({ length: count }, (_, i) => i);
 const cases = [
-  [0], [size - 1], [1, 31, 812, 73_000, 2_000_000, 4_000_000, 5_000_000, size - 2],
-  Array.from({ length: 9 }, (_, i) => Math.floor((i + 1) * size / 10)),
-  Array.from({ length: 32 }, (_, i) => Math.floor((i + 1) * size / 33)),
-  Array.from({ length: 64 }, (_, i) => Math.floor((i + 1) * size / 65)),
-  Array.from({ length: 65 }, (_, i) => Math.floor((i + 1) * size / 66)),
-  Array.from({ length: 4096 }, (_, i) => i),
+  { offsets: [0], compact: true },
+  { offsets: [size - 1], compact: true },
+  { offsets: [1, 31, 812, 73_000, 2_000_000, 4_000_000, 5_000_000, size - 2], compact: true },
+  { offsets: spaced(9), compact: true },
+  { offsets: spaced(32), compact: true },
+  { offsets: spaced(64), compact: true },
+  { offsets: spaced(65), compact: true },
+  { offsets: clustered(256), compact: true },
+  { offsets: spaced(256), compact: false },
+  { offsets: clustered(4096), compact: false },
 ];
 const write = db.prepare('INSERT INTO sample(id,value) VALUES(?,?)');
 const padding = `/*${'x'.repeat(60000)}*/`;
 const statement = `DELETE FROM sample ${padding} RETURNING id,value,${names.join(',')}`;
-for (const [index, offsets] of cases.entries()) {
+for (const [index, { offsets, compact }] of cases.entries()) {
   sample.fill(0, prefix.length, prefix.length + size);
   for (const [i, offset] of offsets.entries()) sample[prefix.length + offset] = i % 255 + 1;
   write.run(index, sample);
@@ -51,7 +57,7 @@ for (const [index, offsets] of cases.entries()) {
   // This native SQLite planner may evaluate the correlated scan twice.
   assert.ok(visits > 0 && visits <= 8192, `Unexpected sparse tree work: ${visits} visits`);
   const wire = encodedRow[1];
-  assert.equal(wire[offsets.length <= 64 ? 18 : 9], offsets.length <= 64 ? 75 : 255,
+  assert.equal(wire[compact ? 18 : 9], compact ? 75 : 255,
     `Unexpected sparse encoding selection for ${offsets.length} bytes`);
   assert.equal(db.prepare('SELECT n FROM audit').get().n, index + 1);
   console.log(`Sparse zero differential: ${offsets.length} nonzero bytes, ${visits} node checks.`);

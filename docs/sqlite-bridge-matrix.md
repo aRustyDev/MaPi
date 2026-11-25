@@ -498,28 +498,30 @@ may copy or compare large values and hosted CPU and isolate memory are unverifie
 
 `npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-nonzero`,
 `-sparse-header-eight`, `-sparse-header-nine`, and `-sparse-header-sixtyfour`
-now pass near-limit values with one, eight, nine and 64 separated nonzero
-bytes in the zero span. A recursive SQLite search records up to 64 byte
-positions and values, with each materialized scan capped at 2,048 nodes. A
-full scan cap or 65 bytes falls back to the ordinary escape; patch encoding is
-used only when smaller than that escape. Local Workerd checks cover all 255
-nonzero byte values, counts on both sides of the cap, boundary and interior
+pass near-limit values with one, eight, nine and 64 separated nonzero bytes.
+The recursive SQLite search uses the existing cap of 2,048 nodes per
+materialized scan. It records sparse patches only when the scan completes
+below that cap and the patch encoding saves space over the ordinary escape.
+Local Workerd checks cover nonzero byte values, boundary and interior
 positions, arbitrary tails, rollback and audit effects.
 
-`npm run test:sparse-zero-differential` instruments the actual rewrite against
-native SQLite at approximately 8 MiB: one, eight, nine, 32, 64, 65 and 4,096
-nonzero bytes round-trip; tested scans made at most 4,860 child checks. It also
-checks the patch/escape size break-even. SQLite evaluated the correlated scan
-twice for some values despite `MATERIALIZED`; the node cap applies per scan,
-not to per-node allocation, byte comparisons, total invocations, hosted CPU or
-isolate memory.
+`npm run test:sparse-zero-differential` instruments the production rewrite
+against native SQLite at approximately 8 MiB. The 65 separated and 256
+clustered nonzero bytes use patch encoding. Budget exhaustion falls back
+to the ordinary escape for 256 separated or 4,096 clustered bytes. All
+cases round-trip and the test checks the patch/escape size break-even.
+The test observed up to 8,188 child checks, within its 8,192 bound for a
+correlated query evaluated twice. The node cap applies per scan. SQLite
+allocations, byte comparisons, hosted CPU and isolate memory remain unmeasured.
 
 `npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-sixtyfive`
-is a **failing regression**: a near-limit reserved-tag BLOB with 65 nonzero
-bytes in the zero span takes the safe escape path and exceeds SQLite's result
-limit. Direct DELETE succeeds and both attempts roll back business and audit
-changes. Other data shapes and wide SELECT materialization may also exceed
-the limit. General exact-size compatibility remains an open Phase 1 gate.
+now passes in local workerd. `npm run test:sqlite-bridge` also exercises the
+same 100-column, 8,388,530-byte SQL shape through the pinned Go driver.
+`database/sql.Rows` preserves the complete BLOB, column order and 99 NULLs
+after rollback and commit. Rollback restores the original business row
+and avoids a persisted audit increment. The commit removes it and increments
+the audit count once. General exact-size compatibility and bounded result
+memory remain open Phase 1 gates.
 
 The checks for this change ran in a disposable checkout with a copied pinned
 upstream tree and dependencies symlinked to the original checkout's installed
@@ -596,7 +598,7 @@ was rejected. After a process stop before commit, retrying the same key
 committed one business row and one audit row. The idempotency ledger in those
 checks is not integrated with the real application or its relocation manifest.
 
-The async spill experiment handles SELECT only; DML `RETURNING` falls back to the existing bridge and therefore does not fix the exact-size `SQLITE_TOOBIG` regression. A separate local staging experiment also changed connection-local SQLite state while iterating: a multi-row query containing `changes()` and `last_insert_rowid()` returned different values after spool inserts, and those functions remained changed after opening the result. Its local staged handle also failed to preserve an uncommitted row after rollback. A bounded production design must preserve these observable semantics, not just transfer rows in small frames. The volatile-expression checks run so far cover only a narrow materialized `randomblob` case; they do not prove general single evaluation. See `phase1-status.md` for the remaining gates.
+The async spill experiment handles SELECT only and delegates DML `RETURNING` to the existing bridge. A separate local staging experiment also changed connection-local SQLite state while iterating: a multi-row query containing `changes()` and `last_insert_rowid()` returned different values after spool inserts, and those functions remained changed after opening the result. Its local staged handle also failed to preserve an uncommitted row after rollback. A bounded production design must preserve these observable semantics, not just transfer rows in small frames. The volatile-expression checks run so far cover only a narrow materialized `randomblob` case; they do not prove general single evaluation. See `phase1-status.md` for the remaining gates.
 
 A later local workerd probe showed why an escaped live cursor alone is insufficient: after consuming one of three uncommitted rows and rolling back, subsequent iteration returned only one of the remaining two rows without an error. A separate small two-object experiment kept frames outside the owner database and retained all three rows after rollback without changing owner connection state. It does not establish secure spill storage, resource bounds, cancellation, fencing, Go integration or hosted behavior; neither experiment is mounted in the application.
 

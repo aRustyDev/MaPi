@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"unsafe"
 
@@ -26,6 +27,7 @@ func run() uint64 {
 	if err := check(); err != nil {
 		result = map[string]any{"ok": false, "error": err.Error()}
 	} else {
+		result["wideReturning"] = true
 		result["upstreamCases"] = []string{
 			"TestProjectStatements_Create/explicit-id-and-duplicate",
 			"TestProjectStatements_Update/name",
@@ -190,6 +192,9 @@ func check() error {
 	if err := checkStoredValues(ctx, db); err != nil {
 		return err
 	}
+	if err := checkWideReturning(ctx, db); err != nil {
+		return fmt.Errorf("wide RETURNING: %w", err)
+	}
 	if err := checkProjectStatements(ctx); err != nil {
 		return err
 	}
@@ -210,6 +215,97 @@ func check() error {
 		return errors.New("101 parameter query unexpectedly succeeded")
 	}
 	return nil
+}
+
+// The worker seeds a near-limit BLOB with a reserved codec prefix and 65
+// sparse bytes. Consume the returned rows after both rollback and commit.
+func checkWideReturning(ctx context.Context, db *sql.DB) error {
+	const size, header, tail = 8_388_530, 18, 64
+	expected := make([]byte, size)
+	expected[0] = 255
+	copy(expected[9:], "@MaPiRun1")
+	for i := 1; i <= 65; i++ {
+		expected[header+(size-header-tail)*i/66] = byte(i)
+	}
+
+	columns := make([]string, 100)
+	columns[0] = "value"
+	for i := range columns[1:] {
+		columns[i+1] = fmt.Sprintf("column_identifier_for_test_%d%s", i, strings.Repeat("_", 512))
+	}
+	statement := "DELETE FROM mapi_bridge_wide_returning RETURNING " + strings.Join(columns, ",")
+	abort := errors.New("rollback wide RETURNING")
+
+	for _, rollback := range []bool{true, false} {
+		var rows *sql.Rows
+		err := cloudflarewasm.Transaction(func() error {
+			var err error
+			rows, err = db.QueryContext(ctx, statement)
+			if err == nil && rollback {
+				return abort
+			}
+			return err
+		})
+		var wantErr error
+		wantRemaining, wantAudit := 0, 1
+		if rollback {
+			wantErr = abort
+			wantRemaining, wantAudit = 1, 0
+		}
+		if !errors.Is(err, wantErr) {
+			if rows != nil {
+				rows.Close()
+			}
+			return fmt.Errorf("transaction (rollback=%t): got %v, want %v", rollback, err, wantErr)
+		}
+		if err := checkWideReturningRow(rows, columns, expected); err != nil {
+			return err
+		}
+
+		var remaining, audit int
+		if err := db.QueryRowContext(ctx, "SELECT (SELECT count(*) FROM mapi_bridge_wide_returning), n FROM mapi_bridge_wide_audit").Scan(&remaining, &audit); err != nil {
+			return err
+		}
+		if remaining != wantRemaining || audit != wantAudit {
+			return fmt.Errorf("remaining rows=%d and audit rows=%d, want %d and %d", remaining, audit, wantRemaining, wantAudit)
+		}
+	}
+	return nil
+}
+
+func checkWideReturningRow(rows *sql.Rows, columns []string, expected []byte) error {
+	defer rows.Close()
+	got, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(got, columns) {
+		return errors.New("column names or order changed")
+	}
+	if !rows.Next() {
+		return fmt.Errorf("expected a returned row, iterator error: %v", rows.Err())
+	}
+	values := make([]any, len(columns))
+	dest := make([]any, len(columns))
+	for i := range values {
+		dest[i] = &values[i]
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return err
+	}
+	payload, ok := values[0].([]byte)
+	if !ok || !bytes.Equal(payload, expected) {
+		return fmt.Errorf("BLOB changed: got %T with %d bytes, want %d exact bytes", values[0], len(payload), len(expected))
+	}
+	for i, value := range values[1:] {
+		if value != nil {
+			return fmt.Errorf("column %d: got %T, want NULL", i+1, value)
+		}
+	}
+	if rows.Next() {
+		return errors.New("unexpected extra returned row")
+	}
+	return rows.Err()
 }
 
 // These assertions mirror the pinned stmttest project cases and the SQLite

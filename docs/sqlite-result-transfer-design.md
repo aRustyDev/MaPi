@@ -1,10 +1,10 @@
 # Bounded SQLite results: design and 65-byte feasibility experiment
 
-Status: **experimental and unmounted**. The current production bridge still
-fails the 65-nonzero-byte exact-size `RETURNING` regression. The experiment in
-`experiments/sql-result-spill/` demonstrates a possible transfer boundary for a
-known BLOB; it does not supply the general SQLite type channel, bounded total
-memory, or production authority required to close Phase 1.
+Status: **experimental and unmounted**. The production bridge now passes the
+65-nonzero-byte exact-size `RETURNING` regression through the pinned Go/Wasm
+driver. The separate experiment in `experiments/sql-result-spill/` explores a
+transfer boundary for a known BLOB. The general SQLite type channel, bounded
+total memory, and spill authority remain open Phase 1 gates.
 
 ## Goal and constraints
 
@@ -94,10 +94,10 @@ Run `npm run test:sql-result-spill-experiment` with the installed matching
 Wrangler/workerd. The runner creates local disposable SQLite Durable Objects
 and a temporary persistence directory; it does not contact Woven or AWS.
 It uses a 100-column DELETE with 512-byte-extended identifiers and the same
-8,388,530-byte reserved-tag BLOB with 65 separated nonzero bytes as the known
-failing fixture. In each run it verifies the existing `execute` fails with
-`SQLITE_TOOBIG` and rolls back business and audit state. Direct SQLite returns
-that row. The experiment's table enforces `typeof(value)='blob'`; it checks the
+8,388,530-byte reserved-tag BLOB with 65 separated nonzero bytes as the prior
+regression. In each run it verifies byte-exact readback through `execute` and
+rolls back business and audit state. Direct SQLite also returns that row.
+The experiment's table enforces `typeof(value)='blob'`; it checks the
 other 99 returned values are NULL. This trusted, fixed fixture is not a generic
 type-discovery mechanism. A separate rolled-back local DML probe confirms that
 direct JavaScript results for integer `9007199254740992` and
@@ -209,9 +209,7 @@ may allocate before yielding a frame. No isolate peak, SQLite internal memory,
 cancellation, concurrent `Close`, spill authority or real source is measured.
 A supplied type or row count is not proof: the source must authenticate the
 seal and each frame's complete context, and must produce a consistent snapshot
-and exact SQLite types before this consumer could be integrated. In particular,
-this prototype does not make the production 65-byte `RETURNING` test pass and
-adds no schema objects to the owner.
+and exact SQLite types before this consumer could be integrated.
 
 `npm run test:sqlite-typedrows-workerd` builds this consumer into a test-only
 Go 1.26.9 WASI reactor and runs a disposable local Workerd SQLite Durable Object.
@@ -233,19 +231,18 @@ not total isolate or SQLite peak memory.
 
 This is a restricted proof: the producer consumes an extra SQL type column,
 the expected row count is a fixture constant rather than an authenticated
-seal, the near-limit BLOB is a three-column result rather than the failing
-100-column statement, and Go consumes rows before transaction completion.
+seal, the near-limit BLOB is a three-column result, and Go consumes rows
+before transaction completion.
 It does not establish a general type channel, escaped `Rows` after rollback,
 secure spill, real application integration, or a bound on SQLite's own
-multi-row RETURNING accumulation. The existing production 65-byte regression
-remains failing.
+multi-row RETURNING accumulation.
 
 ## Required next proof before integration
 
 - Resolve the general DML type-channel blocker at the 100-column and maximum
   row boundaries, with mixed NULL, BLOB, TEXT, int64 extrema and REAL,
-  duplicate and long names, and nested/ignored triggers. The 65-byte fixture
-  must pass through the actual Go driver without a schema-specific type guess.
+  duplicate and long names, and nested/ignored triggers. Retain the passing
+  65-nonzero-byte Go/Wasm regression when changing the bridge.
 - Resolve SQLite's documented multi-row RETURNING output accumulation under
   the required memory bound without changing semantics, or explicitly surface
   any proposed limit for separate approval. Establish a supported

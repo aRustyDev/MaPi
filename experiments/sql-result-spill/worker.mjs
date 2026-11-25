@@ -230,11 +230,19 @@ export class Owner extends DurableObject {
       throw Error('typed probe rollback');
     });} catch(error) {if(error.message==='typed probe rollback') typeProbe='fits';else if(String(error).includes('SQLITE_TOOBIG')) typeProbe='too-big';else throw error;}
     assert(q.exec('SELECT COUNT(*) AS n FROM fixture').one().n===0 && q.exec('SELECT n FROM audit').one().n===0,'typed probe changed data or audit');
-    let bridgeError;
-    try { s.transactionSync(()=>{q.exec('INSERT INTO fixture(value) VALUES (?)',expected);execute(s,{statement,args:[],query:true});throw Error('expected bridge failure');}); }
-    catch(error) { bridgeError=String(error); }
-    assert(bridgeError.includes('SQLITE_TOOBIG'),'current bridge did not reproduce exact-size failure');
-    assert(q.exec('SELECT COUNT(*) AS n FROM fixture').one().n===0 && q.exec('SELECT n FROM audit').one().n===0,'failed bridge changed data or audit');
+    try {
+      s.transactionSync(() => {
+        q.exec('INSERT INTO fixture(value) VALUES (?)', expected);
+        const result = execute(s, {statement, args: [], query: true});
+        const [row] = result.rows;
+        assert(result.rows.length === 1 && row.length === 100 && row.slice(1).every(value => value === null), 'unexpected bridge result shape');
+        assert(equal(Uint8Array.fromBase64(row[0].blob), expected), 'bridge BLOB changed');
+        throw Error(rollback);
+      });
+    } catch (error) {
+      if (error.message !== rollback) throw error;
+    }
+    assert(q.exec('SELECT COUNT(*) AS n FROM fixture').one().n===0 && q.exec('SELECT n FROM audit').one().n===0,'bridge rollback changed data or audit');
     let sent = 0, frameCount = 0, replayChecked = false, writtenChain=new Uint8Array(32);
     try {
       await s.transaction(async () => {
