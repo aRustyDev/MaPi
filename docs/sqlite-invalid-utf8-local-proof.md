@@ -10,7 +10,7 @@ This proves that the reconstructed schema and raw SQL permit the bytes, and that
 
 ## Relocation policy for issue #10
 
-Relocation rejects malformed stored TEXT. The owner scans the stored byte projections of the reviewed application tables before installing the source fence. The source inspection repeats after the fence is installed. Both fresh export and digest validate the stored bytes again before reading strings. Validation streams rows and decodes each TEXT cell in 64 KiB slices. The total scan still depends on source size and needs runtime capacity verification for large projects.
+Relocation rejects malformed stored TEXT. The owner scans the stored byte projections of the reviewed application tables before installing the source fence. The source inspection repeats after the fence is installed. Both fresh export and digest validate the stored bytes again before reading strings. Validation iterates rows and decodes each TEXT cell in 64 KiB slices, after materializing the complete cell as a BLOB. Each pre-freeze and frozen-source scan runs in one synchronous invocation without a total row or byte bound. A large scan can exceed hosted CPU or memory limits, and a failed frozen-source scan can leave the owner fenced. Hosted capacity and a resumable or bounded scan remain open before this policy is ready for a real move.
 
 Transfer checkpoints without the current TEXT guard require manual review. Reconciliation requires version 3 evidence. A pending chunk or a previous journal is retained when rejected. Valid U+FFFD, ordinary multibyte text and a leading U+FEFF in a fragmented value round-trip. Import rejects an unpaired surrogate and rolls back the chunk.
 
