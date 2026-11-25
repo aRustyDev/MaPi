@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
-const compiled = await build({ entryPoints: ['scripts/recovery-scope-page-test-worker.mjs'], bundle: true, format: 'esm', platform: 'browser', external: ['cloudflare:workers'], write: false });
+const compiled = await build({ entryPoints: ['scripts/recovery-scope-page-test-worker.mjs'], bundle: true, format: 'esm', platform: 'browser', external: ['cloudflare:workers', 'node:crypto'], write: false });
 const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{
   name: 'local-synthetic-recovery-scope-page', compatibilityDate: '2026-11-19',
   modules: [{ type: 'ESModule', path: 'scope-page.js', contents: compiled.outputFiles[0].text }],

@@ -7,7 +7,7 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 const wasm = await readFile('worker/generated/phase1-owner.wasm');
 const bundle = await build({
   entryPoints: ['scripts/relocation-bounded-capacity-worker.mjs'], bundle: true,
-  format: 'esm', platform: 'neutral', write: false, external: ['cloudflare:workers'],
+  format: 'esm', platform: 'neutral', write: false, external: ['cloudflare:workers', 'node:crypto'],
   plugins: [{ name: 'wasm-binding', setup(build) {
     build.onResolve({ filter: /phase1-owner\.wasm$/ }, () => ({ path: './phase1-owner.wasm', external: true }));
   } }],

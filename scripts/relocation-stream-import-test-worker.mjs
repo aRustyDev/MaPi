@@ -12,7 +12,7 @@ export class StreamOwner extends DurableObject {
  state() { const state = streamImportStatus(this.s, 'p'); return { state, count: this.s.sql.exec('SELECT COUNT(*) AS n FROM items').one().n, events: this.s.sql.exec('SELECT COUNT(*) AS n FROM events').one().n }; }
  corrupt(kind) {
   if (kind === 'metadata') this.s.sql.exec('UPDATE mapi_chunk_import_stream SET cursor = ?', 'x'.repeat(100000));
-  else if (kind === 'pieces') for (let i = 1; i <= 200; i++) this.s.sql.exec('INSERT INTO mapi_chunk_import_stream_data VALUES (?, 2, ?, ?)', 'p', i, new Uint8Array([1]).buffer);
+  else if (kind === 'pieces') for (let i = 1; i <= 200; i++) this.s.sql.exec('INSERT INTO mapi_chunk_import_stream_data VALUES (?, 2, ?, ?, ?)', 'p', i, new Uint8Array([1]).buffer, '0'.repeat(64));
   else throw Error('Unknown corruption fixture');
  }
  evict() { this.ctx.abort('synthetic owner eviction'); }

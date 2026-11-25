@@ -113,6 +113,15 @@ export class ChunkProject extends DurableObject {
  setHistoryForTest(id, index, digest) { this.s.sql.exec('INSERT INTO mapi_chunk_import_data VALUES (?, ?, ?)', id, index, digest); }
  removeHistoryForTest(id, index) { this.s.sql.exec('DELETE FROM mapi_chunk_import_data WHERE project_id = ? AND chunk_index = ?', id, index); }
  setImportDigestForTest(id, index, value) { if (value === 'invalid-utf8') this.s.sql.exec("UPDATE mapi_chunk_import_data SET digest = CAST(X'80' AS TEXT) WHERE project_id = ? AND chunk_index = ?", id, index); else this.s.sql.exec('UPDATE mapi_chunk_import_data SET digest = ? WHERE project_id = ? AND chunk_index = ?', value, id, index); }
+ streamPieceForTest(id, column, offset) {
+  return this.s.sql.exec('SELECT data FROM mapi_chunk_import_stream_data WHERE project_id = ? AND column_index = ? AND piece_offset = ?', id, column, offset).one().data;
+ }
+ setStreamPieceForTest(id, column, offset, data) {
+  this.s.sql.exec('UPDATE mapi_chunk_import_stream_data SET data = ? WHERE project_id = ? AND column_index = ? AND piece_offset = ?', data, id, column, offset);
+ }
+ streamPieceCountForTest(id) {
+  return this.s.sql.exec('SELECT COUNT(*) AS n FROM mapi_chunk_import_stream_data WHERE project_id = ?', id).one().n;
+ }
  streamForTest(id) { return this.s.sql.exec('SELECT * FROM mapi_chunk_import_stream WHERE project_id = ?', id).one(); }
  setStreamForTest(id, field, value) { if (!['table_name', 'row_offset', 'last_chunk'].includes(field)) throw Error('Invalid local stream field'); this.s.sql.exec(`UPDATE mapi_chunk_import_stream SET ${field} = ? WHERE project_id = ?`, value, id); }
  fragmentForTest(id) { return this.s.sql.exec('SELECT * FROM mapi_chunk_import_fragment WHERE project_id = ?', id).one(); }
@@ -514,6 +523,27 @@ export default { async fetch(request, env) {
      await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'conflicting stream cursor accepted');
     }
     if (payload.stream.rowDone) {
+     // Corrupt an already committed BLOB slice without changing its size.
+     // The final frame must preserve the checkpoint and all durable pieces.
+     const saved = await hugeTarget.streamPieceForTest('huge', 2, 0);
+     const changed = new Uint8Array(saved.slice(0));
+     changed[0] ^= 1;
+     await hugeTarget.setStreamPieceForTest('huge', 2, 0, changed.buffer);
+     const before = {
+      checkpoint: await hugeTarget.importStatus('huge'),
+      stream: await hugeTarget.streamForTest('huge'),
+      pieces: await hugeTarget.streamPieceCountForTest('huge'),
+      rows: await hugeTarget.evidence(),
+     };
+     await rejects(() => hugeTarget.receive('huge', part, 0), 'same-size corrupted stream piece accepted');
+     const after = {
+      checkpoint: await hugeTarget.importStatus('huge'),
+      stream: await hugeTarget.streamForTest('huge'),
+      pieces: await hugeTarget.streamPieceCountForTest('huge'),
+      rows: await hugeTarget.evidence(),
+     };
+     check(JSON.stringify(before) === JSON.stringify(after), 'corrupted stream piece changed checkpoint or business rows');
+     await hugeTarget.setStreamPieceForTest('huge', 2, 0, saved);
      await rejects(() => hugeTarget.receive('huge', part, 1), 'final stream rollback was not injected');
      check((await hugeTarget.importStatus('huge')).next_chunk === fragments && (await hugeTarget.evidence()).users.length === 0, 'failed final stream persisted row or checkpoint');
     }

@@ -1,16 +1,18 @@
 // Durable v2 row-fragment staging. Call from the same synchronous transaction
 // as the owner fence, chunk-chain validation and import checkpoint update.
+import { createHash } from 'node:crypto';
 import { MAX_ROW_VALUE_BYTES } from './relocation-chunks.js';
 
 export const STREAM_SLICE_BYTES = 64 * 1024;
 export const STREAM_IMPORT_DDL = Object.freeze({
  mapi_chunk_import_stream: 'CREATE TABLE mapi_chunk_import_stream (project_id TEXT PRIMARY KEY, table_name TEXT NOT NULL, row_offset INTEGER NOT NULL, columns TEXT NOT NULL, types TEXT NOT NULL, cursor TEXT NOT NULL, column_index INTEGER NOT NULL, next_offset INTEGER NOT NULL, last_chunk INTEGER NOT NULL, utf8_remaining INTEGER NOT NULL, utf8_min INTEGER NOT NULL, utf8_max INTEGER NOT NULL)',
- mapi_chunk_import_stream_data: 'CREATE TABLE mapi_chunk_import_stream_data (project_id TEXT NOT NULL, column_index INTEGER NOT NULL, piece_offset INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (project_id, column_index, piece_offset))',
+ mapi_chunk_import_stream_data: 'CREATE TABLE mapi_chunk_import_stream_data (project_id TEXT NOT NULL, column_index INTEGER NOT NULL, piece_offset INTEGER NOT NULL, data BLOB NOT NULL, digest TEXT NOT NULL, PRIMARY KEY (project_id, column_index, piece_offset))',
 });
 const quote = name => '"' + name.replaceAll('"', '""') + '"';
 const first = (storage, sql, ...args) => storage.sql.exec(sql, ...args).toArray()[0];
 const bytes = value => new TextEncoder().encode(value).length;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const digest = data => createHash('sha256').update(new Uint8Array(data)).digest('hex');
 const own = (obj, fields) => !!obj && typeof obj === 'object' && !Array.isArray(obj) && Object.keys(obj).sort().join(',') === fields.slice().sort().join(',');
 const parse = value => { try { return JSON.parse(value); } catch { throw Error('Invalid stream import checkpoint'); } };
 
@@ -144,6 +146,10 @@ function validateStagedCells(storage, projectId, types) {
   for (let i = 0; i < pieces.length; i++) {
    const offset = i * STREAM_SLICE_BYTES, size = Math.min(STREAM_SLICE_BYTES, type.length - offset);
    if (pieces[i].piece_offset !== offset || pieces[i].kind !== 'blob' || pieces[i].size !== size) throw Error('Invalid staged stream slice');
+   const piece = storage.sql.exec(`SELECT CASE WHEN typeof(data) = 'blob' AND length(data) = ? THEN data END, CASE WHEN typeof(digest) = 'text' AND length(CAST(digest AS BLOB)) = 64 THEN CAST(digest AS BLOB) END FROM mapi_chunk_import_stream_data WHERE project_id = ? AND column_index = ? AND piece_offset = ?`, size, projectId, column, offset).raw().toArray()[0];
+   if (!piece || !(piece[0] instanceof ArrayBuffer) || !(piece[1] instanceof ArrayBuffer)) throw Error('Invalid staged stream slice');
+   const expectedDigest = new TextDecoder('utf-8', { fatal: true }).decode(piece[1]);
+   if (!/^[0-9a-f]{64}$/.test(expectedDigest) || digest(piece[0]) !== expectedDigest) throw Error('Invalid staged stream slice digest');
   }
  }
 }
@@ -194,7 +200,7 @@ export function importStream(storage, { projectId, table, names, rowOffset, inde
  const nextOffset = nextColumn === null ? null : cellDone ? 0 : end;
  const rowDone = nextColumn === null;
  if (stream.rowDone !== rowDone || stream.nextColumn !== nextColumn || stream.nextOffset !== nextOffset) throw Error('Invalid stream continuation');
- storage.sql.exec('INSERT INTO mapi_chunk_import_stream_data VALUES (?, ?, ?, ?)', projectId, stream.column, stream.offset, part.buffer);
+ storage.sql.exec('INSERT INTO mapi_chunk_import_stream_data VALUES (?, ?, ?, ?, ?)', projectId, stream.column, stream.offset, part.buffer, digest(part.buffer));
  if (!rowDone) {
   storage.sql.exec('UPDATE mapi_chunk_import_stream SET column_index = ?, next_offset = ?, last_chunk = ?, utf8_remaining = ?, utf8_min = ?, utf8_max = ? WHERE project_id = ?', nextColumn, nextOffset, index, utf8.remaining, utf8.minimum, utf8.maximum, projectId);
   return false;

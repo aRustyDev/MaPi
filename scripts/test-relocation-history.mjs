@@ -86,7 +86,7 @@ export default { async fetch(request, env) {
   } catch { return Response.json({ ok:false }, { status:500 }); }
 } };
 `;
-const result = await build({ stdin: { contents: source, resolveDir: process.cwd(), sourcefile: 'synthetic-relocation-history.js', loader: 'js' }, bundle:true, write:false, format:'esm', platform:'neutral', target:'es2022', external:['cloudflare:workers'] });
+const result = await build({ stdin: { contents: source, resolveDir: process.cwd(), sourcefile: 'synthetic-relocation-history.js', loader: 'js' }, bundle:true, write:false, format:'esm', platform:'neutral', target:'es2022', external:['cloudflare:workers', 'node:crypto'] });
 const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name:'synthetic-transfer-history', compatibilityDate:'2026-11-19', modules:[{ type:'ESModule', path:'worker.js', contents:result.outputFiles[0].text }], durableObjects:{ OWNER:{ className:'Owner', useSQLite:true } }, bindings:{ TEST_SECRET:secret } }], host:'127.0.0.1', port:0, telemetry:{ enabled:false } }));
 try {
   const response = await mf.dispatchFetch('http://127.0.0.1/', { headers:{ authorization:'Bearer ' + secret } });

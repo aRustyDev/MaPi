@@ -109,7 +109,7 @@ export default {
 
 const bundle = await build({
   stdin: { contents: source, resolveDir: process.cwd(), sourcefile: 'flow-release-authority-test.js', loader: 'js' },
-  bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers'],
+  bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers', 'node:crypto'],
   plugins: [{ name: 'prebuilt-phase1-wasm', setup(build) {
     build.onResolve({ filter: /^\.\/wasm-module\.js$/ }, args => args.importer === resolve('worker/app.js') ? { path: 'phase1-test-wasm', namespace: 'phase1-test' } : null);
     build.onLoad({ filter: /.*/, namespace: 'phase1-test' }, () => ({ contents: 'import wasm from "./phase1-owner.wasm"; export default wasm;', loader: 'js' }));
