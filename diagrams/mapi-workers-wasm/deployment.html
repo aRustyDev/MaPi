@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MaPi · Workers + Wasm deployment</title>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --paper: #f5f5f5;
+      --white: #ffffff;
+      --ink: #2d3142;
+      --muted: #4f5d75;
+      --rule: #bfc0c0;
+      --subtle: #dde0e5;
+      --public-zone: #eeeef0;
+      --private-zone: #eef0f3;
+      --backend-zone: #efeff0;
+      --accent: #eb6c36;
+      --accent-dark: #853b20;
+      --accent-tint: #fceee7;
+      --link: #2e5aa8;
+      --sans: "Geist", system-ui, sans-serif;
+      --mono: "Geist Mono", ui-monospace, monospace;
+      --serif: "Instrument Serif", Georgia, serif;
+    }
+    body { margin: 0; padding: 28px 24px; color: var(--ink); background: var(--paper); font-family: var(--sans); }
+    main { width: 100%; max-width: 1328px; margin: auto; }
+    header { padding: 0 20px 18px; border-bottom: 1px solid var(--rule); }
+    .kicker { margin: 0 0 8px; color: var(--muted); font: 500 11px var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 0 0 6px; font: 400 42px/1.05 var(--serif); }
+    header > .page-deck { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+    figure { margin: 0; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    svg { display: block; width: 100%; min-width: 1280px; height: auto; }
+    svg text { fill: var(--ink); font-family: var(--sans); dominant-baseline: auto; }
+    .zone { stroke: var(--muted); stroke-width: 1; stroke-opacity: .45; stroke-dasharray: 4 4; }
+    .zone-name { font: 600 14px var(--sans); }
+    .box { fill: var(--white); stroke: var(--rule); stroke-width: 1; }
+    .focal { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.5; }
+    .optional { stroke: var(--muted); stroke-dasharray: 5 4; }
+    .name { font-weight: 600; font-size: 16px; }
+    .entry { font-weight: 600; font-size: 14px; }
+    .detail { fill: var(--muted); font: 400 11px var(--sans); }
+    .tech { fill: var(--muted); font: 400 9px var(--mono); }
+    .tag { fill: var(--muted); font: 600 9px var(--mono); letter-spacing: .075em; }
+    .tag-accent { fill: var(--accent-dark); }
+    .tag-bg { fill: #e9ecf1; }
+    .tag-accent-bg { fill: #f9d8c6; }
+    .row { fill: #fffaf7; stroke: #e5c6b7; stroke-width: 1; }
+    .artifact { fill: #f2f4f7; stroke: var(--subtle); stroke-width: 1; }
+    .code { fill: var(--ink); font: 600 10px var(--mono); }
+    .key { fill: #ffffff; stroke: var(--rule); stroke-width: 1; }
+    .rule { stroke: var(--subtle); stroke-width: 1; }
+    .flow { fill: none; stroke: var(--link); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .internal { stroke: var(--muted); }
+    .dashed { stroke-dasharray: 5 4; }
+    .arrow-label { fill: var(--link); font: 500 9px var(--mono); letter-spacing: .025em; }
+    .arrow-label.internal-label { fill: var(--muted); }
+    .label-bg { fill: var(--paper); }
+    .note { fill: var(--muted); font: 400 10px var(--sans); }
+    .legend-label { font-weight: 600; font-size: 14px; }
+    figcaption { margin: 0 20px; padding: 12px 0 8px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; line-height: 1.55; }
+    figcaption p { max-width: 78ch; margin: 0 0 6px; }
+    .detail-panel { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--rule); }
+    .detail-panel > h2 { margin: 0 20px 4px; font: 400 32px/1.1 var(--serif); }
+    .detail-panel > p { margin: 0 20px 12px; color: var(--muted); font-size: 14px; }
+    .binding-notes { margin: 16px 20px 0; max-width: 1056px; border-top: 1px solid var(--rule); }
+    .binding-notes > div { display: grid; grid-template-columns: 12rem minmax(0, 1fr); gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--subtle); }
+    .binding-notes dt { font-size: 13px; font-weight: 600; }
+    .binding-notes dd { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .binding-notes code { font: .94em var(--mono); }
+    .page-nav { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px; font-size: 12px; }
+    .page-nav a { color: var(--link); text-underline-offset: 3px; }
+    .request-figure { padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--subtle); }
+    .request-figure h3 { margin: 0 20px 7px; font-size: 18px; line-height: 1.3; font-weight: 600; }
+    .request-figure figcaption { border-top: 0; padding-top: 4px; }
+    .request-figure figcaption p { max-width: 100ch; }
+    .seq-fragment { fill: #eef0f3; stroke: var(--rule); stroke-width: 1; }
+    .seq-tab { fill: var(--paper); stroke: var(--rule); stroke-width: 1; }
+    .seq-guard { fill: var(--muted); font: 600 10px var(--mono); }
+    .seq-lifeline, .seq-dispatch-divider { fill: none; stroke: #98a2b1; stroke-width: 1; stroke-dasharray: 3 4; }
+    .seq-active { fill: #e2e7ee; stroke: #8190a4; stroke-width: 1; }
+    .seq-arrow { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .seq-return, .seq-async { stroke-dasharray: 5 4; }
+    .seq-ok { stroke: #b24a21; }
+    .seq-message { fill: var(--ink); font: 500 10px var(--mono); }
+    .seq-message-ok { fill: var(--accent-dark); }
+    .request-mode { margin: 0 20px 6px; color: var(--muted); font: 500 11px var(--mono); }
+    .request-nav { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0 20px 16px; font-size: 12px; }
+    .request-nav a { color: var(--link); text-underline-offset: 3px; }
+    .state-summary { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--subtle); }
+    .state-summary h3 { margin: 0 20px; font-size: 18px; }
+    .journey-note { margin: 12px 20px 0; max-width: 100ch; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    @media (max-width: 600px) {
+      .detail-panel > h2, .detail-panel > p, .binding-notes { margin-left: 8px; margin-right: 8px; }
+      .binding-notes > div { grid-template-columns: 1fr; gap: 3px; }
+      .request-figure h3, .journey-note, .request-nav, .request-mode, .state-summary h3 { margin-left: 8px; margin-right: 8px; }
+    }
+    @media (max-width: 600px) { body { padding: 20px 12px; } header { padding-left: 8px; } figcaption { margin: 0 8px; } }
+    @media print {
+      @page { size: landscape; margin: 10mm; }
+      body { padding: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .diagram-container { overflow: visible; }
+      svg { min-width: 0; }
+      figure { break-inside: avoid; }
+      .page-nav, .request-nav { display: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="kicker">Target deployment</p>
+    <h1 id="diagram-heading">Workers + Wasm deployment</h1>
+    <p class="page-deck">MaPi exposes the API and UI at the public edge. Ory services run behind private Worker bindings.</p>
+    <nav class="page-nav" aria-label="MaPi deployment diagrams">
+      <a href="deployment.html" aria-current="page">Deployment</a>
+      <a href="worker-calls.html">Worker calls</a>
+      <a href="oidc-login.html">OIDC login</a>
+      <a href="api-key-request.html">API keys</a>
+      <a href="admin-api.html">Admin API</a>
+      <a href="inbound-webhook.html">Webhooks</a>
+      <a href="token-refresh.html">Refresh</a>
+      <a href="refresh-revocation-race.html">Refresh race</a>
+      <a href="oidc-logout.html">Logout</a>
+      <a href="kratos-session-revocation.html">Session revocation</a>
+      <a href="oauth-token-revocation.html">Token revocation</a>
+    </nav>
+  </header>
+  <figure id="deployment">
+    <div class="diagram-container" tabindex="0" aria-label="Scrollable deployment diagram">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="mapi-workers-wasm-deployment-title mapi-workers-wasm-deployment-desc">
+        <title id="mapi-workers-wasm-deployment-title">MaPi Workers + Wasm deployment</title>
+        <desc id="mapi-workers-wasm-deployment-desc">Clients reach Workers Static Assets and MaPi’s Public, Admin, and Webhook routes at the public edge, with service bindings to private Ory Workers, optional Oathkeeper, and Postgres access through Hyperdrive, with a Workers VPC Service for any later private compute.</desc>
+        <defs>
+          <marker id="mapi-workers-wasm-deployment-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <path d="M0 0L8 3L0 6Z" fill="#2e5aa8"/>
+          </marker>
+          <marker id="mapi-workers-wasm-deployment-arrow-internal" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <path d="M0 0L8 3L0 6Z" fill="#4f5d75"/>
+          </marker>
+        </defs>
+
+        <rect width="1280" height="720" fill="#f5f5f5"/>
+
+        <!-- Deployment boundaries -->
+        <rect class="zone" x="204" y="36" width="244" height="548" rx="8" fill="#eeeef0"/>
+        <rect class="zone" x="500" y="36" width="420" height="548" rx="8" fill="#eef0f3"/>
+        <rect class="zone" x="980" y="36" width="280" height="548" rx="8" fill="#efeff0"/>
+        <rect class="label-bg" x="215" y="27" width="95" height="18"/>
+        <rect class="label-bg" x="511" y="27" width="95" height="18"/>
+        <rect class="label-bg" x="991" y="27" width="138" height="18"/>
+        <text class="zone-name" x="20" y="41">Client Side</text>
+        <text class="zone-name" x="221" y="41">Public Edge</text>
+        <text class="zone-name" x="517" y="41">Private Edge</text>
+        <text class="zone-name" x="997" y="41">Private Backends</text>
+        <text class="tech" x="20" y="61">INTERNET CLIENTS</text>
+        <text class="tech" x="221" y="61">PUBLIC HOSTNAMES</text>
+        <text class="tech" x="517" y="61">BINDING-ONLY WORKERS</text>
+        <text class="tech" x="997" y="61">SERVICE-TO-SERVICE ACCESS</text>
+
+        <!-- Network and binding paths -->
+        <g aria-label="Deployment paths">
+          <path class="flow" d="M164 328H220" marker-end="url(#mapi-workers-wasm-deployment-arrow)"/>
+          <path class="flow internal" d="M324 176V152" marker-end="url(#mapi-workers-wasm-deployment-arrow-internal)"/>
+          <path class="flow" d="M432 328H516" marker-end="url(#mapi-workers-wasm-deployment-arrow)"/>
+          <path class="flow dashed" d="M432 216H452Q460 216 460 208V122Q460 114 468 114H516" marker-end="url(#mapi-workers-wasm-deployment-arrow)"/>
+          <path class="flow internal" d="M716 244H784" marker-end="url(#mapi-workers-wasm-deployment-arrow-internal)"/>
+          <path class="flow internal dashed" d="M716 468H784" marker-end="url(#mapi-workers-wasm-deployment-arrow-internal)"/>
+          <path class="flow" d="M904 244H996" marker-end="url(#mapi-workers-wasm-deployment-arrow)"/>
+          <path class="flow dashed" d="M904 468H996" marker-end="url(#mapi-workers-wasm-deployment-arrow)"/>
+        </g>
+
+        <!-- Path label masks -->
+        <g text-anchor="middle">
+          <rect class="label-bg" x="165" y="305" width="54" height="15"/>
+          <text class="arrow-label" x="192" y="316">HTTPS:443</text>
+          <rect class="label-bg" x="332" y="156" width="44" height="15"/>
+          <text class="arrow-label internal-label" x="354" y="167">ASSETS</text>
+          <rect class="label-bg" x="435" y="305" width="78" height="15"/>
+          <text class="arrow-label" x="474" y="316">WORKER BINDING</text>
+          <rect class="label-bg" x="468" y="154" width="57" height="15"/>
+          <text class="arrow-label" x="496.5" y="165">DECISION</text>
+          <rect class="label-bg" x="722" y="221" width="56" height="15"/>
+          <text class="arrow-label internal-label" x="750" y="232">BINDING</text>
+          <rect class="label-bg" x="722" y="445" width="56" height="15"/>
+          <text class="arrow-label internal-label" x="750" y="456">BINDING</text>
+          <rect class="label-bg" x="919" y="221" width="62" height="15"/>
+          <text class="arrow-label" x="950" y="232">TLS:5432</text>
+          <rect class="label-bg" x="912" y="445" width="76" height="15"/>
+          <text class="arrow-label" x="950" y="456">PRIVATE HTTPS</text>
+        </g>
+
+        <!-- Client Side -->
+        <g aria-label="Client Side">
+          <rect class="box" x="20" y="176" width="144" height="280" rx="6"/>
+          <rect class="tag-bg" x="32" y="188" width="45" height="16" rx="2"/>
+          <text class="tag" x="38" y="200">HTTPS</text>
+          <text class="name" x="32" y="229">Browser</text>
+          <text class="detail" x="32" y="247">Login and console</text>
+          <path class="rule" d="M32 259H152"/>
+          <text class="name" x="32" y="280">Apps</text>
+          <text class="detail" x="32" y="298">OIDC and API clients</text>
+          <path class="rule" d="M32 310H152"/>
+          <text class="name" x="32" y="331">Operators</text>
+          <text class="detail" x="32" y="349">Admin console / CLI</text>
+          <path class="rule" d="M32 361H152"/>
+          <text class="name" x="32" y="382">Providers</text>
+          <text class="detail" x="32" y="400">Webhook senders</text>
+        </g>
+
+        <!-- Public Edge -->
+        <g aria-label="Public Edge">
+          <rect class="box" x="220" y="76" width="212" height="76" rx="6"/>
+          <rect class="tag-bg" x="232" y="88" width="34" height="16" rx="2"/>
+          <text class="tag" x="238" y="100">CDN</text>
+          <text class="name" x="232" y="122">Workers Static Assets</text>
+          <text class="detail" x="232" y="139">UI · Zitadel sign-in and console</text>
+
+          <rect class="box focal" x="220" y="176" width="212" height="280" rx="6"/>
+          <rect class="tag-accent-bg" x="232" y="188" width="91" height="16" rx="2"/>
+          <text class="tag tag-accent" x="238" y="200">PUBLIC WORKER</text>
+          <text class="name" x="232" y="229">MaPi ingress</text>
+          <text class="detail" x="232" y="247">Issuer routing · WAF / rate limits</text>
+
+          <rect class="row" x="232" y="260" width="188" height="52" rx="4"/>
+          <text class="entry" x="242" y="281">Public API</text>
+          <text class="detail" x="242" y="299">OAuth2 / OIDC and app APIs</text>
+
+          <rect class="row" x="232" y="320" width="188" height="52" rx="4"/>
+          <text class="entry" x="242" y="341">Admin API</text>
+          <text class="detail" x="242" y="359">Authorized management</text>
+
+          <rect class="row" x="232" y="380" width="188" height="52" rx="4"/>
+          <text class="entry" x="242" y="401">Webhook API</text>
+          <text class="detail" x="242" y="419">Verify signatures · enqueue</text>
+
+          <rect class="box" x="220" y="484" width="212" height="84" rx="6"/>
+          <text class="name" x="232" y="508">Edge controls</text>
+          <text class="detail" x="232" y="529">Rollout flags · Worker configuration</text>
+          <text class="detail" x="232" y="548">Telemetry · logs, metrics, traces</text>
+        </g>
+
+        <!-- Private Edge -->
+        <g aria-label="Private Edge">
+          <rect class="box optional" x="516" y="76" width="200" height="76" rx="6"/>
+          <rect class="tag-bg" x="528" y="88" width="64" height="16" rx="2"/>
+          <text class="tag" x="534" y="100">OPTIONAL</text>
+          <text class="name" x="528" y="122">IAP · Oathkeeper</text>
+          <text class="detail" x="528" y="139">Allow / deny before dispatch</text>
+
+          <rect class="box" x="516" y="176" width="200" height="372" rx="6"/>
+          <rect class="tag-bg" x="528" y="188" width="104" height="16" rx="2"/>
+          <text class="tag" x="534" y="200">PRIVATE WORKERS</text>
+          <text class="name" x="528" y="226">MaPi service Workers</text>
+          <text class="detail" x="528" y="245">API adapters and tenant policy</text>
+
+          <rect class="artifact" x="528" y="260" width="176" height="40" rx="4"/>
+          <text class="code" x="537" y="276">AuN</text>
+          <text class="entry" x="565" y="277">Hydra</text>
+          <text class="detail" x="565" y="291">OAuth2 / OIDC issuer</text>
+
+          <rect class="artifact" x="528" y="308" width="176" height="40" rx="4"/>
+          <text class="code" x="537" y="324">UDB</text>
+          <text class="entry" x="565" y="325">Kratos</text>
+          <text class="detail" x="565" y="339">Users, login and sessions</text>
+
+          <rect class="artifact" x="528" y="356" width="176" height="60" rx="4"/>
+          <text class="code" x="537" y="372">AuZ</text>
+          <text class="entry" x="565" y="373">Keto · default</text>
+          <text class="detail" x="565" y="388">Permission adapter</text>
+          <text class="tech" x="537" y="405">OpenFGA or SpiceDB · future</text>
+
+          <rect class="artifact" x="528" y="424" width="176" height="40" rx="4"/>
+          <text class="code" x="537" y="440">Keys</text>
+          <text class="entry" x="565" y="441">Talos</text>
+          <text class="detail" x="565" y="455">API keys</text>
+
+          <text class="detail" x="528" y="483">Webhook consumer · Queues</text>
+          <text class="detail" x="528" y="498">Session lifecycle · Durable Object</text>
+          <path class="rule" d="M528 502H704"/>
+          <text class="tag" x="528" y="524">GO/WASM TARGET · PINS TBD</text>
+
+          <rect class="box" x="784" y="212" width="120" height="64" rx="6"/>
+          <text class="name" x="796" y="239">Hyperdrive</text>
+          <text class="detail" x="796" y="254">Hydra, Kratos, Keto</text>
+          <text class="tech" x="796" y="268">TALOS WITH OEL</text>
+
+          <rect class="box optional" x="784" y="436" width="120" height="64" rx="6"/>
+          <text class="entry" x="796" y="463">Workers VPC</text>
+          <text class="detail" x="796" y="481">Scoped VPC Service</text>
+          <text class="tech" x="784" y="518">BASELINE: 0 NETWORKS</text>
+        </g>
+
+        <!-- Private Backends -->
+        <g aria-label="Private Backends">
+          <rect class="box" x="996" y="204" width="248" height="80" rx="6"/>
+          <rect class="tag-bg" x="1008" y="214" width="62" height="16" rx="2"/>
+          <text class="tag" x="1014" y="226">MANAGED</text>
+          <text class="name" x="1008" y="249">Neon or Supabase Postgres</text>
+          <text class="detail" x="1008" y="268">One provider · separate service roles</text>
+
+          <rect class="box optional" x="996" y="320" width="248" height="72" rx="6"/>
+          <rect class="tag-bg" x="1008" y="330" width="64" height="16" rx="2"/>
+          <text class="tag" x="1014" y="342">OPTIONAL</text>
+          <text class="name" x="1008" y="364">Upstash Redis</text>
+          <text class="detail" x="1008" y="380">No Worker binding in the target</text>
+
+          <rect class="box optional" x="996" y="432" width="248" height="72" rx="6"/>
+          <rect class="tag-bg" x="1008" y="442" width="64" height="16" rx="2"/>
+          <text class="tag" x="1014" y="454">OPTIONAL</text>
+          <text class="name" x="1008" y="476">External compute</text>
+          <text class="detail" x="1008" y="492">Background jobs or future AuthZ hosting</text>
+
+          <text class="note" x="997" y="530">Talos on Postgres requires Ory Enterprise.</text>
+        </g>
+
+        <!-- Legend -->
+        <path class="rule" d="M20 608H1260"/>
+        <text class="legend-label" x="20" y="633">Legend</text>
+        <g aria-label="IAP equals Oathkeeper, AuN equals Hydra, AuZ equals Keto, Keys equals Talos, UDB equals Kratos, UI equals Zitadel">
+          <rect class="key" x="20" y="646" width="36" height="24" rx="4"/>
+          <text class="code" x="38" y="661" text-anchor="middle">IAP</text>
+          <text class="entry" x="64" y="663">Oathkeeper</text>
+
+          <rect class="key" x="220" y="646" width="36" height="24" rx="4"/>
+          <text class="code" x="238" y="661" text-anchor="middle">AuN</text>
+          <text class="entry" x="264" y="663">Hydra</text>
+
+          <rect class="key" x="416" y="646" width="36" height="24" rx="4"/>
+          <text class="code" x="434" y="661" text-anchor="middle">AuZ</text>
+          <text class="entry" x="460" y="663">Keto</text>
+
+          <rect class="key" x="612" y="646" width="40" height="24" rx="4"/>
+          <text class="code" x="632" y="661" text-anchor="middle">Keys</text>
+          <text class="entry" x="660" y="663">Talos</text>
+
+          <rect class="key" x="812" y="646" width="36" height="24" rx="4"/>
+          <text class="code" x="830" y="661" text-anchor="middle">UDB</text>
+          <text class="entry" x="856" y="663">Kratos</text>
+
+          <rect class="key" x="1008" y="646" width="36" height="24" rx="4"/>
+          <text class="code" x="1026" y="661" text-anchor="middle">UI</text>
+          <text class="entry" x="1052" y="663">Zitadel</text>
+        </g>
+        <path class="flow" d="M20 692H48" marker-end="url(#mapi-workers-wasm-deployment-arrow)"/>
+        <text class="detail" x="58" y="696">Default path</text>
+        <path class="flow dashed" d="M220 692H248" marker-end="url(#mapi-workers-wasm-deployment-arrow)"/>
+        <text class="detail" x="258" y="696">Optional path</text>
+        <text class="detail" x="416" y="696">Blue crosses a boundary · slate stays within a zone</text>
+      </svg>
+    </div>
+    <figcaption>
+      <p>This is the intended placement. Ory Wasm ports and Zitadel UI adapters still need validation. Hyperdrive uses the selected provider’s TLS endpoint. The Worker call map expands the private Worker group.</p>
+    </figcaption>
+  </figure>
+</main>
+</body>
+</html>

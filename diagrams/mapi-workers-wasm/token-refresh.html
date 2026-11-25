@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MaPi · Token refresh</title>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --paper: #f5f5f5;
+      --white: #ffffff;
+      --ink: #2d3142;
+      --muted: #4f5d75;
+      --rule: #bfc0c0;
+      --subtle: #dde0e5;
+      --public-zone: #eeeef0;
+      --private-zone: #eef0f3;
+      --backend-zone: #efeff0;
+      --accent: #eb6c36;
+      --accent-dark: #853b20;
+      --accent-tint: #fceee7;
+      --link: #2e5aa8;
+      --sans: "Geist", system-ui, sans-serif;
+      --mono: "Geist Mono", ui-monospace, monospace;
+      --serif: "Instrument Serif", Georgia, serif;
+    }
+    body { margin: 0; padding: 28px 24px; color: var(--ink); background: var(--paper); font-family: var(--sans); }
+    main { width: 100%; max-width: 1328px; margin: auto; }
+    header { padding: 0 20px 18px; border-bottom: 1px solid var(--rule); }
+    .kicker { margin: 0 0 8px; color: var(--muted); font: 500 11px var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 0 0 6px; font: 400 42px/1.05 var(--serif); }
+    header > .page-deck { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+    figure { margin: 0; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    svg { display: block; width: 100%; min-width: 1280px; height: auto; }
+    svg text { fill: var(--ink); font-family: var(--sans); dominant-baseline: auto; }
+    .zone { stroke: var(--muted); stroke-width: 1; stroke-opacity: .45; stroke-dasharray: 4 4; }
+    .zone-name { font: 600 14px var(--sans); }
+    .box { fill: var(--white); stroke: var(--rule); stroke-width: 1; }
+    .focal { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.5; }
+    .optional { stroke: var(--muted); stroke-dasharray: 5 4; }
+    .name { font-weight: 600; font-size: 16px; }
+    .entry { font-weight: 600; font-size: 14px; }
+    .detail { fill: var(--muted); font: 400 11px var(--sans); }
+    .tech { fill: var(--muted); font: 400 9px var(--mono); }
+    .tag { fill: var(--muted); font: 600 9px var(--mono); letter-spacing: .075em; }
+    .tag-accent { fill: var(--accent-dark); }
+    .tag-bg { fill: #e9ecf1; }
+    .tag-accent-bg { fill: #f9d8c6; }
+    .row { fill: #fffaf7; stroke: #e5c6b7; stroke-width: 1; }
+    .artifact { fill: #f2f4f7; stroke: var(--subtle); stroke-width: 1; }
+    .code { fill: var(--ink); font: 600 10px var(--mono); }
+    .key { fill: #ffffff; stroke: var(--rule); stroke-width: 1; }
+    .rule { stroke: var(--subtle); stroke-width: 1; }
+    .flow { fill: none; stroke: var(--link); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .internal { stroke: var(--muted); }
+    .dashed { stroke-dasharray: 5 4; }
+    .arrow-label { fill: var(--link); font: 500 9px var(--mono); letter-spacing: .025em; }
+    .arrow-label.internal-label { fill: var(--muted); }
+    .label-bg { fill: var(--paper); }
+    .note { fill: var(--muted); font: 400 10px var(--sans); }
+    .legend-label { font-weight: 600; font-size: 14px; }
+    figcaption { margin: 0 20px; padding: 12px 0 8px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; line-height: 1.55; }
+    figcaption p { max-width: 78ch; margin: 0 0 6px; }
+    .detail-panel { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--rule); }
+    .detail-panel > h2 { margin: 0 20px 4px; font: 400 32px/1.1 var(--serif); }
+    .detail-panel > p { margin: 0 20px 12px; color: var(--muted); font-size: 14px; }
+    .binding-notes { margin: 16px 20px 0; max-width: 1056px; border-top: 1px solid var(--rule); }
+    .binding-notes > div { display: grid; grid-template-columns: 12rem minmax(0, 1fr); gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--subtle); }
+    .binding-notes dt { font-size: 13px; font-weight: 600; }
+    .binding-notes dd { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .binding-notes code { font: .94em var(--mono); }
+    .page-nav { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px; font-size: 12px; }
+    .page-nav a { color: var(--link); text-underline-offset: 3px; }
+    .request-figure { padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--subtle); }
+    .request-figure h3 { margin: 0 20px 7px; font-size: 18px; line-height: 1.3; font-weight: 600; }
+    .request-figure figcaption { border-top: 0; padding-top: 4px; }
+    .request-figure figcaption p { max-width: 100ch; }
+    .seq-fragment { fill: #eef0f3; stroke: var(--rule); stroke-width: 1; }
+    .seq-tab { fill: var(--paper); stroke: var(--rule); stroke-width: 1; }
+    .seq-guard { fill: var(--muted); font: 600 10px var(--mono); }
+    .seq-lifeline, .seq-dispatch-divider { fill: none; stroke: #98a2b1; stroke-width: 1; stroke-dasharray: 3 4; }
+    .seq-active { fill: #e2e7ee; stroke: #8190a4; stroke-width: 1; }
+    .seq-arrow { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .seq-return, .seq-async { stroke-dasharray: 5 4; }
+    .seq-ok { stroke: #b24a21; }
+    .seq-message { fill: var(--ink); font: 500 10px var(--mono); }
+    .seq-message-ok { fill: var(--accent-dark); }
+    .request-mode { margin: 0 20px 6px; color: var(--muted); font: 500 11px var(--mono); }
+    .request-nav { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0 20px 16px; font-size: 12px; }
+    .request-nav a { color: var(--link); text-underline-offset: 3px; }
+    .state-summary { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--subtle); }
+    .state-summary h3 { margin: 0 20px; font-size: 18px; }
+    .journey-note { margin: 12px 20px 0; max-width: 100ch; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    @media (max-width: 600px) {
+      .detail-panel > h2, .detail-panel > p, .binding-notes { margin-left: 8px; margin-right: 8px; }
+      .binding-notes > div { grid-template-columns: 1fr; gap: 3px; }
+      .request-figure h3, .journey-note, .request-nav, .request-mode, .state-summary h3 { margin-left: 8px; margin-right: 8px; }
+    }
+    @media (max-width: 600px) { body { padding: 20px 12px; } header { padding-left: 8px; } figcaption { margin: 0 8px; } }
+    @media print {
+      @page { size: landscape; margin: 10mm; }
+      body { padding: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .diagram-container { overflow: visible; }
+      svg { min-width: 0; }
+      figure { break-inside: avoid; }
+      .page-nav, .request-nav { display: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="kicker">Request sequence · target deployment</p>
+    <h1 id="diagram-heading">Token refresh</h1>
+    <nav class="page-nav" aria-label="MaPi deployment diagrams">
+      <a href="deployment.html">Deployment</a>
+      <a href="worker-calls.html">Worker calls</a>
+      <a href="oidc-login.html">OIDC login</a>
+      <a href="api-key-request.html">API keys</a>
+      <a href="admin-api.html">Admin API</a>
+      <a href="inbound-webhook.html">Webhooks</a>
+      <a href="token-refresh.html" aria-current="page">Refresh</a>
+      <a href="refresh-revocation-race.html">Refresh race</a>
+      <a href="oidc-logout.html">Logout</a>
+      <a href="kratos-session-revocation.html">Session revocation</a>
+      <a href="oauth-token-revocation.html">Token revocation</a>
+    </nav>
+  </header>
+    <figure class="request-figure" id="mapi-flow-refresh">
+      <p class="request-mode">IAP off and on · same path</p>
+      <div class="diagram-container" tabindex="0" aria-label="Token refresh sequence">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 632" role="img" aria-labelledby="mapi-flow-refresh-title mapi-flow-refresh-desc">
+        <title id="mapi-flow-refresh-title">Token refresh</title>
+        <desc id="mapi-flow-refresh-desc">For a user-bound grant, Hydra verifies the client and resolves the refresh token, MaPi checks the session binding and Kratos session, and Hydra either rotates the token set or rejects refresh.</desc>
+        <defs>
+        <marker id="mapi-flow-refresh-call" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#4f5d75"/></marker>
+        <marker id="mapi-flow-refresh-ok" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#b24a21"/></marker>
+        <marker id="mapi-flow-refresh-async" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L7 4L0 8" fill="none" stroke="#4f5d75" stroke-width="1.2"/></marker>
+        </defs>
+        <rect width="1280" height="632" fill="#f5f5f5"/>
+        <rect class="seq-fragment" x="96" y="324" width="568" height="292" rx="4"/>
+        <path class="seq-dispatch-divider" d="M101 488H659"/>
+        <path class="seq-lifeline" d="M124 68V620"/>
+        <path class="seq-lifeline" d="M380 68V620"/>
+        <path class="seq-lifeline" d="M636 68V620"/>
+        <path class="seq-lifeline" d="M892 68V620"/>
+        <path class="seq-lifeline" d="M1148 68V620"/>
+        <rect class="seq-active" x="632" y="144" width="8" height="168" rx="1"/>
+        <rect class="seq-active" x="888" y="208" width="8" height="104" rx="1"/>
+        <rect class="seq-active" x="632" y="400" width="8" height="40" rx="1"/>
+        <rect class="seq-active" x="632" y="560" width="8" height="8" rx="1"/>
+        <rect class="seq-tab" x="104" y="324" width="38" height="17" rx="2"/>
+        <text class="tag" x="113" y="336">ALT</text>
+        <rect class="label-bg" x="107" y="340" width="187.35000000000002" height="15" rx="0"/>
+        <text class="seq-guard" x="111" y="351">[Session active · fence open]</text>
+        <rect class="label-bg" x="107" y="503" width="230.4" height="15" rx="0"/>
+        <text class="seq-guard" x="111" y="514">[Session revoked, expired or fenced]</text>
+        <path class="seq-arrow seq-call" d="M124 112H380" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="164.3" y="91" width="175.3" height="15" rx="0"/>
+        <text class="seq-message" x="252" y="102" text-anchor="middle">POST /oauth2/token · refresh grant</text>
+        <path class="seq-arrow seq-call" d="M380 144H636" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="414.3" y="123" width="187.4" height="15" rx="0"/>
+        <text class="seq-message" x="508" y="134" text-anchor="middle">Forward client auth and token</text>
+        <path class="seq-arrow seq-call" d="M636 166H658Q664 166 664 172V180Q664 186 658 186H636" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="671" y="169" width="217" height="15" rx="0"/>
+        <text class="seq-message" x="676" y="180">Verify client; resolve stored grant</text>
+        <path class="seq-arrow seq-call" d="M636 208H892" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="670.3" y="187" width="187.4" height="15" rx="0"/>
+        <text class="seq-message" x="764" y="198" text-anchor="middle">Check bound session and fence</text>
+        <path class="seq-arrow seq-call" d="M892 240H1148" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="935.4" y="219" width="169.3" height="15" rx="0"/>
+        <text class="seq-message" x="1020" y="230" text-anchor="middle">Read current session state</text>
+        <path class="seq-arrow seq-return" d="M1148 272H892" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="935.4" y="251" width="169.3" height="15" rx="0"/>
+        <text class="seq-message" x="1020" y="262" text-anchor="middle">Active, revoked or expired</text>
+        <path class="seq-arrow seq-return" d="M892 304H636" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="670.3" y="283" width="187.4" height="15" rx="0"/>
+        <text class="seq-message" x="764" y="294" text-anchor="middle">Session gate allows or denies</text>
+        <path class="seq-arrow seq-call" d="M636 390H614Q608 390 608 396V404Q608 410 614 410H636" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="384" y="393" width="217" height="15" rx="0"/>
+        <text class="seq-message" x="389" y="404">Rotate and store in Hydra Postgres</text>
+        <path class="seq-arrow seq-return" d="M636 432H380" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="420.3" y="411" width="175.3" height="15" rx="0"/>
+        <text class="seq-message" x="508" y="422" text-anchor="middle">New access + refresh tokens</text>
+        <path class="seq-arrow seq-ok" d="M380 464H124" marker-end="url(#mapi-flow-refresh-ok)"/>
+        <rect class="label-bg" x="176.4" y="443" width="151.2" height="15" rx="0"/>
+        <text class="seq-message seq-message-ok" x="252" y="454" text-anchor="middle">200 · updated token set</text>
+        <path class="seq-arrow seq-return" d="M636 560H380" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="462.7" y="539" width="90.6" height="15" rx="0"/>
+        <text class="seq-message" x="508" y="550" text-anchor="middle">invalid_grant</text>
+        <path class="seq-arrow seq-return" d="M380 592H124" marker-end="url(#mapi-flow-refresh-call)"/>
+        <rect class="label-bg" x="194.6" y="571" width="114.8" height="15" rx="0"/>
+        <text class="seq-message" x="252" y="582" text-anchor="middle">400 · OAuth error</text>
+        <rect class="box" x="20" y="16" width="208" height="52" rx="0"/>
+        <text class="name" x="124" y="38" text-anchor="middle">OAuth client</text>
+        <text class="detail" x="124" y="56" text-anchor="middle">Relying party or token client</text>
+        <rect class="box" x="276" y="16" width="208" height="52" rx="0"/>
+        <text class="name" x="380" y="38" text-anchor="middle">MaPi ingress</text>
+        <text class="detail" x="380" y="56" text-anchor="middle">Public Worker</text>
+        <rect class="box" x="532" y="16" width="208" height="52" rx="0"/>
+        <text class="name" x="636" y="38" text-anchor="middle">Hydra</text>
+        <text class="detail" x="636" y="56" text-anchor="middle">OAuth2 / OIDC Worker</text>
+        <rect class="box" x="788" y="16" width="208" height="52" rx="0"/>
+        <text class="name" x="892" y="38" text-anchor="middle">MaPi lifecycle</text>
+        <text class="detail" x="892" y="56" text-anchor="middle">Private Worker and Durable Object</text>
+        <rect class="box" x="1044" y="16" width="208" height="52" rx="0"/>
+        <text class="name" x="1148" y="38" text-anchor="middle">Kratos</text>
+        <text class="detail" x="1148" y="56" text-anchor="middle">Identity and session Worker</text>
+        </svg>
+      </div>
+      <figcaption>
+        <p>This is a target integration in the Hydra port. MaPi resolves the session through trusted grant metadata, checks the durable fence and the current Kratos status, and fails closed if the check is unavailable. A closed, revoked, or expired session yields invalid_grant for the user-bound grant.</p>
+        <p>Hydra must recheck the Durable Object fence before releasing a token response. The <a href="refresh-revocation-race.html">refresh race sequence</a> shows the ordering with revocation. Protected MaPi APIs still apply the live session check.</p>
+      </figcaption>
+    </figure>
+</main>
+</body>
+</html>
