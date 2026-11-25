@@ -9,7 +9,7 @@ export default {
     const record = (name, args) => { observed.push([name, args]); };
     const object = {
       async identity() { return authority.projectId; },
-      async status() { return { ready: true, recoveryReady: true, maintenance: false }; },
+      async status() { return { ready: true, fenceReady: true, recoveryReady: true, maintenance: false }; },
       async addUser(...args) { record("addUser", args); return { userId: "user_test" }; },
       async oauthAdmin(...args) { record("oauthAdmin", args); return {}; },
       async handleRequest(...args) { record("handleRequest", args); return { status: 200, headers: {}, body: null }; },

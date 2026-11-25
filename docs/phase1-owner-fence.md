@@ -8,6 +8,119 @@ The `MAPI_FENCE_WRITERS_DRAINED=1` setting is an operator assertion, not a platf
 
 Cloudflare's current [Durable Object code-update documentation](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/) makes the drain requirement more specific: an active object can continue accepting requests and storage writes on old code during a deferred update. The default maximum delay is 300 seconds, but an explicit strategy can change it. A new Worker version being deployed to 100% is therefore not proof that the existing owner has adopted it. Deployment changes also [take time to propagate](https://developers.cloudflare.com/workers/versions-and-deployments/), and a version override can select a version present in the deployment even at 0% traffic. Before asserting drain, inventory every owner and caller deployment and its update strategy, exclude old selectable versions and out-of-band writers, independently establish propagation and adoption of the reviewed fence-aware build for the actual owner, and account for in-flight calls. Neither a fixed five-minute sleep nor a point-in-time 100% deployment response alone proves those conditions. A deliberate immediate reset can interrupt requests; rehearse and reconcile retries before using any update strategy. These are required checks, not evidence that the current singleton has passed them.
 
+## Commit authority and writer inventory
+
+The local writer inventory follows these entry points to their persistence
+boundary in the bounded Go/Wasm candidate.
+
+| Writer path | Persistence boundary |
+| --- | --- |
+| User and project admin, management, flow releases, OAuth clients and keys | Owner RPC checks the route, then the Go SQL host checks authority in the statement transaction or Go transaction callback. |
+| Flow, SSO challenge, issuer and token paths, login, handoff exchange, session creation and revocation | Routed owner RPCs call the same Go SQL host. Throttle is a separate synchronous JavaScript transaction on the owner. |
+| Application audit and Go request-time cleanup | The Go host uses the same check for direct statements and explicit transaction callbacks. A failed in-transaction audit write rolls back with its business mutation. |
+| Project provisioning and first activation | Owner checks the pending reservation and object identity. Registry acknowledges the pending fence before active routing. |
+| Move, import, schema migration, recovery staging and reconciliation | Separate maintenance entry points check their control authority, route, intent and durable progress. The routine active-owner guard is scoped to business writes. |
+| Background and external writers | Candidate source review found no scheduled owner handler. Old scripts, other bindings, outstanding RPCs, and out-of-band PITR require deployment evidence. |
+
+Routine protected Go SQL statements, explicit Go transactions and JavaScript
+throttle writes now recheck authority immediately before commit. The active
+generation or the pending/recovery authority must still match. SQLite metadata
+checks use case-insensitive identifier identity on the control tables. A
+disposable owner test injected a throttle-table trigger that changed the
+generation. The previous code committed the throttle and generation changes.
+With the check, both roll back, the original request authority remains valid,
+and a subsequent login succeeds. A native SQLite test also rolls back business,
+audit and authority changes in the same transaction.
+
+The local held-call pre-freeze, owner, production-tagged owner and relocation
+storage checks passed. The separate real-owner relocation driver still
+expects only the older import and reconcile phases. Current coordinator
+history verification can return another phase, and the live registry refuses
+new cutovers until it has independent archive proof. The full real-owner
+cutover is therefore pending. The fail-closed production path remains active.
+
+A read-only Woven inspection on November 24 found 56 token-visible Workers
+using the paginated List Workers endpoint, 31 namespaces, and settings for all
+56 listed scripts. One direct binding matched the configured staging owner
+namespace and no listed service binding targeted that Worker. The configured
+owner's active deployment listed one version at 100%. Its version metadata
+was dated November 19 and the deployment response did not report its update
+strategy. The separate script-search endpoint returned 56 rows without the
+pagination metadata required by the benchmark verifier. These observations
+establish the visible inventory at collection time. Adoption by the actual
+object, old selectable versions, in-flight work, and out-of-band callers
+remain unverified. No Woven resource was changed.
+
+### Read-only adoption follow-up
+
+The active configured Woven owner still selected one version at 100%. The
+same version was active before and after the read-only check. Cloudflare's
+immutable-version module response returned its JavaScript entrypoint and one
+Wasm module. Their SHA-256 digests begin `7a50610e0c8a` and `254f17e7dcb2`.
+The reviewed #121 bundle begins `7ad9e647418b` and `a92046490a63`.
+Both deployed modules differ from the candidate.
+
+The binding's complete cursor traversal returned one stored Durable Object.
+Seven bounded daily GraphQL queries on that object attributed 63 requests to
+the currently deployed version and two to a different version. The five most
+recent daily windows returned zero groups. Stored invocation logs returned
+HTTP 403 for the available identity. These aggregates establish historical
+execution of the old version. Zero groups leave current in-flight drain
+unverified. No probe invoked the owner and no Woven deployment was changed.
+
+The legacy owner has not adopted the reviewed candidate. Adoption and a
+recorded in-flight drain remain prerequisites for move authorization. See
+[Cloudflare’s version module API](https://developers.cloudflare.com/api/resources/workers/subresources/beta/subresources/workers/subresources/versions/methods/get/)
+and [Durable Object code updates](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/).
+
+## Isolated Woven upgrade rehearsal
+
+On November 25, 2026, an isolated owner started with the byte-identical
+JavaScript and Go/Wasm downloaded from the configured legacy owner's
+immutable version. A fresh SQLite namespace was provisioned with a
+synthetic schema-v2 project and user. A password sign-in verified the
+legacy Go/Wasm path before deployment changed.
+
+A temporary legacy entrypoint kept both legacy modules intact and added an
+authenticated RPC to hold real legacy Go user writes before execution.
+Both requests were observed in the same running object. Admission closed
+before the candidate deployment. After the deployment API listed the
+byte-identical #121 Worker at 100%, both old requests were still held.
+Their releases occurred after that observation. Following an isolated
+rollback, the durable SQLite journal showed two committed entries, both
+users could sign in, and there were no active admitted operations.
+Deployment request timestamps were unavailable in one API response, so
+causal ordering comes from the active-version observation followed by
+release. A separate repeat reached the new owner constructor during
+release and did not establish both terminal outcomes. A deployment
+percentage or a deferred update window alone cannot establish drain.
+
+The direct #121 upgrade rejected the unchanged legacy schema with
+`Legacy owner schema requires authorized adoption`. Inspection on the
+rolled-back synthetic object identified `mapi_project_origin` as the only
+missing table among the four required by that constructor. The rehearsal
+checked that the old ledger was terminal, the database was schema v2, and
+the project and configured origin matched the synthetic fixture. A
+private rehearsal RPC then created and populated only that metadata table
+in one transaction.
+
+The exact #121 bundle was activated again. Its candidate-only fence RPC
+succeeded at generation 1, the object and project IDs were preserved, and
+the old hold RPC was unavailable. A generation-2 write to the generation-1
+owner rejected. Four synthetic users could sign in, including both held
+legacy writes and a new #121 write. The seed and new user each had one
+creation audit event, and the stale-generation user could not sign in.
+No relocation or drained-writers flag was enabled.
+
+The configured Woven owner's active deployment ID stayed the same. Both
+rehearsals used generated Worker names, isolated bindings, and synthetic
+data. The prepared result establishes an upgrade path for that fixture.
+The existing owner still requires a reviewed origin-metadata adoption
+procedure and its own independently attested writer drain before moves
+can be authorized. See [Durable Object code updates](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/).
+
+## Recovery
+
 Recovery remains deliberately incomplete. The registry can close a project route, prevent relocation, arm and freeze its owner, and anchor an exact timestamp-clock high-water independently when that clock exists. It refuses recovery during an unfinalized cutover. A per-object recovery epoch map uses canonical lowercase object IDs and guards every listed object, including previously targeted projects after the current target changes. The registry validates every listed entry against its independent anchor and retains a ledger to reject omitted previously deployed object entries on restart; unrelated projects continue. Deployment must retain and verify the complete map on every owner build: a direct RPC to an owner cannot consult the registry synchronously if an operator omits that owner from its environment. The legacy restore and recover RPCs are disabled for all owners, including unfenced objects and objects without a clock table: a scheduled restore must never race a move reservation or erase a fence. There is no production restore/reactivation coordinator, and out-of-band PITR could bypass the code.
 
 Earlier experimental scoped revision allocation takes maxima from individual tables. Those maxima can go backwards when rows are deleted, so scanning a frozen object is not an acknowledged high-water proof. A revision-only durable clock records per-scope high-water marks as part of the corresponding owner write. Once the registry has reserved recovery, the owner is frozen, and the aggregate is anchored, `captureRecoveryScopes` copies every scope and exact int64 value into the independent registry. Each call processes at most 64 rows and a 124 KiB encoded page; indexed lookups materialize one scope row at a time. Recovery identifiers are limited to 128 UTF-8 bytes and the complete RPC response is checked against 128 KiB. A shared validator checks scope kind, arity, project ownership and exact Go `json.Marshal` encoding for recovery and relocation, including HTML and Unicode line-separator escapes. Equivalent noncanonical JSON keys are rejected. The cursor, count and hash chain commit atomically with the rows. An absent, malformed or incomplete clock fails closed. History deleted before clock adoption cannot be reconstructed by this capture.

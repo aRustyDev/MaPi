@@ -9,7 +9,23 @@ export class MaintenanceRegistry extends ProjectRegistry {
 export class AppOwnerFenceTest extends NextgenApplication {
   async arm(route) { initializeOwnerFence(this.ctx.storage, route); await this.ctx.storage.sync(); }
   freeze(route) { freezeOwnerFence(this.ctx.storage, route, "test-move"); }
+  changeFenceTableCase() {
+    this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      sql.exec("ALTER TABLE mapi_owner_fence RENAME TO test_fence_tmp");
+      sql.exec("ALTER TABLE test_fence_tmp RENAME TO MAPI_OWNER_FENCE");
+    });
+  }
   throttleCount() { return this.ctx.storage.sql.exec("SELECT COALESCE(SUM(count), 0) AS count FROM mapi_login_limits").one().count; }
+  setThrottleAuthorityFault(enabled) {
+    if (this.env.MAPI_LOCAL_TEST !== "1") throw new Error("Local testing is disabled");
+    if (enabled) {
+      this.ctx.storage.sql.exec(`CREATE TRIGGER test_throttle_authority_change AFTER INSERT ON mapi_login_limits
+        BEGIN UPDATE mapi_owner_fence SET generation = generation + 1 WHERE singleton = 1; END`);
+    } else {
+      this.ctx.storage.sql.exec("DROP TRIGGER test_throttle_authority_change");
+    }
+  }
   fenceSideEffects() {
     const sql = this.ctx.storage.sql;
     const columns = sql.exec("PRAGMA table_info(events)").toArray().map(({ name }) => `quote("${name.replaceAll('"', '""')}")`);
@@ -55,6 +71,13 @@ export default {
       await reject(() => owner.addUser("bad@example.com", "Password-bad-123!", { ...route, generation: 2 }));
       if (JSON.stringify(await owner.testCounts()) !== JSON.stringify(before)) throw Error("Stale write changed data or audit");
       await owner.addUser("after@example.com", "Password-after-123!", route);
+      const beforeThrottleFault = JSON.stringify(await owner.fenceSideEffects());
+      await owner.setThrottleAuthorityFault(true);
+      await reject(() => owner.login("before@example.com", "Password-before-123!", "192.0.2.20", route));
+      await owner.setThrottleAuthorityFault(false);
+      if (JSON.stringify(await owner.fenceSideEffects()) !== beforeThrottleFault || !(await owner.admitLogin(route))) {
+        throw Error("A throttle write committed after changing owner authority");
+      }
       const beforeLoginThrottle = await owner.throttleCount();
       const signedIn = await owner.login("before@example.com", "Password-before-123!", "192.0.2.1", route);
       if (signedIn.status !== 200 || !signedIn.cookie) throw Error("Authorized Go login failed");
@@ -79,7 +102,11 @@ export default {
       await reject(() => owner.evict());
       owner = env.OWNER.getByName("application");
       await reject(() => owner.addUser("restart@example.com", "Password-restart-123!", route));
-      if (JSON.stringify(await owner.testCounts()) !== JSON.stringify(after)) throw Error("Frozen owner state changed after restart");
+      await owner.changeFenceTableCase();
+      await reject(() => owner.evict());
+      owner = env.OWNER.getByName("application");
+      await reject(() => owner.addUser("mixed-case@example.com", "Password-restart-123!", route));
+      if (JSON.stringify(await owner.testCounts()) !== JSON.stringify(after) || JSON.stringify(await owner.fenceSideEffects()) !== frozenEffects) throw Error("Frozen owner effects changed after case-varied restart");
       const recovery = env.MAINTENANCE_OWNER.getByName("recovery");
       const maintenanceRegistry = env.MAINTENANCE_REGISTRY.getByName("projects");
       await maintenanceRegistry.reserve(origin, "recovery");

@@ -2,7 +2,7 @@
 // This does not exercise the registry, a real owner, or a hosted deployment.
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { createOwnerFenceTable, initializeOwnerFence, freezeOwnerFence } from '../worker/owner-fence.js';
+import { createOwnerFenceTable, initializeOwnerFence, freezeOwnerFence, withOwnerFence } from '../worker/owner-fence.js';
 
 function fixture(uppercase = false) {
   const db = new DatabaseSync(':memory:');
@@ -63,6 +63,16 @@ const route = { projectId: 'synthetic-project', origin: 'https://synthetic.inval
   freezeOwnerFence(storage, route, 'synthetic-move');
   freezeOwnerFence(storage, route, 'synthetic-move');
   assert.equal(db.prepare('SELECT state FROM mapi_owner_fence').get().state, 'frozen');
+  db.close();
+}
+{
+  const { db, storage } = fixture();
+  initializeOwnerFence(storage, route);
+  db.exec('CREATE TRIGGER business_moves_fence AFTER UPDATE ON business BEGIN UPDATE mapi_owner_fence SET generation=2; INSERT INTO audit VALUES (1); END');
+  assert.throws(() => withOwnerFence(storage, route, () => storage.sql.exec('UPDATE business SET value=1')), /Owner is fenced or route is stale/);
+  assert.equal(db.prepare('SELECT generation FROM mapi_owner_fence').get().generation, 1);
+  assert.equal(db.prepare('SELECT value FROM business').get().value, 0);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM audit').get().n, 0);
   db.close();
 }
 console.log('Owner fence trigger guard checks passed');
