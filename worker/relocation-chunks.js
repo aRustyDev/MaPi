@@ -1,6 +1,6 @@
 // Chunked relocation support is wired through the owner's private control paths.
 // See the Phase 1 status for outstanding data-integrity and preflight gaps.
-import { execute } from './sql.js';
+import { execute, readRelocationRow } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { projectFenceStatus } from './relocation.js';
 import { assertRelocationValuesRepresentable } from './relocation-values.js';
@@ -191,8 +191,8 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
   const nextRow = () => {
    const order = keys.map(key => quote(key) + (explicitCollation ? ' COLLATE BINARY' : '')).join(', ');
    const filter = cursor ? ` WHERE (${order}) > (${keys.map(() => '?').join(', ')})` : '';
-   const statement = `SELECT ${names.map(quote).join(', ')} FROM ${quote(table)}${filter} ORDER BY ${order} LIMIT 1`;
-   return execute(storage, { statement, args: cursor ? cursor.map(sqlArg) : [], query: true }).rows[0];
+   const source = `FROM ${quote(table)}${filter} ORDER BY ${order} LIMIT 1`;
+   return readRelocationRow(storage, names, source, cursor ? cursor.map(sqlArg) : []);
   };
   for (; payload.rows.length < MAX_ROWS;) {
    const row = nextRow();

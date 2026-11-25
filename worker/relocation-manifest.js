@@ -2,7 +2,7 @@
 // baseline. Control calls that use it must be private and authenticated.
 import baseline from './generated/baseline.json';
 import issuerSchema from './relocation-issuer-schema.json';
-import { execute } from './sql.js';
+import { execute, readRelocationRow } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { sourceIdentityMatches } from './relocation-source-identity.js';
 import { assertRelocationValuesRepresentable, RELOCATION_RECONCILIATION_VERSION } from './relocation-values.js';
@@ -373,8 +373,8 @@ export async function digestRelocationPage(storage, manifest, role, table, curso
     let size = 0;
     for (let i = 0; i < 64; i++) {
       const where = current ? ` WHERE (${order}) > (${keys.map(() => '?').join(', ')})` : '';
-      const query = `SELECT ${names.map(quote).join(', ')} FROM ${quote(table)}${where} ORDER BY ${order} LIMIT 1`;
-      const row = execute(storage, { statement: query, args: current ? toArgs(current) : [], query: true }).rows[0];
+      const source = `FROM ${quote(table)}${where} ORDER BY ${order} LIMIT 1`;
+      const row = readRelocationRow(storage, names, source, current ? toArgs(current) : []);
       if (!row) { done = true; break; }
       assertRelocationValuesRepresentable(row);
       const encodedSize = new TextEncoder().encode(JSON.stringify(row)).length;
