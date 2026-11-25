@@ -3,7 +3,7 @@
 import { execute } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { projectFenceStatus } from './relocation.js';
-import { assertRelocationValuesRepresentable } from './relocation-values.js';
+import { encodeRelocationRow, relocationSQLArgument, RELOCATION_CHUNK_VERSION } from './relocation-values.js';
 const MAX_BYTES = 128 * 1024;
 const MAX_ROWS = 64;
 const FRAGMENT_BYTES = 80 * 1024;
@@ -15,7 +15,6 @@ const bytes = text => new TextEncoder().encode(text).length;
 const quote = value => '"' + value.replaceAll('"', '""') + '"';
 const columns = (storage, table) => storage.sql.exec(`PRAGMA table_xinfo(${quote(table)})`).toArray().filter(c => c.hidden === 0).map(c => c.name);
 const primaryKey = (storage, table) => storage.sql.exec(`PRAGMA table_xinfo(${quote(table)})`).toArray().filter(c => c.pk > 0).sort((a, b) => a.pk - b.pk).map(c => c.name);
-const sqlArg = value => value && typeof value === 'object' && 'integer' in value ? { kind: 'int', value: value.integer } : value && typeof value === 'object' && 'blob' in value ? { kind: 'blob', value: value.blob } : { kind: 'value', value };
 const one = (storage, sql, ...args) => storage.sql.exec(sql, ...args).toArray()[0];
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 async function hash(value) { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map(b => b.toString(16).padStart(2, '0')).join(''); }
@@ -66,6 +65,7 @@ function decodeFragmentRow(encoded) {
  return row;
 }
 function schema(storage) {
+ storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_chunk_format (project_id TEXT PRIMARY KEY NOT NULL, move_id TEXT NOT NULL, version INTEGER NOT NULL)`);
  storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_relocation_project (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, state TEXT NOT NULL, move_id TEXT, digest TEXT, object_name TEXT NOT NULL)`);
  storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_chunk_export (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, move_id TEXT NOT NULL, tables TEXT NOT NULL, table_index INTEGER NOT NULL, row_offset INTEGER NOT NULL, next_chunk INTEGER NOT NULL, chain TEXT NOT NULL, done INTEGER NOT NULL)`);
  if (!storage.sql.exec('PRAGMA table_info(mapi_chunk_export)').toArray().some(column => column.name === 'cursor')) storage.sql.exec('ALTER TABLE mapi_chunk_export ADD COLUMN cursor TEXT');
@@ -85,6 +85,7 @@ function validateTables(tables) {
  if (new Set(names).size !== names.length || names.some(t => t === 'mapi_owner_fence' || t.startsWith('mapi_relocation_') || t.startsWith('mapi_chunk_'))) throw Error('Invalid chunk table list');
 }
 const controlDefinitions = {
+ mapi_chunk_format: 'CREATE TABLE mapi_chunk_format (project_id TEXT PRIMARY KEY NOT NULL, move_id TEXT NOT NULL, version INTEGER NOT NULL)',
  mapi_relocation_project: 'CREATE TABLE mapi_relocation_project (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, state TEXT NOT NULL, move_id TEXT, digest TEXT, object_name TEXT NOT NULL)',
  mapi_chunk_export: 'CREATE TABLE mapi_chunk_export (project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, move_id TEXT NOT NULL, tables TEXT NOT NULL, table_index INTEGER NOT NULL, row_offset INTEGER NOT NULL, next_chunk INTEGER NOT NULL, chain TEXT NOT NULL, done INTEGER NOT NULL, cursor TEXT, fragment_offset INTEGER NOT NULL DEFAULT 0)',
  mapi_chunk_export_data: 'CREATE TABLE mapi_chunk_export_data (project_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, content TEXT NOT NULL, digest TEXT, PRIMARY KEY(project_id, chunk_index))',
@@ -103,10 +104,10 @@ function validateControlOwnership(storage, id) {
  for (const table of ['mapi_chunk_export', 'mapi_chunk_export_data']) {
   if (one(storage, `SELECT 1 FROM ${quote(table)} LIMIT 1`)) throw Error('Destination export control state is not empty');
  }
- for (const table of ['mapi_relocation_project', 'mapi_chunk_import', 'mapi_chunk_import_data', 'mapi_chunk_import_fragment', 'mapi_chunk_import_fragment_data']) {
+ for (const table of ['mapi_relocation_project', 'mapi_chunk_import', 'mapi_chunk_import_data', 'mapi_chunk_import_fragment', 'mapi_chunk_import_fragment_data', 'mapi_chunk_format']) {
   // The two data tables have a canonical NOT NULL project key. SQLite may
   // otherwise plan an IS NULL check as a scan despite that constraint.
-  const nullable = !['mapi_chunk_import_data', 'mapi_chunk_import_fragment_data'].includes(table);
+  const nullable = !['mapi_chunk_import_data', 'mapi_chunk_import_fragment_data', 'mapi_chunk_format'].includes(table);
   for (const predicate of [...(nullable ? ['project_id IS NULL'] : []), 'project_id < ?', 'project_id > ?']) {
    if (one(storage, `SELECT 1 FROM ${quote(table)} WHERE ${predicate} LIMIT 1`, ...(predicate.includes('?') ? [id] : []))) throw Error('Foreign import control state');
   }
@@ -144,17 +145,25 @@ function validFence(storage, id, generation, move) {
  if (state.project_id !== id) throw Error('Source project identity mismatch');
  return { ...state, ownerFence: Boolean(hasOwnerFence) };
 }
+// A format record is created only with a fresh transfer checkpoint. Existing
+// chunks and fragments cannot be reinterpreted under a different encoding.
+function assertChunkFormat(storage, id, move) {
+ const exists = one(storage, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_chunk_format'");
+ const format = exists && one(storage, 'SELECT move_id, version FROM mapi_chunk_format WHERE project_id = ?', id);
+ if (!format || format.move_id !== move || format.version !== RELOCATION_CHUNK_VERSION) throw Error('Legacy relocation chunk checkpoint requires manual review');
+}
 export function beginChunkExport(storage, id, generation, move, tables) {
  validateTables(tables);
  return storage.transactionSync(() => {
   schema(storage);
   validFence(storage, id, generation, move);
   const previous = one(storage, 'SELECT * FROM mapi_chunk_export WHERE project_id = ?', id);
-  if (previous) { if (previous.generation !== generation || previous.move_id !== move || previous.tables !== JSON.stringify(tables)) throw Error('Conflicting export'); return; }
+  if (previous) { if (previous.generation !== generation || previous.move_id !== move || previous.tables !== JSON.stringify(tables)) throw Error('Conflicting export'); assertChunkFormat(storage, id, move); return; }
   for (const table of tables) {
    if (!columns(storage, table).length) throw Error('Missing export table');
    if (!primaryKey(storage, table).length) throw Error('Export table requires a primary key');
   }
+  storage.sql.exec('INSERT INTO mapi_chunk_format VALUES (?, ?, ?)', id, move, RELOCATION_CHUNK_VERSION);
   storage.sql.exec('INSERT INTO mapi_chunk_export (project_id, generation, move_id, tables, table_index, row_offset, next_chunk, chain, done, cursor, fragment_offset) VALUES (?, ?, ?, ?, 0, 0, 0, ?, 0, NULL, 0)', id, generation, move, JSON.stringify(tables), '');
  });
 }
@@ -167,6 +176,7 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
   validFence(storage, id, generation, move);
   const c = one(storage, 'SELECT * FROM mapi_chunk_export WHERE project_id = ?', id);
   if (!c || c.generation !== generation || c.move_id !== move || index > c.next_chunk) throw Error('Export cursor mismatch');
+  assertChunkFormat(storage, id, move);
   const existing = one(storage, 'SELECT content, digest FROM mapi_chunk_export_data WHERE project_id = ? AND chunk_index = ?', id, index);
   if (existing) {
    // Check while it is still the immediate predecessor: the cursor can
@@ -187,17 +197,17 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
   const explicitCollation = /\bCOLLATE\b/i.test(definition);
   if (c.row_offset && !c.cursor) throw Error('Legacy offset checkpoint cannot resume with keyset pagination');
   let cursor = c.cursor ? parsePrivateJSON(c.cursor, 'Invalid export cursor checkpoint') : null;
-  const payload = { projectId: id, generation, moveId: move, index, prev: c.chain, table, columns: names, offset: c.row_offset, rows: [], last: false, done: false, cursor: null };
+  const payload = { format: RELOCATION_CHUNK_VERSION, projectId: id, generation, moveId: move, index, prev: c.chain, table, columns: names, offset: c.row_offset, rows: [], last: false, done: false, cursor: null };
   const nextRow = () => {
    const order = keys.map(key => quote(key) + (explicitCollation ? ' COLLATE BINARY' : '')).join(', ');
    const filter = cursor ? ` WHERE (${order}) > (${keys.map(() => '?').join(', ')})` : '';
    const statement = `SELECT ${names.map(quote).join(', ')} FROM ${quote(table)}${filter} ORDER BY ${order} LIMIT 1`;
-   return execute(storage, { statement, args: cursor ? cursor.map(sqlArg) : [], query: true }).rows[0];
+   const row = execute(storage, { statement, args: cursor ? cursor.map(relocationSQLArgument) : [], query: true }).rows[0];
+   return row && encodeRelocationRow(row);
   };
   for (; payload.rows.length < MAX_ROWS;) {
    const row = nextRow();
    if (!row) { payload.last = true; break; }
-   assertRelocationValuesRepresentable(row);
    const nextCursor = keyIndices.map(index => row[index]);
    if (nextCursor.some(value => value === null)) throw Error('Export primary key contains NULL');
    payload.rows.push(row);
@@ -232,6 +242,9 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
   const entry = one(storage, 'SELECT content, digest FROM mapi_chunk_export_data WHERE project_id = ? AND chunk_index = ?', id, index);
   if (!c || c.generation !== generation || c.move_id !== move || !Number.isSafeInteger(c.next_chunk) || c.next_chunk < 0) throw Error('Export cursor changed');
   if (!entry || entry.content !== content) throw Error('Export chunk changed');
+  assertChunkFormat(storage, id, move);
+  const p = parsePrivateJSON(content, 'Invalid relocation chunk');
+  if (p?.format !== RELOCATION_CHUNK_VERSION) throw Error('Unsupported relocation chunk format');
   if (index < c.next_chunk) {
    if (entry.digest !== digest) throw Error('Finalized export digest differs');
    if (index === c.next_chunk - 1 && c.chain !== digest) throw Error('Finalized export checkpoint differs');
@@ -240,7 +253,6 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
   // Finalization writes the digest and advances the cursor atomically. An
   // already-digested current chunk is inconsistent rather than a retry.
   if (index !== c.next_chunk || c.done || entry.digest !== null) throw Error('Export cursor changed');
-  const p = parsePrivateJSON(content, 'Invalid relocation chunk');
   if (p.prev !== c.chain) throw Error('Export hash chain changed');
   const fragment = p.fragment;
   if (!p.last && !fragment && !Array.isArray(p.cursor)) throw Error('Legacy offset checkpoint cannot resume with keyset pagination');
@@ -264,6 +276,7 @@ export function beginChunkImport(storage, id, generation, move, destination, tab
   const hasImport = one(storage, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_chunk_import'");
   const prior = hasImport ? one(storage, 'SELECT * FROM mapi_chunk_import WHERE project_id = ?', id) : null;
   if (prior) {
+   assertChunkFormat(storage, id, move);
    validateControlSchema(storage);
    validateControlOwnership(storage, id);
    if (prior.generation !== generation || prior.move_id !== move || prior.object_name !== destination || prior.tables !== JSON.stringify(tables)) throw Error('Conflicting import');
@@ -277,6 +290,7 @@ export function beginChunkImport(storage, id, generation, move, destination, tab
   for (const table of Object.keys(controlDefinitions)) if (one(storage, `SELECT 1 FROM ${quote(table)} LIMIT 1`)) throw Error('Destination control state is not empty');
   for (const table of tables) if (!columns(storage, table).length || one(storage, `SELECT 1 FROM ${quote(table)} LIMIT 1`)) throw Error('Destination table is not empty');
   storage.sql.exec("INSERT INTO mapi_relocation_project VALUES (?, ?, 'importing', ?, NULL, ?)", id, generation + 1, move, destination);
+  storage.sql.exec('INSERT INTO mapi_chunk_format VALUES (?, ?, ?)', id, move, RELOCATION_CHUNK_VERSION);
   storage.sql.exec('INSERT INTO mapi_chunk_import VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, 0)', id, generation, move, destination, JSON.stringify(tables), '');
  });
 }
@@ -287,10 +301,12 @@ export async function importChunk(storage, id, envelope, failAfterRows = 0) {
  const content = envelope?.content, digest = envelope?.digest;
  if (typeof content !== 'string' || bytes(content) > MAX_BYTES || await hash(content) !== digest) throw Error('Invalid chunk digest or size');
  const p = parsePrivateJSON(content, 'Invalid relocation chunk');
+ if (p?.format !== RELOCATION_CHUNK_VERSION) throw Error('Unsupported relocation chunk format');
  return storage.transactionSync(() => {
   const c = one(storage, 'SELECT * FROM mapi_chunk_import WHERE project_id = ?', id);
   const project = projectFenceStatus(storage, id);
   if (!c || p.projectId !== id || p.generation !== c.generation || p.moveId !== c.move_id || !Number.isSafeInteger(p.index) || p.index < 0) throw Error('Import identity mismatch');
+  assertChunkFormat(storage, id, p.moveId);
   if (one(storage, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'") || !project || !['importing', 'staged'].includes(project.state) || project.project_id !== id || project.generation !== c.generation + 1 || project.move_id !== c.move_id || project.object_name !== c.object_name || c.done !== (project.state === 'staged' ? 1 : 0)) throw Error('Destination import is not active');
   const tables = parsePrivateJSON(c.tables, 'Invalid import table checkpoint');
   validateTables(tables);
@@ -344,8 +360,7 @@ export async function importChunk(storage, id, envelope, failAfterRows = 0) {
   let inserted = 0;
   for (const row of p.rows) {
    if (!Array.isArray(row) || row.length !== names.length) throw Error('Invalid chunk row');
-   assertRelocationValuesRepresentable(row);
-   const args = row.map(value => value && typeof value === 'object' && 'integer' in value ? { kind: 'int', value: value.integer } : value && typeof value === 'object' && 'blob' in value ? { kind: 'blob', value: value.blob } : { kind: 'value', value });
+   const args = row.map(relocationSQLArgument);
    execute(storage, { statement: `INSERT INTO ${quote(p.table)} (${names.map(quote).join(', ')}) VALUES (${names.map(() => '?').join(', ')})`, args, query: false });
    if (failAfterRows && ++inserted === failAfterRows) throw Error('Injected chunk failure');
   }

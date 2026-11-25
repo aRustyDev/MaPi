@@ -34,11 +34,14 @@ export class ManifestProject extends NextgenApplication {
   destination(manifest) { return inspectRelocationDestination(this.ctx.storage, manifest); }
   restoreMetadata(manifest) { return restoreRelocationMetadata(this.ctx.storage, manifest); }
   digest(manifest, role, table, cursor) { return digestRelocationPage(this.ctx.storage, manifest, role, table, cursor); }
-  installRealDigestFixtures() {
-    this.ctx.storage.sql.exec('CREATE TABLE test_real_infinity (id INTEGER PRIMARY KEY, value REAL)');
-    this.ctx.storage.sql.exec('INSERT INTO test_real_infinity VALUES (1, 1e999), (2, -1e999)');
-    this.ctx.storage.sql.exec('CREATE TABLE test_real_null (id INTEGER PRIMARY KEY, value REAL)');
-    this.ctx.storage.sql.exec('INSERT INTO test_real_null VALUES (1, NULL)');
+  installRealDigestFixture() {
+    this.ctx.storage.sql.exec('CREATE TABLE test_real_digest (id INTEGER PRIMARY KEY, value BLOB)');
+    this.ctx.storage.sql.exec('INSERT INTO test_real_digest VALUES (1, NULL)');
+  }
+  setRealDigestValue(value) {
+    if (![null, 1.25, 'inf', '-inf', '-0'].includes(value)) throw Error('Invalid REAL fixture');
+    const stored = value === 'inf' ? Infinity : value === '-inf' ? -Infinity : value === '-0' ? -0 : value;
+    this.ctx.storage.sql.exec('UPDATE test_real_digest SET value = ? WHERE id = 1', stored);
   }
   exportBegin(route, move, tables) { return beginChunkExport(this.ctx.storage, route.projectId, route.generation, move, tables); }
   chunk(route, move, index) { return exportChunk(this.ctx.storage, route.projectId, route.generation, move, index); }
@@ -212,11 +215,17 @@ export default {
       const left = await source.digest(manifest, 'source', 'events', null);
       const right = await target.digest(manifest, 'destination', 'events', null);
       check(left.digest !== right.digest || left.count !== right.count, 'Missing audit rows were not detected');
-      await source.installRealDigestFixtures();
-      const realManifest = { version: 1, ...route, moveId: 'move', tables: ['test_real_infinity', 'test_real_null'] };
-      await reject(() => source.digest(realManifest, 'source', 'test_real_infinity', null), 'Non-finite REAL');
-      await reject(() => source.digest(realManifest, 'source', 'test_real_infinity', [{ integer: '1' }]), 'Non-finite REAL');
-      check((await source.digest(realManifest, 'source', 'test_real_null', null)).count === 1, 'SQL NULL digest was rejected');
+      await source.installRealDigestFixture();
+      const table = 'test_real_digest';
+      const realManifest = { version: 1, ...route, moveId: 'move', tables: [table] };
+      const digests = new Set();
+      for (const value of [null, 1.25, 'inf', '-inf', '-0']) {
+        await source.setRealDigestValue(value);
+        const page = await source.digest(realManifest, 'source', table, null);
+        check(page.count === 1 && page.done, 'REAL or NULL digest lost the value');
+        digests.add(page.digest);
+      }
+      check(digests.size === 5, 'Different REAL values and NULL matched the same digest for the same row');
       return Response.json({ ok: true, tables: manifest.tables.length, pages });
     } catch (error) { return Response.json({ error: String(error), stack: error?.stack }, { status: 500 }); }
   },
