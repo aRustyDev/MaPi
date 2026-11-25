@@ -44,6 +44,21 @@ func check() error {
 	if _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS bridge_checks (value INTEGER NOT NULL)"); err != nil {
 		return err
 	}
+	// Exercise marker-name handling through the same Go database/sql bridge
+	// used by the owner, including SQLite identifiers that contain Unicode.
+	if _, err := db.ExecContext(ctx, "CREATE TABLE αmapi_relocation_text_preflight_marker (value TEXT)"); err != nil {
+		return fmt.Errorf("unicode identifier rejected: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO αmapi_relocation_text_preflight_marker VALUES ('mapi_relocation_text_preflight_marker')"); err != nil {
+		return fmt.Errorf("unicode identifier or literal rejected: %w", err)
+	}
+	var markerLiteral string
+	if err := db.QueryRowContext(ctx, "SELECT value AS mapi_relocation_text_preflight_marker FROM αmapi_relocation_text_preflight_marker").Scan(&markerLiteral); err != nil || markerLiteral != "mapi_relocation_text_preflight_marker" {
+		return fmt.Errorf("unicode identifier or alias read failed: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CREATE VIEW 'mapi_relocation_text_preflight_marker' AS SELECT 1"); err == nil {
+		return errors.New("reserved marker identifier was accepted")
+	}
 	if _, err := db.ExecContext(ctx, "DELETE FROM bridge_checks"); err != nil {
 		return err
 	}

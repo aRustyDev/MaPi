@@ -13,6 +13,13 @@ const ordinary = [
   `INSERT INTO examples (x) VALUES ('${seal}') /* ${marker} */`,
   `SELECT 1 -- ${marker}`,
   `SELECT 'prefix ${marker} suffix'`,
+  `SELECT α${marker} FROM examples`,
+  `SELECT ${seal}中 FROM examples`,
+  `SELECT 1 AS ${marker}`,
+  `SELECT 1 AS "${seal}"`,
+  `WITH x AS (SELECT 1) SELECT 1 AS ${marker}`,
+  `CREATE TABLE other AS SELECT 1 AS ${marker}`,
+  `CREATE VIEW other_view AS SELECT 1 AS "${marker}"`,
 ];
 for (const sql of ordinary) assert.doesNotThrow(() => check(sql), sql);
 
@@ -26,6 +33,8 @@ const reserved = [
   `DELETE FROM '${seal}'`,
   `CREATE TRIGGER t INSTEAD OF INSERT ON '${marker}' BEGIN SELECT 1; END`,
   `SELECT 1; CREATE VIEW '${marker}' AS SELECT 1`,
+  `SELECT 1 AS ${marker}; CREATE VIEW "${marker}" AS SELECT 1`,
+  `ALTER TABLE ordinary RENAME TO "${marker}"`,
 ];
 for (const sql of reserved) assert.throws(() => check(sql), /Reserved TEXT preflight marker/, sql);
 console.log('TEXT preflight SQL guard checks passed.');

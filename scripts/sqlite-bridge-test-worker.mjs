@@ -5,6 +5,7 @@ import migrations from "../worker/generated/sqlite-bridge-migrations.json";
 import { instantiateReactor } from "../worker/wasi.js";
 import { execute, sqliteError } from "../worker/sql.js";
 import { snapshotSchema, snapshotSchemaObjects } from "./sqlite-bridge-schema.mjs";
+import { assertNoTextPreflightMarkerAccess } from '../worker/relocation-text-marker.js';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -166,7 +167,7 @@ export class BridgeTest extends DurableObject {
         sql: (pointer, size) => {
           const query = JSON.parse(decoder.decode(new Uint8Array(memory(), pointer, size)));
           let result;
-          try { result = execute(this.ctx.storage, query); }
+          try { assertNoTextPreflightMarkerAccess(query.statement); result = execute(this.ctx.storage, query); }
           catch (error) { result = { error: sqliteError(error) }; }
           output = encoder.encode(JSON.stringify(result));
           return output.length;

@@ -44,7 +44,7 @@ export function assertNoTextPreflightMarkerAccess(statement) {
   if (typeof statement !== 'string') throw new Error('Invalid SQL statement');
   const reserved = new Set([NAME, 'mapi_relocation_text_preflight_seal']);
   const tokens = [];
-  const pattern = /--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:''|[^'])*(?:'|$)|"(?:""|[^"])*(?:"|$)|`(?:``|[^`])*(?:`|$)|\[[^\]]*(?:\]|$)|[a-zA-Z_][a-zA-Z_0-9$]*|[^\s]/g;
+  const pattern = /--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:''|[^'])*(?:'|$)|"(?:""|[^"])*(?:"|$)|`(?:``|[^`])*(?:`|$)|\[[^\]]*(?:\]|$)|[a-zA-Z_\u0080-\u{10ffff}][a-zA-Z_0-9$\u0080-\u{10ffff}]*|[^\s]/gu;
   for (const match of statement.matchAll(pattern)) {
     const token = match[0];
     if (token.startsWith('--') || token.startsWith('/*')) continue;
@@ -65,6 +65,9 @@ export function assertNoTextPreflightMarkerAccess(statement) {
     }
     if (token.startsWith('"') || token.startsWith('`')) value = token.slice(1, -1).replaceAll(token[0] + token[0], token[0]);
     else if (token.startsWith('[')) value = token.slice(1, -1);
+    // Result-column aliases cannot name a schema object. Allow them even
+    // when they happen to match a reserved object name.
+    if (words[index - 1] === 'as') continue;
     if (reserved.has(value.toLowerCase())) throw new Error('Reserved TEXT preflight marker');
   }
 }
