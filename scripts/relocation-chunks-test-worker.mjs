@@ -20,7 +20,7 @@ export class ChunkProject extends DurableObject {
  casePlan() { return this.s.sql.exec("EXPLAIN QUERY PLAN SELECT id FROM case_keys WHERE (id COLLATE BINARY) > (?) ORDER BY id COLLATE BINARY LIMIT 1", "K-0001").toArray().map(row => row.detail); }
  seedMany(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); for (let i = 0; i < 130; i++) this.s.sql.exec('INSERT INTO users VALUES (?, ?, ?)', `key-${String(i).padStart(4, '0')}`, i, new Uint8Array([i % 256]).buffer); }); }
  oversized(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); const data = new Uint8Array(300_000); for (let i = 0; i < data.length; i++) data[i] = i % 251; this.s.sql.exec("INSERT INTO users VALUES ('large', 9223372036854775807, ?)", data.buffer); }); }
- beyondRowLimit(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO users VALUES ('large', 0, ?)", new Uint8Array(7_996_000).buffer); }); }
+ beyondRowLimit(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO users VALUES ('large', 0, ?)", new Uint8Array(8_385_000).buffer); }); }
  seedWideText(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", '\uFEFF' + 'é😀\n'.repeat(45_000)); }); }
  seedRelocationText(id, invalid) {
   this.s.transactionSync(() => {

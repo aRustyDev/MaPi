@@ -9,7 +9,7 @@ const MAX_ROWS = 64;
 const FRAGMENT_BYTES = 80 * 1024;
 // Keep a conservative allowance for SQLite record metadata below its 8 MB row
 // limit. Base64 text and blobs expand by at most four thirds in the envelope.
-const MAX_ROW_VALUE_BYTES = 8_000_000 - 4096;
+export const MAX_ROW_VALUE_BYTES = 8_388_608 - 4096;
 const MAX_ROW_JSON_BYTES = 12 * 1024 * 1024;
 const bytes = text => new TextEncoder().encode(text).length;
 const quote = value => '"' + value.replaceAll('"', '""') + '"';

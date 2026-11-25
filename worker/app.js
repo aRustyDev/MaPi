@@ -258,7 +258,7 @@ export class NextgenApplication extends DurableObject {
         createTextPreflightMarker(this.ctx.storage, marker);
         cursor = null;
       }
-      const result = advanceRelocationTextPreflight(this.ctx.storage, tables, cursor);
+      const result = advanceRelocationTextPreflight(this.ctx.storage, tables, cursor, { projectId: route.projectId, generation: route.generation, moveId });
       return { marker, checkpoint: result.checkpoint, done: result.done };
     });
   }
@@ -468,18 +468,21 @@ export class NextgenApplication extends DurableObject {
     this.#assertRecoveryObjectEpoch();
     if (this.env.MAPI_RELOCATION_ENABLED !== "1" || !this.env.MAPI_RELOCATION_CONTROL_TOKEN ||
         !sameKey(secret, this.env.MAPI_RELOCATION_CONTROL_TOKEN)) throw new Error("Relocation control denied");
-    const { route, move } = await this.env.PROJECT_REGISTRY.getByName("projects").relocationStatus(secret, projectId);
+    const registry = this.env.PROJECT_REGISTRY.getByName("projects");
+    const { route, move } = await registry.relocationStatus(secret, projectId);
     if (!route || move?.phase !== "moving" || move.move_id !== moveId || move.source_object !== route.object_name ||
         move.generation !== route.generation) throw new Error("Stale relocation");
     if (this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(move.source_object).toString()) throw new Error("Source object identity mismatch");
+    const preflight = await registry.relocationTextPreflightStatus(secret, projectId, moveId);
+    if (!preflight?.done) throw new Error("TEXT preflight is incomplete");
     this.#assertRecoveryObjectEpoch();
     const source = this.relocationAttestation(secret, projectId);
     if (source?.state !== "frozen" || source.move_id !== moveId || source.generation !== move.generation || source.object_name !== move.source_object) throw new Error("Source is not frozen for this move");
-    const cached = this.#relocationManifestCache;
-    if (cached && cached.projectId === projectId && cached.origin === route.origin && cached.objectName === move.source_object && cached.generation === move.generation && cached.moveId === moveId) return cached;
     const sourceRoute = { projectId, origin: route.origin, objectName: move.source_object, generation: move.generation };
     const manifest = this.ctx.storage.transactionSync(() => {
-      assertTextPreflightSeal(this.ctx.storage, sourceRoute, moveId);
+      if (assertTextPreflightSeal(this.ctx.storage, sourceRoute, moveId) !== preflight.marker) throw new Error('TEXT preflight seal mismatch');
+      const cached = this.#relocationManifestCache;
+      if (cached && cached.projectId === projectId && cached.origin === route.origin && cached.objectName === move.source_object && cached.generation === move.generation && cached.moveId === moveId) return cached;
       return inspectRelocationSource(this.ctx.storage, sourceRoute, moveId, { textGuard: true });
     });
     this.#relocationManifestCache = manifest;

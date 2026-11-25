@@ -7,13 +7,46 @@ const ROWS = 2000;
 const BATCH = 100;
 const VALUE_BYTES = 1024;
 const LARGE_BYTES = 8300000;
+const OVERSIZED_BYTES = 8385000;
 const largeText = () => 'z' + '😀'.repeat(2074999) + 'xyz';
 const key = i => `capacity-${String(i).padStart(6, '0')}`;
 const check = (condition, message) => { if (!condition) throw Error(message); };
+const rejectsWith = async (action, message) => {
+  try { await action(); } catch (error) { if (String(error).includes(message)) return; throw error; }
+  throw Error(`Expected rejection: ${message}`);
+};
 
 export class CapacityRegistry extends BaseRegistry {
   proofState() { return this.ctx.storage.kv.get('synthetic-capacity-proof') ?? null; }
   saveProofState(value) { this.ctx.storage.kv.put('synthetic-capacity-proof', value); }
+  testCheckpoint(projectId, moveId) {
+    return this.ctx.storage.sql.exec('SELECT * FROM mapi_move_text_preflight WHERE project_id = ? AND move_id = ?', projectId, moveId).one();
+  }
+  testSetCheckpoint(projectId, moveId, cursor, done) {
+    this.ctx.storage.sql.exec('UPDATE mapi_move_text_preflight SET cursor = ?, done = ? WHERE project_id = ? AND move_id = ?', cursor, done, projectId, moveId);
+  }
+  async testLegacyCheckpoints(secret, origin, projectId, moveId) {
+    const sql = this.ctx.storage.sql;
+    const original = sql.exec('SELECT * FROM mapi_move_text_preflight WHERE project_id = ? AND move_id = ?', projectId, moveId).one();
+    for (const [version, done] of [[1, 0], [1, 1], [2, 0], [2, 1]]) {
+      const cursor = JSON.parse(original.cursor);
+      cursor.version = version;
+      cursor.done = Boolean(done);
+      delete cursor.cursorBytes;
+      if (version === 1) delete cursor.rowBytes;
+      sql.exec('UPDATE mapi_move_text_preflight SET cursor = ?, done = ? WHERE project_id = ? AND move_id = ?', JSON.stringify(cursor), done, projectId, moveId);
+      try {
+        await this.beginRelocation(secret, origin, projectId, moveId);
+        throw Error('Legacy checkpoint was accepted');
+      } catch (error) {
+        if (!String(error).includes('Legacy TEXT preflight requires manual review')) throw error;
+      }
+      const row = sql.exec('SELECT cursor, done, revision FROM mapi_move_text_preflight WHERE project_id = ? AND move_id = ?', projectId, moveId).one();
+      check(row.cursor === JSON.stringify(cursor) && row.done === done && row.revision === original.revision, 'Legacy rejection changed checkpoint');
+    }
+    sql.exec('UPDATE mapi_move_text_preflight SET cursor = ?, done = ? WHERE project_id = ? AND move_id = ?', original.cursor, original.done, projectId, moveId);
+    return true;
+  }
 }
 
 export class CapacityOwner extends NextgenApplication {
@@ -36,6 +69,38 @@ export class CapacityOwner extends NextgenApplication {
     });
   }
 
+  seedOversized(projectId, userId) {
+    return this.ctx.storage.transactionSync(() => {
+      invalidateTextPreflightMarker(this.ctx.storage);
+      this.ctx.storage.sql.exec('INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, ?, ?)', projectId, userId, 'oversized', 'x'.repeat(OVERSIZED_BYTES));
+    });
+  }
+  oversizedMatches(projectId, userId) {
+    return this.ctx.storage.sql.exec("SELECT typeof(value) = 'text' AND length(CAST(value AS BLOB)) = ? AND value = ? AS matches FROM user_attributes WHERE project_id = ? AND user_id = ? AND key = 'oversized'", OVERSIZED_BYTES, 'x'.repeat(OVERSIZED_BYTES), projectId, userId).one().matches === 1;
+  }
+  replaceOversizedWithLongKey(projectId, userId) {
+    this.ctx.storage.transactionSync(() => {
+      invalidateTextPreflightMarker(this.ctx.storage);
+      const sql = this.ctx.storage.sql;
+      sql.exec("DELETE FROM user_attributes WHERE project_id = ? AND user_id = ? AND key = 'oversized'", projectId, userId);
+      sql.exec('INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, ?, ?)', projectId, userId, 'K'.repeat(100_000), 'synthetic');
+    });
+  }
+  longKeyMatches(projectId, userId) {
+    return this.ctx.storage.sql.exec("SELECT value = 'synthetic' AS matches FROM user_attributes WHERE project_id = ? AND user_id = ? AND key = ?", projectId, userId, 'K'.repeat(100_000)).one().matches === 1;
+  }
+  replaceLongKeyWithNonfinite(projectId, userId) {
+    this.ctx.storage.transactionSync(() => {
+      invalidateTextPreflightMarker(this.ctx.storage);
+      const sql = this.ctx.storage.sql;
+      sql.exec('DELETE FROM user_attributes WHERE project_id = ? AND user_id = ? AND key = ?', projectId, userId, 'K'.repeat(100_000));
+      sql.exec('UPDATE users SET updated_at = 1e999 WHERE project_id = ? AND id = ?', projectId, userId);
+    });
+  }
+  nonfiniteMatches(projectId, userId) {
+    return this.ctx.storage.sql.exec("SELECT typeof(updated_at) = 'real' AND updated_at > 1.7976931348623157e308 AS matches FROM users WHERE project_id = ? AND id = ?", projectId, userId).one().matches === 1;
+  }
+
   snapshot(projectId, userId) {
     return this.ctx.storage.sql.exec(`SELECT COUNT(*) AS count,
       COALESCE(SUM(length(CAST(value AS BLOB))),0) AS bytes,
@@ -52,8 +117,17 @@ export default {
   async fetch(request, env) {
     const provided = encoder.encode(request.headers.get('authorization') ?? '');
     const expected = encoder.encode(`Bearer ${env.MAPI_STAGING_PROOF_TOKEN ?? ''}`);
-    if (!env.MAPI_STAGING_PROOF_TOKEN || provided.length !== expected.length || !crypto.subtle.timingSafeEqual(provided, expected) || request.method !== 'POST' || new URL(request.url).pathname !== '/verify') return new Response(null, { status: 404 });
+    if (!env.MAPI_STAGING_PROOF_TOKEN || provided.length !== expected.length || !crypto.subtle.timingSafeEqual(provided, expected)) return new Response(null, { status: 404 });
     const registry = env.PROJECT_REGISTRY.getByName('projects');
+    if (request.method === 'GET' && new URL(request.url).pathname === '/profile-target') {
+      const state = await registry.proofState();
+      if (!state?.objectName) return new Response(null, { status: 404 });
+      return Response.json({
+        sourceObjectId: env.NEXTGEN_APPLICATION.idFromName(state.objectName).toString(),
+        destinationObjectId: state.destination ? env.NEXTGEN_APPLICATION.idFromName(state.destination).toString() : null,
+      });
+    }
+    if (request.method !== 'POST' || new URL(request.url).pathname !== '/verify') return new Response(null, { status: 404 });
     const secret = env.MAPI_RELOCATION_CONTROL_TOKEN;
     let state = await registry.proofState();
     const stage = state?.stage ?? 'provision';
@@ -96,6 +170,7 @@ export default {
             check(move.phase === 'moving' && state.largePages >= 2, 'Large TEXT did not span scan pages');
             const fence = await owner.fence();
             check(fence.length === 1 && fence[0].state === 'frozen' && fence[0].move_id === moveId, 'Source fence differs');
+            state.destination = move.destination_object;
             state.stage = 'manifest';
           }
         } else if (stage === 'manifest') {
@@ -103,11 +178,140 @@ export default {
           check(manifest.projectId === projectId && manifest.moveId === moveId && manifest.tables.includes('user_attributes'), 'Frozen source manifest differs');
           const after = await owner.snapshot(projectId, userId);
           check(JSON.stringify(after) === JSON.stringify(state.before), 'Synthetic source data changed');
-          state.stage = 'complete';
+          state.legacyStep = 0;
+          state.stage = 'legacy-frozen';
+        } else if (stage === 'legacy-frozen') {
+          const original = await registry.testCheckpoint(projectId, moveId);
+          const cursor = JSON.parse(original.cursor);
+          cursor.version = state.legacyStep < 2 ? 1 : 2;
+          cursor.done = state.legacyStep % 2 === 1;
+          delete cursor.cursorBytes;
+          if (cursor.version === 1) delete cursor.rowBytes;
+          const legacy = JSON.stringify(cursor), done = state.legacyStep % 2;
+          const status = await registry.relocationStatus(secret, projectId), fence = await owner.fence();
+          await registry.testSetCheckpoint(projectId, moveId, legacy, done);
+          await rejectsWith(() => owner.relocationManifest(secret, projectId, moveId), 'Legacy TEXT preflight requires manual review');
+          await rejectsWith(() => owner.beginRelocationExport(secret, projectId, moveId), 'Legacy TEXT preflight requires manual review');
+          const after = await registry.testCheckpoint(projectId, moveId);
+          check(after.cursor === legacy && after.done === done && after.revision === original.revision &&
+            JSON.stringify(status) === JSON.stringify(await registry.relocationStatus(secret, projectId)) &&
+            JSON.stringify(fence) === JSON.stringify(await owner.fence()) && JSON.stringify(state.before) === JSON.stringify(await owner.snapshot(projectId, userId)), 'Frozen legacy rejection changed state');
+          await registry.testSetCheckpoint(projectId, moveId, original.cursor, original.done);
+          state.legacyStep++;
+          if (state.legacyStep === 4) { state.frozenLegacyRejected = true; state.stage = 'prepare'; }
+        } else if (stage === 'prepare') {
+          const target = env.NEXTGEN_APPLICATION.getByName(state.destination);
+          const route = { projectId, origin, objectName: state.destination, generation: 2 };
+          await target.reserveMoveDestination(secret, route, moveId);
+          await target.prepareRelocation(secret, projectId, moveId);
+          await owner.beginRelocationExport(secret, projectId, moveId);
+          await target.beginRelocationImport(secret, projectId, moveId);
+          state.stage = 'import';
+        } else if (stage === 'import') {
+          const target = env.NEXTGEN_APPLICATION.getByName(state.destination);
+          const checkpoint = await target.relocationImportStatus(secret, projectId, moveId);
+          if (!checkpoint.done) {
+            check(checkpoint.next_chunk < 20000, 'Capacity transfer budget exceeded');
+            await target.importRelocationChunk(secret, projectId, moveId, checkpoint.next_chunk);
+          } else {
+            await target.restoreRelocationMetadata(secret, projectId, moveId);
+            const after = await target.snapshot(projectId, userId);
+            check(JSON.stringify(after) === JSON.stringify(state.before), 'Synthetic destination data changed');
+            state.stage = 'history';
+          }
+        } else if (stage === 'history') {
+          if ((await registry.verifyRelocationHistory(secret, projectId, moveId)).done) state.stage = 'reconcile';
+        } else if (stage === 'reconcile') {
+          if ((await registry.reconcileRelocation(secret, projectId, moveId)).done) state.stage = 'archive-gate';
+        } else if (stage === 'archive-gate') {
+          let blocked = false;
+          try { await registry.commitRelocation(secret, projectId, moveId); }
+          catch (error) { if (!String(error).includes('independent archive proof is not configured')) throw error; blocked = true; }
+          check(blocked && (await registry.resolve(origin)).state === 'moving', 'Archive gate did not preserve the staged route');
+          state.stage = 'oversize-provision';
+        } else if (stage === 'oversize-provision') {
+          const run = crypto.randomUUID();
+          const extraOrigin = `https://${run}.example.test`, extraName = `oversize-${run}`, extraMove = `oversize-${run}`;
+          const extra = env.NEXTGEN_APPLICATION.getByName(extraName);
+          await registry.reserve(extraOrigin, extraName);
+          const { projectId: extraId } = await extra.provision('Synthetic oversize', extraOrigin, { projectId: null, origin: extraOrigin, objectName: extraName, generation: 1 });
+          await registry.activate(extraOrigin, extraName, extraId);
+          const route = { projectId: extraId, origin: extraOrigin, objectName: extraName, generation: 1 };
+          const { userId: extraUser } = await extra.addUser('oversize@example.test', 'Synthetic-password-123!', route);
+          state.oversize = { origin: extraOrigin, objectName: extraName, moveId: extraMove, projectId: extraId, userId: extraUser };
+          state.stage = 'oversize-seed';
+        } else if (stage === 'oversize-seed') {
+          const item = state.oversize, extra = env.NEXTGEN_APPLICATION.getByName(item.objectName);
+          await extra.seedOversized(item.projectId, item.userId);
+          check(await extra.oversizedMatches(item.projectId, item.userId), 'Oversized fixture differs');
+          state.oversize.fence = await extra.fence();
+          state.stage = 'oversize-preflight';
+        } else if (stage === 'oversize-preflight') {
+          const item = state.oversize, extra = env.NEXTGEN_APPLICATION.getByName(item.objectName);
+          const prior = await registry.relocationTextPreflightStatus(secret, item.projectId, item.moveId).catch(() => null);
+          const before = await registry.relocationStatus(secret, item.projectId);
+          let rejected = false;
+          try {
+            const result = await registry.beginRelocation(secret, item.origin, item.projectId, item.moveId);
+            check(result.phase === 'preflighting', 'Oversized source froze');
+          } catch (error) {
+            if (!String(error).includes('Row exceeds conservative SQLite size limit')) throw error;
+            rejected = true;
+          }
+          if (rejected) {
+            const after = await registry.relocationStatus(secret, item.projectId);
+            check(after.route?.state === 'active' && !after.move && JSON.stringify(before) === JSON.stringify(after) &&
+              JSON.stringify(prior) === JSON.stringify(await registry.relocationTextPreflightStatus(secret, item.projectId, item.moveId)) &&
+              JSON.stringify(item.fence) === JSON.stringify(await extra.fence()) && await extra.oversizedMatches(item.projectId, item.userId), 'Oversized rejection changed state');
+            state.oversizedRejected = true;
+            state.stage = 'legacy-checkpoint';
+          }
+        } else if (stage === 'legacy-checkpoint') {
+          const item = state.oversize, extra = env.NEXTGEN_APPLICATION.getByName(item.objectName);
+          const status = await registry.relocationStatus(secret, item.projectId);
+          const fence = await extra.fence();
+          check(await registry.testLegacyCheckpoints(secret, item.origin, item.projectId, item.moveId), 'Legacy checkpoint test failed');
+          check(JSON.stringify(status) === JSON.stringify(await registry.relocationStatus(secret, item.projectId)) &&
+            JSON.stringify(fence) === JSON.stringify(await extra.fence()) && await extra.oversizedMatches(item.projectId, item.userId), 'Legacy rejection changed source or route');
+          state.legacyRejected = true;
+          state.stage = 'long-key-seed';
+        } else if (stage === 'long-key-seed') {
+          const item = state.oversize, extra = env.NEXTGEN_APPLICATION.getByName(item.objectName);
+          await extra.replaceOversizedWithLongKey(item.projectId, item.userId);
+          check(await extra.longKeyMatches(item.projectId, item.userId), 'Long key fixture differs');
+          state.stage = 'long-key-preflight';
+        } else if (stage === 'long-key-preflight' || stage === 'nonfinite-preflight') {
+          const item = state.oversize, extra = env.NEXTGEN_APPLICATION.getByName(item.objectName);
+          const prior = await registry.relocationTextPreflightStatus(secret, item.projectId, item.moveId);
+          const before = await registry.relocationStatus(secret, item.projectId);
+          const fence = await extra.fence();
+          let rejected = false;
+          try {
+            const result = await registry.beginRelocation(secret, item.origin, item.projectId, item.moveId);
+            check(result.phase === 'preflighting', 'Invalid fixture froze source');
+          } catch (error) {
+            const message = stage === 'long-key-preflight' ? 'Relocation primary key exceeds cursor limit' : 'Non-finite REAL is not supported by relocation';
+            if (!String(error).includes(message)) throw error;
+            rejected = true;
+          }
+          if (rejected) {
+            const after = await registry.relocationStatus(secret, item.projectId);
+            const preserved = stage === 'long-key-preflight' ? await extra.longKeyMatches(item.projectId, item.userId) : await extra.nonfiniteMatches(item.projectId, item.userId);
+            check(after.route?.state === 'active' && !after.move && JSON.stringify(before) === JSON.stringify(after) &&
+              JSON.stringify(prior) === JSON.stringify(await registry.relocationTextPreflightStatus(secret, item.projectId, item.moveId)) &&
+              JSON.stringify(fence) === JSON.stringify(await extra.fence()) && preserved, 'Invalid fixture rejection changed state');
+            if (stage === 'long-key-preflight') { state.longKeyRejected = true; state.stage = 'nonfinite-seed'; }
+            else { state.nonfiniteRejected = true; state.stage = 'complete'; }
+          }
+        } else if (stage === 'nonfinite-seed') {
+          const item = state.oversize, extra = env.NEXTGEN_APPLICATION.getByName(item.objectName);
+          await extra.replaceLongKeyWithNonfinite(item.projectId, item.userId);
+          check(await extra.nonfiniteMatches(item.projectId, item.userId), 'Non-finite fixture differs');
+          state.stage = 'nonfinite-preflight';
         } else if (stage !== 'complete') throw Error('Unknown synthetic capacity stage');
       }
       await registry.saveProofState(state);
-      return Response.json({ stage: state.stage, done: state.stage === 'complete', seeded: state.seeded, pages: state.pages, largePages: state.largePages });
+      return Response.json({ stage: state.stage, done: state.stage === 'complete', seeded: state.seeded, pages: state.pages, largePages: state.largePages, oversizedRejected: state.oversizedRejected === true, legacyRejected: state.legacyRejected === true, frozenLegacyRejected: state.frozenLegacyRejected === true, longKeyRejected: state.longKeyRejected === true, nonfiniteRejected: state.nonfiniteRejected === true });
     } catch (error) {
       console.error('Synthetic capacity proof failed', stage, error?.message);
       return Response.json({ done: false, stage }, { status: 500 });

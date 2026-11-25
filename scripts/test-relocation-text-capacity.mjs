@@ -31,7 +31,12 @@ try {
     if (value.done) {
       assert.equal(value.seeded, 2000);
       assert.ok(value.largePages >= 2);
-      console.log(`Synthetic capacity preflight and frozen manifest passed: ${value.seeded} rows, 8,300,000-byte TEXT, ${value.pages} preflight calls.`);
+      assert.equal(value.oversizedRejected, true, 'Oversized row must be rejected before freeze');
+      assert.equal(value.legacyRejected, true, 'Older checkpoints must be rejected');
+      assert.equal(value.frozenLegacyRejected, true, 'Frozen source must reject older checkpoints');
+      assert.equal(value.longKeyRejected, true, 'Oversized primary key must be rejected before freeze');
+      assert.equal(value.nonfiniteRejected, true, 'Non-finite REAL must be rejected before freeze');
+      console.log(`Synthetic capacity transfer, pre-freeze rejection and legacy checks passed: ${value.seeded} rows, 8,300,000-byte TEXT, ${value.pages} preflight calls.`);
       break;
     }
     assert.ok(i < 20000, 'Capacity proof exceeded its request budget');

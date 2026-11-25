@@ -262,6 +262,9 @@ export class ProjectRegistry extends DurableObject {
     let cursor;
     try { cursor = JSON.parse(row.cursor); } catch { throw new Error('Invalid TEXT preflight checkpoint'); }
     if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor) || cursor.done !== Boolean(row.done)) throw new Error('Invalid TEXT preflight checkpoint');
+    // Earlier scans did not validate all export bounds and cannot authorize a
+    // freeze, even when already marked complete before an upgrade.
+    if (cursor.version !== 3) throw new Error('Legacy TEXT preflight requires manual review');
     return { marker: row.marker, cursor, done: Boolean(row.done) };
   }
 

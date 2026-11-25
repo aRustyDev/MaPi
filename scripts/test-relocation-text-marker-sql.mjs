@@ -17,6 +17,8 @@ const ordinary = [
   `SELECT ${seal}中 FROM examples`,
   `SELECT 1 AS ${marker}`,
   `SELECT 1 AS "${seal}"`,
+  `SELECT 42 ${marker}`,
+  `SELECT 'literal' "${seal}"`,
   `WITH x AS (SELECT 1) SELECT 1 AS ${marker}`,
   `CREATE TABLE other AS SELECT 1 AS ${marker}`,
   `CREATE VIEW other_view AS SELECT 1 AS "${marker}"`,
@@ -35,6 +37,7 @@ const reserved = [
   `SELECT 1; CREATE VIEW '${marker}' AS SELECT 1`,
   `SELECT 1 AS ${marker}; CREATE VIEW "${marker}" AS SELECT 1`,
   `ALTER TABLE ordinary RENAME TO "${marker}"`,
+  `SELECT 42 ${marker}; CREATE VIEW '${marker}' AS SELECT 1`,
 ];
 for (const sql of reserved) assert.throws(() => check(sql), /Reserved TEXT preflight marker/, sql);
 console.log('TEXT preflight SQL guard checks passed.');

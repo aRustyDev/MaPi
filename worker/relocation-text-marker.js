@@ -68,6 +68,11 @@ export function assertNoTextPreflightMarkerAccess(statement) {
     // Result-column aliases cannot name a schema object. Allow them even
     // when they happen to match a reserved object name.
     if (words[index - 1] === 'as') continue;
+    // SQLite permits result aliases without AS. A quoted literal or numeric
+    // expression immediately before an identifier cannot be a schema object
+    // declaration, so allow this common alias form as well.
+    const previous = tokens[index - 1];
+    if (previous && (previous.startsWith("'") || /^[0-9]$/.test(previous))) continue;
     if (reserved.has(value.toLowerCase())) throw new Error('Reserved TEXT preflight marker');
   }
 }

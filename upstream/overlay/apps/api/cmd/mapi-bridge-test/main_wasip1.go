@@ -56,6 +56,10 @@ func check() error {
 	if err := db.QueryRowContext(ctx, "SELECT value AS mapi_relocation_text_preflight_marker FROM αmapi_relocation_text_preflight_marker").Scan(&markerLiteral); err != nil || markerLiteral != "mapi_relocation_text_preflight_marker" {
 		return fmt.Errorf("unicode identifier or alias read failed: %v", err)
 	}
+	var markerAlias int
+	if err := db.QueryRowContext(ctx, "SELECT 42 mapi_relocation_text_preflight_marker").Scan(&markerAlias); err != nil || markerAlias != 42 {
+		return fmt.Errorf("implicit alias read failed: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, "CREATE VIEW 'mapi_relocation_text_preflight_marker' AS SELECT 1"); err == nil {
 		return errors.New("reserved marker identifier was accepted")
 	}
