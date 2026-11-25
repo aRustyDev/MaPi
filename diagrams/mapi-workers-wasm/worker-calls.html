@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MaPi · Worker call map</title>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --paper: #f5f5f5;
+      --white: #ffffff;
+      --ink: #2d3142;
+      --muted: #4f5d75;
+      --rule: #bfc0c0;
+      --subtle: #dde0e5;
+      --public-zone: #eeeef0;
+      --private-zone: #eef0f3;
+      --backend-zone: #efeff0;
+      --accent: #eb6c36;
+      --accent-dark: #853b20;
+      --accent-tint: #fceee7;
+      --link: #2e5aa8;
+      --sans: "Geist", system-ui, sans-serif;
+      --mono: "Geist Mono", ui-monospace, monospace;
+      --serif: "Instrument Serif", Georgia, serif;
+    }
+    body { margin: 0; padding: 28px 24px; color: var(--ink); background: var(--paper); font-family: var(--sans); }
+    main { width: 100%; max-width: 1328px; margin: auto; }
+    header { padding: 0 20px 18px; border-bottom: 1px solid var(--rule); }
+    .kicker { margin: 0 0 8px; color: var(--muted); font: 500 11px var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 0 0 6px; font: 400 42px/1.05 var(--serif); }
+    header > .page-deck { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+    figure { margin: 0; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    svg { display: block; width: 100%; min-width: 1280px; height: auto; }
+    svg text { fill: var(--ink); font-family: var(--sans); dominant-baseline: auto; }
+    .zone { stroke: var(--muted); stroke-width: 1; stroke-opacity: .45; stroke-dasharray: 4 4; }
+    .zone-name { font: 600 14px var(--sans); }
+    .box { fill: var(--white); stroke: var(--rule); stroke-width: 1; }
+    .focal { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.5; }
+    .optional { stroke: var(--muted); stroke-dasharray: 5 4; }
+    .name { font-weight: 600; font-size: 16px; }
+    .entry { font-weight: 600; font-size: 14px; }
+    .detail { fill: var(--muted); font: 400 11px var(--sans); }
+    .tech { fill: var(--muted); font: 400 9px var(--mono); }
+    .tag { fill: var(--muted); font: 600 9px var(--mono); letter-spacing: .075em; }
+    .tag-accent { fill: var(--accent-dark); }
+    .tag-bg { fill: #e9ecf1; }
+    .tag-accent-bg { fill: #f9d8c6; }
+    .row { fill: #fffaf7; stroke: #e5c6b7; stroke-width: 1; }
+    .artifact { fill: #f2f4f7; stroke: var(--subtle); stroke-width: 1; }
+    .code { fill: var(--ink); font: 600 10px var(--mono); }
+    .key { fill: #ffffff; stroke: var(--rule); stroke-width: 1; }
+    .rule { stroke: var(--subtle); stroke-width: 1; }
+    .flow { fill: none; stroke: var(--link); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .internal { stroke: var(--muted); }
+    .dashed { stroke-dasharray: 5 4; }
+    .arrow-label { fill: var(--link); font: 500 9px var(--mono); letter-spacing: .025em; }
+    .arrow-label.internal-label { fill: var(--muted); }
+    .label-bg { fill: var(--paper); }
+    .note { fill: var(--muted); font: 400 10px var(--sans); }
+    .legend-label { font-weight: 600; font-size: 14px; }
+    figcaption { margin: 0 20px; padding: 12px 0 8px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; line-height: 1.55; }
+    figcaption p { max-width: 78ch; margin: 0 0 6px; }
+    .detail-panel { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--rule); }
+    .detail-panel > h2 { margin: 0 20px 4px; font: 400 32px/1.1 var(--serif); }
+    .detail-panel > p { margin: 0 20px 12px; color: var(--muted); font-size: 14px; }
+    .binding-notes { margin: 16px 20px 0; max-width: 1056px; border-top: 1px solid var(--rule); }
+    .binding-notes > div { display: grid; grid-template-columns: 12rem minmax(0, 1fr); gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--subtle); }
+    .binding-notes dt { font-size: 13px; font-weight: 600; }
+    .binding-notes dd { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .binding-notes code { font: .94em var(--mono); }
+    .page-nav { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px; font-size: 12px; }
+    .page-nav a { color: var(--link); text-underline-offset: 3px; }
+    .request-figure { padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--subtle); }
+    .request-figure h3 { margin: 0 20px 7px; font-size: 18px; line-height: 1.3; font-weight: 600; }
+    .request-figure figcaption { border-top: 0; padding-top: 4px; }
+    .request-figure figcaption p { max-width: 100ch; }
+    .seq-fragment { fill: #eef0f3; stroke: var(--rule); stroke-width: 1; }
+    .seq-tab { fill: var(--paper); stroke: var(--rule); stroke-width: 1; }
+    .seq-guard { fill: var(--muted); font: 600 10px var(--mono); }
+    .seq-lifeline, .seq-dispatch-divider { fill: none; stroke: #98a2b1; stroke-width: 1; stroke-dasharray: 3 4; }
+    .seq-active { fill: #e2e7ee; stroke: #8190a4; stroke-width: 1; }
+    .seq-arrow { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .seq-return, .seq-async { stroke-dasharray: 5 4; }
+    .seq-ok { stroke: #b24a21; }
+    .seq-message { fill: var(--ink); font: 500 10px var(--mono); }
+    .seq-message-ok { fill: var(--accent-dark); }
+    .request-mode { margin: 0 20px 6px; color: var(--muted); font: 500 11px var(--mono); }
+    .request-nav { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0 20px 16px; font-size: 12px; }
+    .request-nav a { color: var(--link); text-underline-offset: 3px; }
+    .state-summary { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--subtle); }
+    .state-summary h3 { margin: 0 20px; font-size: 18px; }
+    .journey-note { margin: 12px 20px 0; max-width: 100ch; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    @media (max-width: 600px) {
+      .detail-panel > h2, .detail-panel > p, .binding-notes { margin-left: 8px; margin-right: 8px; }
+      .binding-notes > div { grid-template-columns: 1fr; gap: 3px; }
+      .request-figure h3, .journey-note, .request-nav, .request-mode, .state-summary h3 { margin-left: 8px; margin-right: 8px; }
+    }
+    @media (max-width: 600px) { body { padding: 20px 12px; } header { padding-left: 8px; } figcaption { margin: 0 8px; } }
+    @media print {
+      @page { size: landscape; margin: 10mm; }
+      body { padding: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .diagram-container { overflow: visible; }
+      svg { min-width: 0; }
+      figure { break-inside: avoid; }
+      .page-nav, .request-nav { display: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="kicker">Target deployment</p>
+    <h1 id="diagram-heading">Worker call map</h1>
+    <nav class="page-nav" aria-label="MaPi deployment diagrams">
+      <a href="deployment.html">Deployment</a>
+      <a href="worker-calls.html" aria-current="page">Worker calls</a>
+      <a href="oidc-login.html">OIDC login</a>
+      <a href="api-key-request.html">API keys</a>
+      <a href="admin-api.html">Admin API</a>
+      <a href="inbound-webhook.html">Webhooks</a>
+      <a href="token-refresh.html">Refresh</a>
+      <a href="refresh-revocation-race.html">Refresh race</a>
+      <a href="oidc-logout.html">Logout</a>
+      <a href="kratos-session-revocation.html">Session revocation</a>
+      <a href="oauth-token-revocation.html">Token revocation</a>
+    </nav>
+  </header>
+  <section class="detail-panel" aria-labelledby="diagram-heading">
+    <p>MaPi coordinates the four Ory services. Dashed arrows show checks used when Oathkeeper is enabled for a route.</p>
+
+    <figure>
+      <div class="diagram-container" tabindex="0" aria-label="Scrollable Worker call map">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 540" role="img" aria-labelledby="mapi-worker-calls-title mapi-worker-calls-desc">
+          <title id="mapi-worker-calls-title">MaPi Worker call map</title>
+          <desc id="mapi-worker-calls-desc">MaPi ingress dispatches to the MaPi API and login adapter, which calls Hydra, Kratos, Keto, and Talos through private bindings; optional Oathkeeper evaluates protected routes before dispatch and can call Hydra, Kratos, or the MaPi policy entrypoint.</desc>
+          <defs>
+            <marker id="mapi-worker-calls-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <path d="M0 0L8 3L0 6Z" fill="#2e5aa8"/>
+            </marker>
+            <marker id="mapi-worker-calls-arrow-internal" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <path d="M0 0L8 3L0 6Z" fill="#4f5d75"/>
+            </marker>
+          </defs>
+
+          <rect width="1280" height="540" fill="#f5f5f5"/>
+          <rect class="zone" x="20" y="28" width="224" height="448" rx="8" fill="#eeeef0"/>
+          <rect class="zone" x="304" y="28" width="956" height="448" rx="8" fill="#eef0f3"/>
+          <rect class="label-bg" x="31" y="18" width="94" height="18"/>
+          <rect class="label-bg" x="315" y="18" width="96" height="18"/>
+          <text class="zone-name" x="37" y="32">Public Edge</text>
+          <text class="zone-name" x="321" y="32">Private Edge</text>
+          <text class="tech" x="904" y="49">INDIVIDUAL SERVICE WORKERS</text>
+
+          <!-- Policy calls precede normal dispatch on enabled routes. -->
+          <path class="flow dashed" d="M224 204H264Q272 204 272 196V96Q272 88 280 88H324" marker-end="url(#mapi-worker-calls-arrow)"/>
+          <path class="flow" d="M224 280H324" marker-end="url(#mapi-worker-calls-arrow)"/>
+          <path class="flow internal dashed" d="M468 152V216" marker-end="url(#mapi-worker-calls-arrow-internal)"/>
+          <path class="flow internal dashed" d="M608 80H904" marker-end="url(#mapi-worker-calls-arrow-internal)"/>
+          <path class="flow internal dashed" d="M608 128H680A8 8 0 0 1 696 128H832Q840 128 840 136V172Q840 180 848 180H904" marker-end="url(#mapi-worker-calls-arrow-internal)"/>
+
+          <!-- Application calls from the MaPi adapter. -->
+          <path class="flow internal" d="M608 244H680Q688 244 688 236V120Q688 112 696 112H904" marker-end="url(#mapi-worker-calls-arrow-internal)"/>
+          <path class="flow internal" d="M608 272H720Q728 272 728 264V216Q728 208 736 208H904" marker-end="url(#mapi-worker-calls-arrow-internal)"/>
+          <path class="flow internal" d="M608 300H904" marker-end="url(#mapi-worker-calls-arrow-internal)"/>
+          <path class="flow internal" d="M608 328H728Q736 328 736 336V400Q736 408 744 408H904" marker-end="url(#mapi-worker-calls-arrow-internal)"/>
+
+          <g text-anchor="middle">
+            <rect class="label-bg" x="280" y="128" width="28" height="15"/>
+            <text class="arrow-label" x="294" y="139">IAP</text>
+            <rect class="label-bg" x="237" y="257" width="72" height="15"/>
+            <text class="arrow-label" x="273" y="268">DISPATCH</text>
+            <rect class="label-bg" x="476" y="176" width="86" height="15"/>
+            <text class="arrow-label internal-label" x="519" y="187">POLICY CHECK</text>
+            <rect class="label-bg" x="746" y="57" width="124" height="15"/>
+            <text class="arrow-label internal-label" x="808" y="68">INTROSPECTION</text>
+            <rect class="label-bg" x="724" y="136" width="108" height="15"/>
+            <text class="arrow-label internal-label" x="778" y="147">SESSION LOOKUP</text>
+            <rect class="label-bg" x="744" y="89" width="124" height="15"/>
+            <text class="arrow-label internal-label" x="806" y="100">ISSUER / ADMIN</text>
+            <rect class="label-bg" x="748" y="185" width="122" height="15"/>
+            <text class="arrow-label internal-label" x="809" y="196">FLOW / SESSION</text>
+            <rect class="label-bg" x="746" y="277" width="124" height="15"/>
+            <text class="arrow-label internal-label" x="808" y="288">CHECK / WRITE</text>
+            <rect class="label-bg" x="748" y="385" width="122" height="15"/>
+            <text class="arrow-label internal-label" x="809" y="396">VERIFY / ADMIN</text>
+          </g>
+
+          <g aria-label="Ingress">
+            <rect class="box" x="36" y="176" width="188" height="152" rx="6"/>
+            <rect class="tag-bg" x="48" y="188" width="91" height="16" rx="2"/>
+            <text class="tag" x="54" y="200">PUBLIC WORKER</text>
+            <text class="name" x="48" y="229">MaPi ingress</text>
+            <text class="detail" x="48" y="250">Match route and tenant</text>
+            <path class="rule" d="M48 264H212"/>
+            <text class="detail" x="48" y="285">If IAP is enabled on the</text>
+            <text class="detail" x="48" y="301">route, dispatch after allow.</text>
+          </g>
+
+          <g aria-label="Optional IAP gate">
+            <rect class="box optional" x="324" y="56" width="284" height="96" rx="6"/>
+            <rect class="tag-bg" x="336" y="68" width="64" height="16" rx="2"/>
+            <text class="tag" x="342" y="80">OPTIONAL</text>
+            <text class="name" x="336" y="105">IAP · Oathkeeper Decision API</text>
+            <text class="detail" x="336" y="126">Use the lookup required by the route’s rule.</text>
+            <text class="detail" x="336" y="142">Ask MaPi’s check-only endpoint for policy.</text>
+          </g>
+
+          <g aria-label="MaPi adapter">
+            <rect class="box focal" x="324" y="216" width="284" height="140" rx="6"/>
+            <rect class="tag-accent-bg" x="336" y="228" width="99" height="16" rx="2"/>
+            <text class="tag tag-accent" x="342" y="240">PRIVATE WORKER</text>
+            <text class="name" x="336" y="268">MaPi API &amp; login adapter</text>
+            <text class="detail" x="336" y="289">Tenant policy · login and consent</text>
+            <text class="detail" x="336" y="306">Check-only and dispatch entrypoints</text>
+            <path class="rule" d="M336 319H596"/>
+            <text class="detail" x="336" y="339">Permission adapter · Keto by default</text>
+          </g>
+
+          <g aria-label="Ory service Workers and database bindings">
+            <rect class="box" x="904" y="56" width="336" height="80" rx="6"/>
+            <text class="name" x="920" y="80">AuN · Hydra</text>
+            <text class="detail" x="920" y="101">OAuth2 / OIDC · public protocol and private admin</text>
+            <text class="tag" x="920" y="121">HYPERDRIVE → POSTGRES</text>
+
+            <rect class="box" x="904" y="160" width="336" height="80" rx="6"/>
+            <text class="name" x="920" y="184">UDB · Kratos</text>
+            <text class="detail" x="920" y="205">Identity management, browser flows and session reads</text>
+            <text class="tag" x="920" y="225">HYPERDRIVE → POSTGRES</text>
+
+            <rect class="box" x="904" y="264" width="336" height="80" rx="6"/>
+            <text class="name" x="920" y="288">AuZ · Keto</text>
+            <text class="detail" x="920" y="309">Permission checks and relationship writes</text>
+            <text class="tag" x="920" y="329">HYPERDRIVE → POSTGRES</text>
+
+            <rect class="box" x="904" y="368" width="336" height="80" rx="6"/>
+            <text class="name" x="920" y="392">Keys · Talos</text>
+            <text class="detail" x="920" y="413">API key verification and lifecycle management</text>
+            <text class="tag" x="920" y="433">HYPERDRIVE → POSTGRES WITH ORY ENTERPRISE</text>
+          </g>
+
+          <path class="rule" d="M20 492H1260"/>
+          <text class="detail" x="20" y="514">Solid · dispatch / service call</text>
+          <text class="detail" x="324" y="514">Dashed · optional decision / lookup</text>
+          <text class="detail" x="904" y="514">Arrow direction · caller to callee</text>
+        </svg>
+      </div>
+
+      <figcaption>
+        <p>Hydra redirects the browser to MaPi for login and consent. MaPi reads the Kratos session and accepts Hydra’s challenge. This target requires zero direct calls among Hydra, Kratos, Keto, and Talos. Kratos can call Hydra directly if it takes over the login challenge in a different integration.</p>
+        <p>MaPi enforces route and tenant policy when Oathkeeper is disabled. Sign-in and token endpoints use their protocol checks. Webhook ingress verifies provider signatures.</p>
+      <p>For token lifecycle, Hydra and the protected MaPi API call the private MaPi lifecycle Worker. The lifecycle Worker verifies the linked Kratos session and reconciles scoped grant revocation with Hydra.</p>
+      </figcaption>
+    </figure>
+
+    <dl class="binding-notes" aria-label="Backend binding assignments">
+      <div>
+        <dt>Hyperdrive</dt>
+        <dd>Bind Hydra, Kratos, and Keto to Postgres with separate database roles. Bind Talos only with the Enterprise Postgres edition. OSS Talos would need durable single-instance SQLite on a validated runtime. MaPi ingress, the adapter, and Oathkeeper reach state through service APIs.</dd>
+      </div>
+      <div>
+        <dt>Upstash</dt>
+        <dd>Zero bindings in the target. Start with Cloudflare rate limiting at ingress. Add Redis only for a concrete shared-cache or quota requirement.</dd>
+      </div>
+      <div>
+        <dt>Workers VPC</dt>
+        <dd>Zero VPC Networks in the baseline. For later private compute or an externally hosted AuthZ engine, define a VPC Service per fixed host and port, such as <code>mapi-prod-jobs</code> or <code>mapi-prod-authz</code>, with separate staging targets. Bind it only to the calling Worker. A private Postgres endpoint can have its own VPC Service for Hyperdrive. Use a VPC Network binding if an adapter needs dynamic access to a private network’s routes.</dd>
+      </div>
+    </dl>
+  </section>
+</main>
+</body>
+</html>
