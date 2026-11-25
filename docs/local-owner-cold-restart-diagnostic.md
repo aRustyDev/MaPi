@@ -5,3 +5,18 @@ The disposable local test `node scripts/test-local-owner-cold-restart.mjs /priva
 Read-only inspection of the installed Miniflare implementation suggests a fixture configuration error: without shared storage, `isolatedResourcePersistencePath` is derived from `resourcePersistencePath`, and this test supplied only the former. As a result the synthetic state may not have been persisted across the two instances. This is a source-derived explanation, not a verified cause; the deleted state prevents inspecting the failed run's database. The test has not been changed or rerun pending the user's decision. No readiness endpoint was called.
 
 The test script SHA-256 was `7cc28b54290a15b90423ff75aa87d3208cf0447d8b0974d8f23a70492efe4bb9`; the older dirty local JavaScript and Wasm hashes were `9ab027c7915ca28c354cc1f9b4af807f2e54a6a2357040b5775e5451ac212cc6` and `b67b6e6341c2598917575a486d61dc91e7b6f8b1f6a7c4fcfdc96c68146939e2`. The bundle predates later importer changes, and the test does not establish hosted behavior, actual platform cold starts, CPU, total isolate memory, limit errors or final-candidate acceptance. No Woven deployment or AWS resource was contacted or changed.
+
+## Verified local rerun
+
+The original configuration reproduced the 503 using the same JavaScript and
+Wasm hashes above. Miniflare derived its effective persistence path from
+`resourcePersistencePath` when shared storage was disabled. Supplying that
+option kept the SQLite state across disposal and recreation. The updated
+harness verifies that Durable Object SQLite files exist before recreating the
+runtime.
+
+Both projects then completed their first post-restart login, showed changed
+owner boot IDs and initialized their Go reactors. A previously active session
+remained readable and a previously revoked one remained rejected in each
+project. The saved bundle, credentials and fixture all stayed local. The
+final-candidate hosted cold measurement remains in the Phase 1 runtime gate.
