@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { inspectLocalMoveAfterTimeout } from './large-timeout-diagnostics.mjs';
+import { verifyNativeRelocationEvidence } from './verify-native-relocation-evidence.mjs';
 
 const large = process.env.MAPI_LARGE_IMPORT === '1';
 const timeoutRegression = process.env.MAPI_LOCAL_TIMEOUT_REGRESSION === '1';
@@ -27,7 +28,7 @@ let acknowledgedAdvances = 0, lastAcknowledgedPhase = 'not-started';
 let timeoutTestAttempts = 0;
 for (const stream of [server.stdout, server.stderr]) stream?.on('data', chunk => { diagnostic = (diagnostic + chunk.toString()).slice(-8000); });
 async function call(action, body = {}, expectedFailure = false, timeoutMs = 120000) {
-  const delayedAdvance = timeoutRegression && action === 'advance' && acknowledgedAdvances === 1;
+  const delayedAdvance = timeoutRegression && action === 'advance' && lastAcknowledgedPhase === 'importing';
   if (timeoutRegression && action === 'advance') console.error(JSON.stringify({ event: 'local.timeout.test.attempt', attempt: ++timeoutTestAttempts }));
   if (delayedAdvance) { body = { ...body, testDelayAfterAdvance: true }; timeoutMs = 3000; }
   const started = performance.now();
@@ -48,7 +49,7 @@ async function call(action, body = {}, expectedFailure = false, timeoutMs = 1200
   }
   assert.equal(response.status, 200, `${action}: ${value.error ?? response.status}`);
   if (action === 'advance') { acknowledgedAdvances++; lastAcknowledgedPhase = typeof value.phase === 'string' ? value.phase : 'unknown'; }
-  if (timeoutRegression && action === 'advance') console.error(JSON.stringify({ event: 'local.timeout.test.ack', nextChunk: value.nextChunk }));
+  if (timeoutRegression && action === 'advance') console.error(JSON.stringify({ event: 'local.timeout.test.ack', phase: value.phase, nextChunk: value.nextChunk }));
   return value;
 }
 let diagnosticFixture;
@@ -77,7 +78,13 @@ try {
   const moveStarted = performance.now();
   let advances = 0;
   let progress = await call('advance', fixture); advances++;
+  while (progress.phase === 'preflighting') {
+    if (advances > 100000) throw Error('Preflight exceeded bounded coordinator calls');
+    progress = await call('advance', fixture); advances++;
+    if (large && advances % 1000 === 0) console.log(`Advanced ${advances} bounded preflight pages.`);
+  }
   assert.equal(progress.phase, 'importing');
+  const preflightAdvances = advances;
   const beforeExport = await call('exportStatus', fixture);
   const beforeImport = await call('importStatus', fixture);
   const diagnosticBaseline = await inspectLocalMoveAfterTimeout(action => call(action, fixture, false, 5000));
@@ -115,7 +122,7 @@ try {
     progress = await call('advance', fixture); advances++;
     if (large && advances % 500 === 0) console.log(`Advanced ${advances} chunks/pages; phase ${progress.phase}.`);
     if (progress.done || progress.phase === 'archive-blocked') break;
-    if (advances > 10000) throw Error('Move exceeded bounded coordinator calls');
+    if (advances - preflightAdvances > 10000) throw Error('Move exceeded bounded coordinator calls');
   }
   const moveSeconds = (performance.now() - moveStarted) / 1000;
   const stats = await call('exportStats', fixture);
@@ -132,17 +139,21 @@ try {
   assert.ok(sourceBytesBefore > 0 && sourceBytesAfter > 0 && destinationBytesAfter > 0);
   assert.ok(stats.max_chunk <= 128 * 1024); assert.ok(stats.fragments > 1);
   if (large) assert.ok(stats.bytes >= 128 * 1024 * 1024, 'Encoded transfer below representative size');
-  let cursor = 0, pages = 0; const counts = {}, tables = new Set();
+  let cursor = 0, pages = 0; const counts = {}, tables = new Set(), nativeEvidence = [];
   for (;;) {
     const evidence = await call('evidence', { ...fixture, after: cursor });
     assert.equal(evidence.complete, true);
-    for (const row of evidence.pages) { assert.ok(/^[0-9a-f]{64}$/.test(row.digest)); cursor = row.sequence; pages++; tables.add(row.table); counts[row.table] = (counts[row.table] ?? 0) + row.count; }
+    for (const row of evidence.pages) { assert.ok(/^[0-9a-f]{64}$/.test(row.digest)); cursor = row.sequence; pages++; tables.add(row.table); counts[row.table] = (counts[row.table] ?? 0) + row.count; nativeEvidence.push(row); }
     assert.equal(evidence.next, cursor);
     if (evidence.done) break;
     assert.ok(evidence.pages.length);
   }
   assert.equal(counts.users, sourceCounts.users); assert.equal(counts.user_passwords, sourceCounts.user_passwords); assert.equal(counts.events, sourceCounts.events);
   assert.equal(counts.mapi_oauth_signing_keys, 1, 'Issuer signing key missing from reconciliation');
+  const native = await verifyNativeRelocationEvidence(dir, fixture.projectId, nativeEvidence);
+  assert.equal(Object.keys(native).length, tables.size, 'Native table coverage differs');
+  console.log(`Native SQLite independently verified ${tables.size} table counts and ${pages} reconciliation page digests.`);
+  console.log(JSON.stringify({ nativeTables: native }));
   if (gate) {
     const targetCounts = await call('counts', { projectId: fixture.projectId, name: destinationName });
     assert.deepEqual(targetCounts, sourceCounts, 'Staged destination counts differ');

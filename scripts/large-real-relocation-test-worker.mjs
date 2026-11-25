@@ -131,7 +131,7 @@ export class LargeOwner extends NextgenApplication {
   failImport(projectId, part) { return importChunk(this.ctx.storage, projectId, part, 1); }
   replayImport(projectId, part) { return importChunk(this.ctx.storage, projectId, part); }
   exportStats(projectId) {
-    return this.ctx.storage.sql.exec("SELECT COUNT(*) AS chunks, COALESCE(SUM(length(CAST(content AS BLOB))),0) AS bytes, COALESCE(MAX(length(CAST(content AS BLOB))),0) AS max_chunk, COALESCE(SUM(CASE WHEN json_type(content, '$.fragment') IS NOT NULL THEN 1 ELSE 0 END),0) AS fragments FROM mapi_chunk_export_data WHERE project_id = ?", projectId).one();
+    return this.ctx.storage.sql.exec("SELECT COUNT(*) AS chunks, COALESCE(SUM(length(CAST(content AS BLOB))),0) AS bytes, COALESCE(MAX(length(CAST(content AS BLOB))),0) AS max_chunk, COALESCE(SUM(CASE WHEN json_type(content, '$.fragment') IS NOT NULL OR json_type(content, '$.stream') IS NOT NULL THEN 1 ELSE 0 END),0) AS fragments FROM mapi_chunk_export_data WHERE project_id = ?", projectId).one();
   }
   counts(projectId) {
     const sql = this.ctx.storage.sql;
