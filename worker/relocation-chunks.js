@@ -152,10 +152,15 @@ function assertChunkFormat(storage, id, move) {
  const format = exists && one(storage, 'SELECT move_id, version FROM mapi_chunk_format WHERE project_id = ? AND move_id = ?', id, move);
  if (!format || format.move_id !== move || format.version !== RELOCATION_CHUNK_VERSION) throw Error('Legacy relocation chunk checkpoint requires manual review');
 }
+function validateChunkFormatSchema(storage) {
+ const definition = one(storage, "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_chunk_format'")?.sql;
+ if (typeof definition !== 'string' || definition.trim().replace(/\s+/g, ' ') !== controlDefinitions.mapi_chunk_format || one(storage, "SELECT 1 FROM sqlite_schema WHERE tbl_name = 'mapi_chunk_format' COLLATE NOCASE AND type IN ('index', 'trigger') AND sql IS NOT NULL LIMIT 1")) throw Error('Invalid relocation chunk format schema');
+}
 export function beginChunkExport(storage, id, generation, move, tables) {
  validateTables(tables);
  return storage.transactionSync(() => {
   schema(storage);
+  validateChunkFormatSchema(storage);
   validFence(storage, id, generation, move);
   const previous = one(storage, 'SELECT * FROM mapi_chunk_export WHERE project_id = ?', id);
   if (previous) { if (previous.generation !== generation || previous.move_id !== move || previous.tables !== JSON.stringify(tables)) throw Error('Conflicting export'); assertChunkFormat(storage, id, move); return; }

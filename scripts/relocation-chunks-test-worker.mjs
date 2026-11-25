@@ -66,6 +66,15 @@ export class ChunkProject extends DurableObject {
   }));
  }
  downgradeChunkFormat() { this.s.sql.exec('UPDATE mapi_chunk_format SET version = 1'); }
+ seedBadFormatSchema(kind) {
+  if (kind === 'malformed') {
+   this.s.sql.exec('CREATE TABLE mapi_chunk_format (project_id TEXT, move_id TEXT, version INTEGER)');
+  } else if (kind === 'trigger') {
+   this.s.sql.exec('CREATE TABLE mapi_chunk_format (project_id TEXT NOT NULL, move_id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (project_id, move_id))');
+   this.s.sql.exec("CREATE TRIGGER mapi_test_format_trigger AFTER INSERT ON mapi_chunk_format BEGIN UPDATE users SET precise = 1 WHERE id = 'u00'; INSERT INTO events VALUES ('unexpected', 'u00', 'unexpected'); END");
+  } else throw Error('Invalid format schema fixture');
+ }
+ clearBadFormatSchema() { this.s.sql.exec('DROP TABLE mapi_chunk_format'); }
  importControlCounts() { return ['mapi_chunk_import_data', 'mapi_chunk_import_fragment', 'mapi_chunk_import_fragment_data'].map(table => this.s.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one().n); }
  readWideText() { return this.s.sql.exec("SELECT value FROM wide_text WHERE id = 'wide'").one().value; }
  write(id, gen) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, gen); this.s.sql.exec("INSERT INTO users VALUES ('later', 0, X'01')"); }); }
@@ -188,6 +197,19 @@ export default { async fetch(request, env) {
   const malformedBefore = await malformed.controlSchema();
   await rejects(() => malformed.beginImport('malformed', 1, 'move', `malformed-${n}`, ['users']), 'fresh malformed control schema accepted');
   check(JSON.stringify(await malformed.controlSchema()) === JSON.stringify(malformedBefore), 'rejected malformed schema was changed');
+  for (const kind of ['malformed', 'trigger']) {
+   const id = `bad-format-${kind}`, name = `${id}-${n}`;
+   const owner = env.PROJECT.getByName(name);
+   await owner.init(id, name); await owner.seed(id); await owner.freeze(id, 1, 'move');
+   await owner.seedBadFormatSchema(kind);
+   const before = JSON.stringify({ rows: await owner.evidence(), fence: await owner.status(id), schema: await owner.controlSchema() });
+   await rejectsWith(() => owner.beginExport(id, 1, 'move'), 'Invalid relocation chunk format schema');
+   check(JSON.stringify({ rows: await owner.evidence(), fence: await owner.status(id), schema: await owner.controlSchema() }) === before, `Rejected ${kind} format schema changed state`);
+   await owner.clearBadFormatSchema();
+   await owner.beginExport(id, 1, 'move'); await owner.beginExport(id, 1, 'move');
+   check((await owner.exportStatus(id)).next_chunk === 0, `Valid retry after ${kind} format schema failed`);
+   check(JSON.stringify(await owner.evidence()) === JSON.stringify(JSON.parse(before).rows), `Retry after ${kind} format schema changed business or audit rows`);
+  }
   const orphan = env.PROJECT.getByName(`orphan-${n}`); await orphan.beginImport('old-project', 1, 'old-move', `orphan-${n}`, ['users']); await orphan.removeRelocationRow('old-project');
   const orphanSchema = await orphan.controlSchema(), orphanCheckpoint = await orphan.importStatus('old-project');
   await rejects(() => orphan.beginImport('new-project', 1, 'new-move', `orphan-${n}`, ['users']), 'orphan checkpoint accepted by new import');

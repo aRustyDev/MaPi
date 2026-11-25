@@ -134,6 +134,7 @@ try {
   }
   const destinationName = gate ? gate.destination.object_name : progress.objectName;
   const destinationBytesAfter = await call('databaseSize', { name: destinationName });
+  assert.ok(gate, 'Expected the independent archive gate to reject cutover');
   assert.ok(sourceBytesBefore > 0 && sourceBytesAfter > 0 && destinationBytesAfter > 0);
   assert.ok(stats.max_chunk <= 128 * 1024); assert.ok(stats.fragments > 1);
   if (large) assert.ok(stats.bytes >= 128 * 1024 * 1024, 'Encoded transfer below representative size');
