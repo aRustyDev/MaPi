@@ -201,7 +201,15 @@ function bind(statement, args) {
     return args[index - 1].kind === "int" ? `CAST(${placeholder} AS INTEGER)` : placeholder;
   });
   if (highest !== args.length) throw new Error("SQLite argument count mismatch");
-  const values = args.map(({ kind, value }) => kind === "blob" ? Uint8Array.fromBase64(value).buffer : value);
+  const realValues = { inf: Infinity, "-inf": -Infinity, "-0": -0 };
+  const values = args.map(({ kind, value }) => {
+    if (kind === "blob") return Uint8Array.fromBase64(value).buffer;
+    if (kind === "real") {
+      if (typeof value !== "string" || !Object.hasOwn(realValues, value)) throw new Error("Invalid SQLite REAL argument");
+      return realValues[value];
+    }
+    return value;
+  });
   return { sql, values };
 }
 
@@ -363,6 +371,19 @@ export function execute(storage, { statement, args, query }) {
   const rows = storage.sql.exec(prepared, ...values).raw().toArray().map((row) =>
     columns.map((_column, index) => isReturning ? decodeReturning(row[index], unified) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
   return { columns, rows };
+}
+
+// Preserve REAL values JSON would otherwise turn into null or positive zero.
+export function stringifySQLResponse(response) {
+  const needsTag = value => value === Infinity || value === -Infinity || Object.is(value, -0);
+  if (!response.rows?.some(row => row.some(needsTag))) return JSON.stringify(response);
+
+  return JSON.stringify(response, (_key, value) => {
+    if (value === Infinity) return { real: "inf" };
+    if (value === -Infinity) return { real: "-inf" };
+    if (Object.is(value, -0)) return { real: "-0" };
+    return value;
+  });
 }
 
 export function sqliteError(error) {

@@ -212,6 +212,10 @@ export default {
       if (body.action === 'moveStatus') {
         return Response.json({ storedRouteState: status.route?.state ?? null, phase: status.move?.phase ?? null, finalized: status.move?.finalized === true });
       }
+      if (body.action === 'gateStatus') {
+        const proofs = await registry.relocationProofs('large-move-secret', body.projectId, moveId);
+        return Response.json({ route: await registry.resolve(origin), source: proofs.source, destination: proofs.destination });
+      }
       const target = env.NEXTGEN_APPLICATION.getByName(move.destination_object);
       if (body.action === 'exportStatus') return Response.json(await source.exportStatus(body.projectId));
       if (body.action === 'importStatus') return Response.json(await target.importStatus(body.projectId));

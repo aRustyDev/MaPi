@@ -1,3 +1,5 @@
+import { RELOCATION_CHUNK_VERSION } from './relocation-values.js';
+
 // Read-only verification of the transfer journal. One invocation reads at most
 // one bounded source chunk and one destination digest; the registry persists
 // the ordered cursor. Fences and checkpoints are rechecked around async hashing.
@@ -45,6 +47,9 @@ function destinationFence(storage, route, moveId, expectedDigest) {
 
 function status(storage, role, route, moveId, expectedDigest) {
   validateRoute(route, moveId);
+  const formatTable = one(storage, "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mapi_chunk_format'");
+  const format = formatTable && one(storage, 'SELECT version FROM mapi_chunk_format WHERE project_id=? AND move_id=?', route.projectId, moveId);
+  if (!format || format.version !== RELOCATION_CHUNK_VERSION) throw Error('Legacy relocation chunk checkpoint requires manual review');
   if (!digestOK(expectedDigest) || route.generation >= MAX_SAFE) throw Error('Invalid transfer history digest');
   const source = role === 'source';
   if (!source && role !== 'destination') throw Error('Invalid transfer history role');
@@ -85,7 +90,7 @@ export async function sourceTransferHistory(storage, route, moveId, digest, inde
   if (encoded.length > MAX_CONTENT_BYTES) throw Error('Source transfer history exceeds limit');
   let payload;
   try { payload = JSON.parse(before.content); } catch { throw Error('Invalid source transfer history'); }
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.projectId !== route.projectId ||
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.format !== RELOCATION_CHUNK_VERSION || payload.projectId !== route.projectId ||
       payload.generation !== route.generation || payload.moveId !== moveId || payload.index !== index ||
       typeof payload.done !== 'boolean' || payload.done !== (index === before.total - 1) ||
       (payload.done && payload.last !== true) || !(index === 0 ? payload.prev === '' : digestOK(payload.prev))) throw Error('Invalid source transfer history');

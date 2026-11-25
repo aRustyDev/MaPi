@@ -20,6 +20,67 @@ import (
 
 var output []byte
 
+//go:wasmexport check_bound_real_values
+func checkBoundREALValues() uint32 {
+	db := cloudflarewasm.Open()
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "CREATE TABLE bridge_types (id INTEGER PRIMARY KEY, value)"); err != nil {
+		return 1
+	}
+	if err := checkBoundREAL(ctx, db); err != nil {
+		return 2
+	}
+	return 0
+}
+
+//go:wasmexport check_relocation_real_values
+func checkRelocationREALValues(fragmented uint32) uint32 {
+	db := cloudflarewasm.Open()
+	defer db.Close()
+	query := "SELECT id, value FROM real_values ORDER BY id"
+	if fragmented != 0 {
+		query = "SELECT id, value FROM real_fragments ORDER BY id"
+	}
+	rows, err := db.QueryContext(context.Background(), query)
+	if err != nil {
+		return 1
+	}
+	defer rows.Close()
+	expected := map[string]any{
+		"finite": 1.25, "negative": math.Inf(-1), "null": nil,
+		"positive": math.Inf(1), "signed-zero": math.Copysign(0, -1), "text": "inf",
+	}
+	if fragmented != 0 {
+		expected = map[string]any{"large": math.Inf(1)}
+	}
+	count := 0
+	for rows.Next() {
+		var id string
+		var value any
+		if rows.Scan(&id, &value) != nil {
+			return 2
+		}
+		want, ok := expected[id]
+		if !ok {
+			return 3
+		}
+		if n, ok := want.(float64); ok {
+			got, ok := value.(float64)
+			if !ok || math.Float64bits(got) != math.Float64bits(n) {
+				return 4
+			}
+		} else if value != want {
+			return 5
+		}
+		count++
+	}
+	if rows.Err() != nil || count != len(expected) {
+		return 6
+	}
+	return 0
+}
+
 //go:wasmexport run_bridge_tests
 func run() uint64 {
 	result := map[string]any{"ok": true}
@@ -318,6 +379,33 @@ func checkStoredValues(ctx context.Context, db *sql.DB) error {
 	if null != nil || real != 1.5 || text != "9007199254740993" {
 		return fmt.Errorf("SQLite types changed: %#v %#v %#v", null, real, text)
 	}
+	// Workerd exposes infinities as JavaScript numbers, but ordinary JSON
+	// serialization silently turns them into null.
+	for _, value := range []struct {
+		expression string
+		want       float64
+	}{
+		{"1e999", math.Inf(1)},
+		{"-1e999", math.Inf(-1)},
+	} {
+		statements := []string{
+			"SELECT " + value.expression,
+			"INSERT INTO bridge_types (id, value) VALUES (13, " + value.expression + ") RETURNING value",
+			"DELETE FROM bridge_types WHERE id = 13 RETURNING value",
+		}
+		for _, statement := range statements {
+			var got any
+			if err := db.QueryRowContext(ctx, statement).Scan(&got); err != nil {
+				return fmt.Errorf("SQLite REAL query failed: %w", err)
+			}
+			if got != value.want {
+				return fmt.Errorf("SQLite REAL %s changed across the host bridge: got %#v", value.expression, got)
+			}
+		}
+	}
+	if err := checkBoundREAL(ctx, db); err != nil {
+		return err
+	}
 	var first, second, repeated int64
 	if err := db.QueryRowContext(ctx, "SELECT ?2, ?1, ?2", int64(math.MinInt64), int64(math.MaxInt64)).Scan(&first, &second, &repeated); err != nil {
 		return err
@@ -349,6 +437,28 @@ func checkStoredValues(ctx context.Context, db *sql.DB) error {
 	}
 	if count != 0 {
 		return errors.New("unsupported RETURNING expression mutated data")
+	}
+	return nil
+}
+
+func checkBoundREAL(ctx context.Context, db *sql.DB) error {
+	for _, want := range []float64{math.Inf(1), math.Inf(-1), math.Copysign(0, -1), 1.5} {
+		var inserted, selected any
+		if err := db.QueryRowContext(ctx, "INSERT INTO bridge_types (id, value) VALUES (14, ?) RETURNING value", want).Scan(&inserted); err != nil {
+			return fmt.Errorf("bind SQLite REAL: %w", err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT value FROM bridge_types WHERE id = 14").Scan(&selected); err != nil {
+			return fmt.Errorf("read bound SQLite REAL: %w", err)
+		}
+		for _, value := range []any{inserted, selected} {
+			got, ok := value.(float64)
+			if !ok || math.Float64bits(got) != math.Float64bits(want) {
+				return fmt.Errorf("bound SQLite REAL changed: got %#v, want %v", value, want)
+			}
+		}
+		if _, err := db.ExecContext(ctx, "DELETE FROM bridge_types WHERE id = 14"); err != nil {
+			return err
+		}
 	}
 	return nil
 }

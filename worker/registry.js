@@ -3,7 +3,7 @@ import { beginRegistryMove, initializeMoveRegistry, validRelocationDigest } from
 import { initializeHistoryCheckpoint, readHistoryCheckpoint, advanceHistoryCheckpoint } from "./registry-history.js";
 import { assertRecoveryEnvelope, readAnchoredRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScope, validateRecoveryScopePage } from "./recovery-scopes.js";
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
-import { RELOCATION_RECONCILIATION_VERSION } from "./relocation-values.js";
+import { isRelocationRealTag, RELOCATION_CHUNK_VERSION, RELOCATION_RECONCILIATION_VERSION } from "./relocation-values.js";
 import { authorizeSchemaMigration } from "./schema-migration.js";
 
 function authorizeRelocation(env, secret) {
@@ -72,7 +72,7 @@ function validBase64(value) {
 
 function validReconciliationKey(value) {
   if (typeof value === 'string') return true;
-  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0);
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const keys = Object.keys(value);
   if (keys.length !== 1) return false;
@@ -82,6 +82,7 @@ function validReconciliationKey(value) {
     const number = BigInt(integer);
     return number >= -9223372036854775808n && number <= 9223372036854775807n;
   }
+  if (keys[0] === 'real') return isRelocationRealTag(value.real);
   // Validate toBase64() output without regex backtracking or allocating a
   // decoded copy of a potentially large key.
   return keys[0] === 'blob' && typeof value.blob === 'string' && validBase64(value.blob);
@@ -170,7 +171,15 @@ export class ProjectRegistry extends DurableObject {
   }
 
   resolve(origin) {
-    return this.ctx.storage.sql.exec("SELECT r.origin, r.object_name, r.project_id, CASE WHEN p.project_id IS NOT NULL THEN 'recovering' WHEN m.phase = 'moving' THEN 'moving' ELSE r.state END AS state, r.generation FROM project_routes AS r LEFT JOIN mapi_route_moves AS m ON m.project_id = r.project_id LEFT JOIN mapi_project_recoveries AS p ON p.project_id = r.project_id WHERE r.origin = ?", canonicalOrigin(origin)).toArray()[0] ?? null;
+    const sql = this.ctx.storage.sql;
+    const route = sql.exec("SELECT r.origin, r.object_name, r.project_id, CASE WHEN p.project_id IS NOT NULL THEN 'recovering' WHEN m.phase = 'moving' THEN 'moving' ELSE r.state END AS state, r.generation FROM project_routes AS r LEFT JOIN mapi_route_moves AS m ON m.project_id = r.project_id LEFT JOIN mapi_project_recoveries AS p ON p.project_id = r.project_id WHERE r.origin = ?", canonicalOrigin(origin)).toArray()[0] ?? null;
+    if (route?.state === 'active') {
+      const move = sql.exec("SELECT move_id FROM mapi_route_moves WHERE project_id = ? AND phase = 'committed'", route.project_id).toArray()[0];
+      if (move && !sql.exec('SELECT 1 FROM mapi_move_completion WHERE project_id = ? AND move_id = ?', route.project_id, move.move_id).toArray().length && !currentReconciliation(sql, route.project_id, move.move_id)) {
+        route.state = 'moving';
+      }
+    }
+    return route;
   }
 
   schemaMigrationStatus(secret, projectId) {
@@ -434,6 +443,13 @@ export class ProjectRegistry extends DurableObject {
     });
     const sourceRoute = { projectId, origin, objectName: route.object_name, generation: route.generation };
     const namespace = this.env.NEXTGEN_APPLICATION;
+    const capabilities = await Promise.all([
+      namespace.getByName(route.object_name).relocationCapabilities(secret),
+      namespace.getByName(intent.destination_object).relocationCapabilities(secret),
+    ]);
+    if (capabilities.some(value => value?.chunkVersion !== RELOCATION_CHUNK_VERSION || value?.reconciliationVersion !== RELOCATION_RECONCILIATION_VERSION)) throw new Error("Relocation owner version mismatch");
+    const beforeFreeze = this.relocationStatus(secret, projectId);
+    if (!beforeFreeze.route || beforeFreeze.route.state !== 'active' || beforeFreeze.route.object_name !== route.object_name || beforeFreeze.route.generation !== route.generation || beforeFreeze.intent?.move_id !== moveId || beforeFreeze.intent.destination_object !== intent.destination_object) throw new Error('Relocation changed before source freeze');
     const proof = await namespace.getByName(route.object_name).preFreezeRelocation(secret, sourceRoute, moveId);
     if (proof?.state !== "frozen" || proof.projectId !== projectId || proof.origin !== origin || proof.objectName !== route.object_name || proof.generation !== route.generation || proof.moveId !== moveId || proof.objectId !== namespace.idFromName(route.object_name).toString()) throw new Error("Source freeze attestation mismatch");
     const latest = this.relocationStatus(secret, projectId);
