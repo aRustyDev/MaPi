@@ -1,7 +1,10 @@
 import { DurableObject } from 'cloudflare:workers';
 import { initializeProjectFence, assertProjectWritable, freezeProject, activateProject, retireProject, initializeRouteGeneration, registerRouteGeneration, readRouteGeneration, beginRelocation, commitRelocation, projectFenceStatus } from '../worker/relocation.js';
 import { beginChunkExport, exportChunk, beginChunkImport, importChunk, chunkExportStatus, chunkImportStatus } from '../worker/relocation-chunks.js';
-import { execute } from '../worker/sql.js';
+import { execute, sqliteError, stringifySQLResponse } from '../worker/sql.js';
+import { instantiateReactor } from '../worker/wasi.js';
+import bridgeWasm from '../worker/generated/sqlite-bridge-test.wasm';
+import { RELOCATION_CHUNK_VERSION } from '../worker/relocation-values.js';
 import { initializeOwnerFence } from '../worker/owner-fence.js';
 const tables = ['users', 'sessions', 'events'];
 const check = (v, text) => { if (!v) throw Error(text); };
@@ -9,7 +12,7 @@ const rejects = async (fn, text) => { try { await fn(); } catch { return; } thro
 const rejectsWith = async (fn, message) => { try { await fn(); } catch (error) { if (String(error).includes(message)) return; throw error; } throw Error(`Expected ${message}`); };
 const hash = async text => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2, '0')).join('');
 export class ChunkProject extends DurableObject {
- constructor(ctx, env) { super(ctx, env); this.s = ctx.storage; this.s.sql.exec('CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, precise INTEGER, data BLOB)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), kind TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS compound (a INTEGER NOT NULL, b TEXT NOT NULL, PRIMARY KEY (a, b))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS wide_text (id TEXT PRIMARY KEY, value TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS case_keys (id TEXT COLLATE NOCASE PRIMARY KEY, value TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS real_values (id TEXT PRIMARY KEY, value REAL)'); }
+ constructor(ctx, env) { super(ctx, env); this.s = ctx.storage; this.s.sql.exec('CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, precise INTEGER, data BLOB)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), kind TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS compound (a INTEGER NOT NULL, b TEXT NOT NULL, PRIMARY KEY (a, b))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS wide_text (id TEXT PRIMARY KEY, value TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS case_keys (id TEXT COLLATE NOCASE PRIMARY KEY, value TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS real_values (id TEXT PRIMARY KEY, value BLOB)'); }
  init(id, name) { initializeProjectFence(this.s, id, name); }
  seed(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); for (let i = 0; i < 12; i++) { const key = `u${String(i).padStart(2, '0')}`; const data = new Uint8Array(80_000); data.fill(i); this.s.sql.exec(`INSERT INTO users VALUES (?, ${i % 2 ? '-9223372036854775808' : '9223372036854775807'}, ?)`, key, data.buffer); this.s.sql.exec('INSERT INTO sessions VALUES (?, ?)', `s${i}`, key); this.s.sql.exec('INSERT INTO events VALUES (?, ?, ?)', `e${i}`, key, 'created'); } }); }
  seedCompound(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); for (let i = 0; i < 70; i++) this.s.sql.exec("INSERT INTO compound VALUES (9223372036854775807, ?)", `key-${String(i).padStart(4, '0')}`); }); }
@@ -22,9 +25,47 @@ export class ChunkProject extends DurableObject {
  oversized(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); const data = new Uint8Array(300_000); for (let i = 0; i < data.length; i++) data[i] = i % 251; this.s.sql.exec("INSERT INTO users VALUES ('large', 9223372036854775807, ?)", data.buffer); }); }
  beyondRowLimit(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO users VALUES ('large', 0, ?)", new Uint8Array(7_996_000).buffer); }); }
  seedWideText(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", 'é😀\n'.repeat(45_000)); }); }
- seedReal(id, value) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); if (value === 'positive') this.s.sql.exec("INSERT INTO real_values VALUES ('value', 1e999)"); else if (value === 'negative') this.s.sql.exec("INSERT INTO real_values VALUES ('value', -1e999)"); else if (value === 'null') this.s.sql.exec("INSERT INTO real_values VALUES ('value', NULL)"); else throw Error('Unknown REAL fixture'); }); }
- realState() { const row = this.s.sql.exec('SELECT typeof(value) AS kind, value FROM real_values').one(); return { kind: row.kind, positive: row.value === Infinity, negative: row.value === -Infinity }; }
- realRows() { return this.s.sql.exec('SELECT id, typeof(value) AS kind, value FROM real_values ORDER BY id').toArray(); }
+ seedRealValues(id, largeRows) {
+  this.s.transactionSync(() => {
+   assertProjectWritable(this.s, id, 1);
+   if (largeRows) {
+    this.s.sql.exec('CREATE TABLE real_fragments (id TEXT PRIMARY KEY, value, payload BLOB)');
+    this.s.sql.exec("INSERT INTO real_fragments VALUES ('large', 1e999, zeroblob(150000))");
+   } else {
+    this.s.sql.exec("INSERT INTO real_values VALUES ('finite', 1.25), ('negative', -1e999), ('null', NULL), ('positive', 1e999), ('text', 'inf')");
+    this.s.sql.exec("INSERT INTO real_values VALUES ('signed-zero', ?)", -0);
+   }
+  });
+ }
+ prepareRealFragments() { this.s.sql.exec('CREATE TABLE real_fragments (id TEXT PRIMARY KEY, value, payload BLOB)'); }
+ verifyRealValuesThroughGo(fragmented) {
+  let memory, output;
+  const encoder = new TextEncoder(), decoder = new TextDecoder();
+  const reactor = instantiateReactor(bridgeWasm, getMemory => {
+   memory = getMemory;
+   return {
+    sql: (pointer, size) => {
+     const query = JSON.parse(decoder.decode(new Uint8Array(memory(), pointer, size)));
+     let result;
+     try { result = execute(this.s, query); }
+     catch (error) { result = { error: sqliteError(error) }; }
+     output = encoder.encode(stringifySQLResponse(result));
+     return output.length;
+    },
+    result: (pointer, size) => { new Uint8Array(memory(), pointer, size).set(output); output = undefined; },
+    transaction: () => { throw Error('Unexpected Go fixture transaction'); },
+   };
+  });
+  return reactor.check_relocation_real_values(fragmented ? 1 : 0);
+ }
+ realRows(table = 'real_values') {
+  if (!['real_values', 'real_fragments'].includes(table)) throw Error('Invalid REAL fixture table');
+  const size = table === 'real_fragments' ? ', length(payload) AS bytes' : '';
+  return this.s.sql.exec(`SELECT id, typeof(value) AS kind, value${size} FROM ${table} ORDER BY id`).toArray().map(row => ({
+   ...row, value: row.value === Infinity ? '+inf' : row.value === -Infinity ? '-inf' : Object.is(row.value, -0) ? '-0' : row.value,
+  }));
+ }
+ downgradeChunkFormat() { this.s.sql.exec('UPDATE mapi_chunk_format SET version = 1'); }
  importControlCounts() { return ['mapi_chunk_import_data', 'mapi_chunk_import_fragment', 'mapi_chunk_import_fragment_data'].map(table => this.s.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one().n); }
  readWideText() { return this.s.sql.exec("SELECT value FROM wide_text WHERE id = 'wide'").one().value; }
  write(id, gen) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, gen); this.s.sql.exec("INSERT INTO users VALUES ('later', 0, X'01')"); }); }
@@ -184,18 +225,48 @@ export default { async fetch(request, env) {
    if (nChunks > 100) throw Error('Too many chunks');
   }
   check(total > 512 * 1024 && nChunks > 4, 'fixture did not exceed previous limit');
-  for (const value of ['positive', 'negative']) {
-   const owner = env.PROJECT.getByName(`nonfinite-${value}-${n}`);
-   await owner.init(`nonfinite-${value}`, `nonfinite-${value}-${n}`); await owner.seedReal(`nonfinite-${value}`, value); await owner.freeze(`nonfinite-${value}`, 1, 'nonfinite-move');
-   const state = await owner.realState(); check(state.kind === 'real' && state[value], 'non-finite REAL fixture was not stored');
-   await owner.beginExport(`nonfinite-${value}`, 1, 'nonfinite-move', ['real_values']);
-   await rejectsWith(() => owner.chunk(`nonfinite-${value}`, 1, 'nonfinite-move', 0, false), 'Non-finite REAL');
-   check((await owner.exportStatus(`nonfinite-${value}`)).next_chunk === 0, 'rejected non-finite REAL advanced checkpoint');
+  for (const fragmented of [false, true]) {
+   const id = `real-transfer-${fragmented}`, move = 'real-move';
+   const name = `${id}-${n}`, destination = `${id}-target-${n}`;
+   const source = env.PROJECT.getByName(name), target = env.PROJECT.getByName(destination);
+   const table = fragmented ? 'real_fragments' : 'real_values';
+   await source.init(id, name);
+   await source.seedRealValues(id, fragmented);
+   if (fragmented) await target.prepareRealFragments();
+   await source.freeze(id, 1, move);
+   await source.beginExport(id, 1, move, [table]);
+   await target.beginImport(id, 1, move, destination, [table]);
+   const expected = await source.realRows(table);
+   let index = 0, checkedRollback = false;
+   for (;;) {
+    const envelope = await source.chunk(id, 1, move, index, false);
+    const payload = JSON.parse(envelope.content);
+    const writesValue = !fragmented || payload.fragment && payload.fragment.offset + Uint8Array.fromBase64(payload.fragment.data).length === payload.fragment.total;
+    if (writesValue && !checkedRollback) {
+     const before = [await target.realRows(table), await target.importStatus(id), await target.importControlCounts()];
+     if (fragmented) check(before[2][2] > 0, 'no committed partial fragments to preserve');
+     const legacyContent = JSON.stringify({ ...payload, format: 1 });
+     const legacy = { content: legacyContent, digest: await hash(legacyContent) };
+     await rejectsWith(() => target.receive(id, legacy, 0), 'Unsupported relocation chunk format');
+     await rejectsWith(() => target.receive(id, envelope, 1), 'Injected chunk failure');
+     const after = [await target.realRows(table), await target.importStatus(id), await target.importControlCounts()];
+     check(JSON.stringify(after) === JSON.stringify(before), 'failed REAL transfer changed rows or durable fragments');
+     checkedRollback = true;
+    }
+    await target.receive(id, envelope, 0);
+    await target.receive(id, envelope, 0);
+    if (payload.done) break;
+    if (++index > 10) throw Error('REAL fixture transfer did not complete');
+   }
+   check(checkedRollback, 'REAL transfer did not exercise rollback');
+   check(JSON.stringify(await target.realRows(table)) === JSON.stringify(expected), 'REAL values or storage classes changed');
+   check(await source.verifyRealValuesThroughGo(fragmented) === 0, 'Go/Wasm source REAL values differ');
+   check(await target.verifyRealValuesThroughGo(fragmented) === 0, 'Go/Wasm destination REAL values differ');
+   await source.downgradeChunkFormat();
+   await target.downgradeChunkFormat();
+   await rejectsWith(() => source.chunk(id, 1, move, 0, false), 'Legacy relocation chunk checkpoint');
+   await rejectsWith(() => target.beginImport(id, 1, move, destination, [table]), 'Legacy relocation chunk checkpoint');
   }
-  const nullOwner = env.PROJECT.getByName(`real-null-${n}`);
-  await nullOwner.init('real-null', `real-null-${n}`); await nullOwner.seedReal('real-null', 'null'); await nullOwner.freeze('real-null', 1, 'null-move');
-  await nullOwner.beginExport('real-null', 1, 'null-move', ['real_values']);
-  check(JSON.parse((await nullOwner.chunk('real-null', 1, 'null-move', 0, false)).content).rows[0][1] === null, 'SQL NULL was rejected or changed');
   // JSON numbers with large exponents parse to Infinity in JS. Ensure the
   // importer rejects them on both ordinary and fragmented row paths.
   for (const fragmented of [false, true]) for (const literal of ['1e999', '-1e999']) {
@@ -203,7 +274,7 @@ export default { async fetch(request, env) {
    const object = env.PROJECT.getByName(name);
    await object.beginImport(id, 1, 'move', name, ['real_values']);
    const before = { rows: await object.realRows(), checkpoint: await object.importStatus(id), controls: await object.importControlCounts(), fence: await object.status(id) };
-   const payload = { projectId: id, generation: 1, moveId: 'move', index: 0, prev: '', table: 'real_values', columns: ['id', 'value'], offset: 0, rows: [], last: false, done: false, cursor: ['value'] };
+   const payload = { format: RELOCATION_CHUNK_VERSION, projectId: id, generation: 1, moveId: 'move', index: 0, prev: '', table: 'real_values', columns: ['id', 'value'], offset: 0, rows: [], last: false, done: false, cursor: ['value'] };
    if (fragmented) {
     const encoded = new TextEncoder().encode(`["value",${literal}]`);
     payload.fragment = { offset: 0, total: encoded.length, data: encoded.toBase64(), cursor: ['value'] };
@@ -219,7 +290,7 @@ export default { async fetch(request, env) {
   }
   const finiteName = `finite-import-${n}`, finite = env.PROJECT.getByName(finiteName);
   await finite.beginImport('finite-import', 1, 'move', finiteName, ['real_values']);
-  const finiteContent = JSON.stringify({ projectId: 'finite-import', generation: 1, moveId: 'move', index: 0, prev: '', table: 'real_values', columns: ['id', 'value'], offset: 0, rows: [['finite', 1.25], ['null', null]], last: true, done: true, cursor: ['null'] });
+  const finiteContent = JSON.stringify({ format: RELOCATION_CHUNK_VERSION, projectId: 'finite-import', generation: 1, moveId: 'move', index: 0, prev: '', table: 'real_values', columns: ['id', 'value'], offset: 0, rows: [['finite', 1.25], ['null', null]], last: true, done: true, cursor: ['null'] });
   await finite.receive('finite-import', { content: finiteContent, digest: await hash(finiteContent) }, 0);
   check(JSON.stringify(await finite.realRows()) === JSON.stringify([{ id: 'finite', kind: 'real', value: 1.25 }, { id: 'null', kind: 'null', value: null }]), 'finite REAL or NULL import changed');
   const frozen = await source.status('p'), staged = await target.status('p'); check(staged.state === 'staged' && staged.digest === frozen.digest, 'final digest mismatch');

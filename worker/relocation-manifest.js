@@ -5,7 +5,7 @@ import issuerSchema from './relocation-issuer-schema.json';
 import { execute } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { sourceIdentityMatches } from './relocation-source-identity.js';
-import { assertRelocationValuesRepresentable, RELOCATION_RECONCILIATION_VERSION } from './relocation-values.js';
+import { encodeRelocationRow, relocationSQLArgument, RELOCATION_RECONCILIATION_VERSION } from './relocation-values.js';
 import { readOwnerRecoveryScopes, validRecoveryStamp } from './recovery-scopes.js';
 import { readRelocationSequences } from './relocation-sequences.js';
 
@@ -32,7 +32,7 @@ const CONTROL_TABLES = new Set([
   'mapi_owner_fence', 'mapi_destination_reservation', 'mapi_relocation_project',
   'mapi_relocation_prepared', 'mapi_chunk_export', 'mapi_chunk_export_data',
   'mapi_chunk_import', 'mapi_chunk_import_data', 'mapi_chunk_import_fragment',
-  'mapi_chunk_import_fragment_data',
+  'mapi_chunk_import_fragment_data', 'mapi_chunk_format',
 ]);
 const ISSUER_SINGLETONS = new Set(['mapi_oauth_schema', 'mapi_private_par_schema', 'mapi_fapi_prompts']);
 const quote = name => '"' + name.replaceAll('"', '""') + '"';
@@ -374,19 +374,19 @@ export async function digestRelocationPage(storage, manifest, role, table, curso
     for (let i = 0; i < 64; i++) {
       const where = current ? ` WHERE (${order}) > (${keys.map(() => '?').join(', ')})` : '';
       const query = `SELECT ${names.map(quote).join(', ')} FROM ${quote(table)}${where} ORDER BY ${order} LIMIT 1`;
-      const row = execute(storage, { statement: query, args: current ? toArgs(current) : [], query: true }).rows[0];
+      const row = execute(storage, { statement: query, args: current ? current.map(relocationSQLArgument) : [], query: true }).rows[0];
       if (!row) { done = true; break; }
-      assertRelocationValuesRepresentable(row);
-      const encodedSize = new TextEncoder().encode(JSON.stringify(row)).length;
+      const encoded = encodeRelocationRow(row);
+      const encodedSize = new TextEncoder().encode(JSON.stringify(encoded)).length;
       if (rows.length && size + encodedSize > 128 * 1024) break;
-      rows.push(row);
+      rows.push(encoded);
       size += encodedSize;
-      current = keys.map(key => row[names.indexOf(key)]);
+      current = keys.map(key => encoded[names.indexOf(key)]);
       if (current.some(value => value === null)) throw Error('Null reconciliation primary key');
     }
     return { table, columns: names, rows, cursor: current, done };
   });
-  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ table: page.table, columns: page.columns, rows: page.rows })));
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ version: RELOCATION_RECONCILIATION_VERSION, table: page.table, columns: page.columns, rows: page.rows })));
   storage.transactionSync(assertFence);
   return { guardVersion: RELOCATION_RECONCILIATION_VERSION, count: page.rows.length, cursor: page.cursor, done: page.done, digest: [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
 }

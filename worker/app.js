@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import baseline from "./generated/baseline.json";
 import wasm from "./wasm-module.js";
 import { instantiateReactor } from "./wasi.js";
-import { execute, sqliteError } from "./sql.js";
+import { execute, sqliteError, stringifySQLResponse } from "./sql.js";
 import { canonicalOrigin, ProjectRegistry } from "./registry.js";
 import { renderLogin } from "./login-ui.js";
 import { handleFlowProxy } from "./flow-proxy.js";
@@ -13,6 +13,7 @@ import { assertOwnerFence, createOwnerFenceTable, freezeOwnerFence, initializeOw
 import { sourceIdentityMatches } from "./relocation-source-identity.js";
 import { digestRelocationPage, inspectRelocationDestination, inspectRelocationSource, prepareRelocationDestination, restoreRelocationMetadata, validateRelocationSourceSchema } from "./relocation-manifest.js";
 import { beginChunkExport, beginChunkImport, chunkImportStatus, exportChunk, importChunk } from "./relocation-chunks.js";
+import { RELOCATION_CHUNK_VERSION, RELOCATION_RECONCILIATION_VERSION } from "./relocation-values.js";
 import { destinationTransferHistory, sourceTransferHistory, transferHistoryStatus } from "./relocation-history.js";
 import { assertRecoveryEnvelope, readOwnerRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScope } from "./recovery-scopes.js";
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
@@ -206,6 +207,11 @@ export class NextgenApplication extends DurableObject {
     const result = reserveMoveDestination(this.ctx.storage, route, moveId);
     if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version'").toArray().length) this.#initializeSchema(true);
     return result;
+  }
+
+  relocationCapabilities(secret) {
+    if (this.env.MAPI_RELOCATION_ENABLED !== "1" || !this.env.MAPI_RELOCATION_CONTROL_TOKEN || !sameKey(secret, this.env.MAPI_RELOCATION_CONTROL_TOKEN)) throw new Error("Relocation control denied");
+    return { chunkVersion: RELOCATION_CHUNK_VERSION, reconciliationVersion: RELOCATION_RECONCILIATION_VERSION };
   }
 
   async armRelocation(secret, projectId, moveId) {
@@ -596,6 +602,17 @@ export class NextgenApplication extends DurableObject {
   #withRoute(route, callback) {
     this.#detectFence();
     if (!this.#fenceArmed) return callback();
+    const fence = this.ctx.storage.sql.exec("SELECT state, move_id FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
+    if (fence?.state === 'active' && fence.move_id) {
+      return this.env.PROJECT_REGISTRY.getByName('projects').resolve(route?.origin).then(current => {
+        if (!current || current.state !== 'active' || current.project_id !== route?.projectId || current.object_name !== route?.objectName || current.generation !== route?.generation) throw new Error('Owner route is unavailable');
+        return this.#runWithRoute(route, callback);
+      });
+    }
+    return this.#runWithRoute(route, callback);
+  }
+
+  #runWithRoute(route, callback) {
     const previous = this.#authority;
     this.#authority = route;
     try { return callback(); } finally { this.#authority = previous; }
@@ -641,7 +658,7 @@ export class NextgenApplication extends DurableObject {
               if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
               result = { error: sqliteError(error) };
             }
-            output = encoder.encode(JSON.stringify(result));
+            output = encoder.encode(stringifySQLResponse(result));
             return output.length;
           },
           result: (ptr, size) => {

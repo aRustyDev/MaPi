@@ -1,7 +1,7 @@
 import { ProjectRegistry, validNewRelocationMoveId } from "../worker/registry.js";
 import { beginRegistryMove, commitRegistryMove } from "../worker/registry-move.js";
 import { initializeHistoryCheckpoint, advanceHistoryCheckpoint } from '../worker/registry-history.js';
-import { RELOCATION_RECONCILIATION_VERSION } from '../worker/relocation-values.js';
+import { RELOCATION_CHUNK_VERSION, RELOCATION_RECONCILIATION_VERSION } from '../worker/relocation-values.js';
 import { DurableObject } from "cloudflare:workers";
 
 export class RegistryMoveOwner extends DurableObject {
@@ -21,6 +21,7 @@ export class RegistryMoveOwner extends DurableObject {
     return { projectId, origin, objectName, generation, objectId: this.ctx.id.toString() };
   }
   activateProvisioning() {}
+  relocationCapabilities() { return { chunkVersion: RELOCATION_CHUNK_VERSION, reconciliationVersion: RELOCATION_RECONCILIATION_VERSION }; }
   preFreezeRelocation(_secret, route, moveId) { this.#freezeCalls++; return { ...route, moveId, state: "frozen", objectId: this.ctx.id.toString() }; }
   freezeCalls() { return this.#freezeCalls; }
 }
@@ -125,7 +126,7 @@ export default {
       registry = env.REGISTRY.get(old.id);
       if ((await registry.resolve(origin)).state !== "moving") throw Error("Move did not survive eviction");
       const route = await registry.commit("proj_first", 1, "move-1", source, destination);
-      if (route.object_name !== "destination" || route.generation !== 2 || (await registry.resolve(origin)).state !== "active") throw Error("Cutover did not commit atomically");
+      if (route.object_name !== "destination" || route.generation !== 2 || (await registry.resolve(origin)).state !== "moving") throw Error("Legacy committed move was not quarantined");
       await registry.commit("proj_first", 1, "move-1", source, destination);
       await reject(() => registry.begin("proj_first", "destination", "source", 2, "move-back-reused"));
       await reject(() => registry.begin("proj_first", "destination", "next", 2, "move-1"));
@@ -140,6 +141,7 @@ export default {
       await reject(() => registry.commitRelocation('move-secret', 'proj_first', 'move-1'));
       await reject(() => registry.finalizeRelocation('move-secret', 'proj_first', 'move-1'));
       await registry.syntheticCompletedReconciliation('proj_first', 'move-1');
+      if ((await registry.resolve(origin)).state !== 'active') throw Error('Current completed reconciliation did not restore route availability');
       const recovered = await registry.commitRelocation('move-secret', 'proj_first', 'move-1');
       if (recovered.object_name !== 'destination' || recovered.generation !== 2) throw Error('Committed move retry did not return its route');
       await reject(() => registry.commitRelocation('move-secret', 'proj_first', 'different-move'));

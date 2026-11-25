@@ -365,6 +365,19 @@ export function execute(storage, { statement, args, query }) {
   return { columns, rows };
 }
 
+// Preserve REAL values JSON would otherwise turn into null or positive zero.
+export function stringifySQLResponse(response) {
+  const needsTag = value => value === Infinity || value === -Infinity || Object.is(value, -0);
+  if (!response.rows?.some(row => row.some(needsTag))) return JSON.stringify(response);
+
+  return JSON.stringify(response, (_key, value) => {
+    if (value === Infinity) return { real: "inf" };
+    if (value === -Infinity) return { real: "-inf" };
+    if (Object.is(value, -0)) return { real: "-0" };
+    return value;
+  });
+}
+
 export function sqliteError(error) {
   const message = error instanceof Error ? error.message : String(error);
   const codes = [

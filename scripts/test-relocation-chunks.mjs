@@ -7,6 +7,16 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 
+const upstream = resolve(".mapi/nextgen/apps/api");
+const target = resolve(upstream, "cmd/mapi-bridge-test");
+await mkdir(target, { recursive: true });
+await mkdir("worker/generated", { recursive: true });
+await copyFile("upstream/overlay/apps/api/cmd/mapi-bridge-test/main_wasip1.go", resolve(target, "main_wasip1.go"));
+execFileSync("go", ["build", "-trimpath", "-ldflags=-s -w", "-buildmode=c-shared", "-o", resolve("worker/generated/sqlite-bridge-test.wasm"), "./cmd/mapi-bridge-test"], {
+  cwd: upstream, stdio: "inherit",
+  env: { ...process.env, GOWORK: "off", GOOS: "wasip1", GOARCH: "wasm", CGO_ENABLED: "0", GOTOOLCHAIN: "go1.26.9" },
+});
+
 async function freePort() {
   const socket = createServer().listen(0, "127.0.0.1");
   await once(socket, "listening");

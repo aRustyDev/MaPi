@@ -3,7 +3,7 @@ import wasm from "../worker/generated/sqlite-bridge-test.wasm";
 import baseline from "../worker/generated/baseline.json";
 import migrations from "../worker/generated/sqlite-bridge-migrations.json";
 import { instantiateReactor } from "../worker/wasi.js";
-import { execute, sqliteError } from "../worker/sql.js";
+import { execute, sqliteError, stringifySQLResponse } from "../worker/sql.js";
 import { snapshotSchema, snapshotSchemaObjects } from "./sqlite-bridge-schema.mjs";
 
 const encoder = new TextEncoder();
@@ -168,7 +168,7 @@ export class BridgeTest extends DurableObject {
           let result;
           try { result = execute(this.ctx.storage, query); }
           catch (error) { result = { error: sqliteError(error) }; }
-          output = encoder.encode(JSON.stringify(result));
+          output = encoder.encode(stringifySQLResponse(result));
           return output.length;
         },
         result: (pointer, size) => {
