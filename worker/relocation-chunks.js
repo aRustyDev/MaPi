@@ -215,7 +215,13 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
    if (nextCursor.some(value => value === null)) throw Error('Export primary key contains NULL');
    payload.rows.push(row);
    payload.cursor = nextCursor;
-   if (bytes(JSON.stringify(payload)) > MAX_BYTES - 1024) {
+   // A string's UTF-16 length is a lower bound on its JSON-encoded UTF-8
+   // length. Avoid serializing a whole large row just to choose fragmentation;
+   // smaller or ambiguous rows retain the exact existing size calculation.
+   const definitelyLarge = row.some(value => typeof value === 'string'
+    ? value.length > MAX_BYTES - 1024
+    : value && typeof value === 'object' && typeof value.blob === 'string' && value.blob.length > MAX_BYTES - 1024);
+   if (definitelyLarge || bytes(JSON.stringify(payload)) > MAX_BYTES - 1024) {
     payload.rows.pop();
     payload.cursor = cursor;
     if (!payload.rows.length) {

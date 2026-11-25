@@ -22,6 +22,7 @@ export class ChunkProject extends DurableObject {
  oversized(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); const data = new Uint8Array(300_000); for (let i = 0; i < data.length; i++) data[i] = i % 251; this.s.sql.exec("INSERT INTO users VALUES ('large', 9223372036854775807, ?)", data.buffer); }); }
  beyondRowLimit(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO users VALUES ('large', 0, ?)", new Uint8Array(8_385_000).buffer); }); }
  seedWideText(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", '\uFEFF' + 'é😀\n'.repeat(45_000)); }); }
+ seedWireRows(id, value, includeSmall) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); if (includeSmall) this.s.sql.exec("INSERT INTO wide_text VALUES ('a', 'small')"); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", value); }); }
  seedRelocationText(id, invalid) {
   this.s.transactionSync(() => {
    assertProjectWritable(this.s, id, 1);
@@ -470,6 +471,46 @@ export default { async fetch(request, env) {
    if (index === 19) throw Error('Text transfer did not finish');
   }
   check(await textTarget.readWideText() === '\uFEFF' + 'é😀\n'.repeat(45_000), 'fragmented Unicode text changed');
+  // Compare the wire bytes against the original serialization rules, including
+  // the exact ordinary/fragment boundary and a large row after a small one.
+  for (const fixture of ['below', 'at', 'above', 'long-ascii', 'escaped', 'unicode', 'unicode-fallback', 'blob', 'mixed']) {
+   const id = `wire-${fixture}`, move = `${id}-move`, sourceName = `${id}-source-${n}`, targetName = `${id}-target-${n}`;
+   const wireSource = env.PROJECT.getByName(sourceName), wireTarget = env.PROJECT.getByName(targetName);
+   const base = { projectId: id, generation: 1, moveId: move, index: 0, prev: '', table: 'wide_text', columns: ['id', 'value'], offset: 0, rows: [['wide', '']], last: false, done: false, cursor: ['wide'] };
+   const boundary = 128 * 1024 - 1024 - new TextEncoder().encode(JSON.stringify(base)).length;
+   const value = fixture === 'below' ? 'x'.repeat(boundary - 1) : fixture === 'at' ? 'x'.repeat(boundary) : fixture === 'above' ? 'x'.repeat(boundary + 1) : fixture === 'long-ascii' || fixture === 'mixed' ? 'x'.repeat(140_000) : fixture === 'escaped' ? '\n"\\'.repeat(50_000) : fixture === 'unicode' ? 'é😀'.repeat(50_000) : fixture === 'unicode-fallback' ? 'é'.repeat(70_000) : new Uint8Array(140_000).fill(42).buffer;
+   const small = fixture === 'mixed';
+   await wireSource.init(id, sourceName); await wireSource.seedWireRows(id, value, small); await wireSource.freeze(id, 1, move);
+   await wireSource.beginExport(id, 1, move, ['wide_text']); await wireTarget.beginImport(id, 1, move, targetName, ['wide_text']);
+   let index = 0, prev = '';
+   if (small) {
+    const part = await wireSource.chunk(id, 1, move, index++, false);
+    const expected = { ...base, rows: [['a', 'small']], cursor: ['a'] };
+    check(part.content === JSON.stringify(expected) && part.digest === await hash(part.content), 'mixed ordinary chunk wire bytes changed');
+    await wireTarget.receive(id, part, 0); prev = part.digest;
+   }
+   if (fixture === 'below' || fixture === 'at') {
+    const part = await wireSource.chunk(id, 1, move, index, false);
+    const expected = { ...base, rows: [['wide', value]], last: true, done: true };
+    check(part.content === JSON.stringify(expected) && part.digest === await hash(part.content), 'boundary ordinary chunk wire bytes changed');
+    await wireTarget.receive(id, part, 0);
+   } else {
+    const encodedValue = typeof value === 'string' ? { text: new TextEncoder().encode(value).toBase64() } : { blob: new Uint8Array(value).toBase64() };
+    const encoded = new TextEncoder().encode(JSON.stringify([{ text: new TextEncoder().encode('wide').toBase64() }, encodedValue]));
+    for (let offset = 0; offset < encoded.length; offset += 80 * 1024) {
+     const part = await wireSource.chunk(id, 1, move, index, false), fragment = encoded.subarray(offset, offset + 80 * 1024);
+     const expected = { ...base, index, prev, offset: small ? 1 : 0, rows: [], cursor: offset + fragment.length === encoded.length ? ['wide'] : small ? ['a'] : null, fragment: { offset, total: encoded.length, data: fragment.toBase64(), cursor: ['wide'] } };
+     check(part.content === JSON.stringify(expected) && part.digest === await hash(part.content), 'fragment wire bytes changed');
+     await wireTarget.receive(id, part, 0); prev = part.digest; index++;
+    }
+    const part = await wireSource.chunk(id, 1, move, index, false);
+    const expected = { ...base, index, prev, offset: small ? 2 : 1, rows: [], last: true, done: true, cursor: null };
+    check(part.content === JSON.stringify(expected) && part.digest === await hash(part.content), 'fragment completion wire bytes changed');
+    await wireTarget.receive(id, part, 0);
+   }
+   const copied = await wireTarget.readWideText();
+   check(typeof value === 'string' ? copied === value : copied instanceof ArrayBuffer && new Uint8Array(copied).length === 140_000 && new Uint8Array(copied).every(byte => byte === 42), 'wire fixture changed during transfer');
+  }
   const tooLarge = env.PROJECT.getByName(`too-large-${n}`);
   await tooLarge.init('too-large', `too-large-${n}`); await tooLarge.beyondRowLimit('too-large'); await tooLarge.freeze('too-large', 1, 'too-large-move');
   await tooLarge.beginExport('too-large', 1, 'too-large-move', ['users']);
