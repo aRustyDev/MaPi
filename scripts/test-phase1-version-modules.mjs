@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { downloadVersionModuleHashes, checkVersionModuleMetadata, checkReviewedEntry, checkReviewedOwnerEntry, checkReviewedEntries } from './phase1-benchmark-inventory.mjs';
+import { downloadVersionModuleHashes, checkVersionModuleMetadata, checkReviewedEntry, checkReviewedOwnerEntry, checkReviewedEntries, checkLocalModules } from './phase1-benchmark-inventory.mjs';
 
 const account = 'a'.repeat(32), token = 'private-token-DO-NOT-PRINT';
 const roles = ['owner', 'router', 'control'];
@@ -29,6 +29,18 @@ function fetchMock(transform = (_role, value) => value) {
 const hashes = await downloadVersionModuleHashes(account, token, names, versions, fetchMock());
 checkVersionModuleMetadata(approved, hashes);
 assert.ok(!JSON.stringify(hashes).includes(token));
+const relativeWasm = (role, response) => {
+  if (role === 'owner') response.result.modules.find(module => module.name === 'main.wasm').name = './main.wasm';
+  return response;
+};
+const relativeHashes = await downloadVersionModuleHashes(account, token, names, versions, fetchMock(relativeWasm));
+const relativeApproved = structuredClone(approved);
+relativeApproved.owner.modules['./main.wasm'] = relativeApproved.owner.modules['main.wasm'];
+delete relativeApproved.owner.modules['main.wasm'];
+relativeApproved.owner.moduleTypes['./main.wasm'] = relativeApproved.owner.moduleTypes['main.wasm'];
+delete relativeApproved.owner.moduleTypes['main.wasm'];
+checkVersionModuleMetadata(relativeApproved, relativeHashes);
+assert.throws(() => checkVersionModuleMetadata(approved, relativeHashes), /Downloaded content mismatch: owner/);
 async function invalid(fetcher, options) {
   await assert.rejects(downloadVersionModuleHashes(account, token, names, versions, fetcher, options), error => {
     assert.match(error.message, /^Version module download unavailable or invalid: owner$/);
@@ -47,6 +59,11 @@ await invalid(fetchMock((_r, b) => { b.result.modules = []; return b; }));
 await invalid(fetchMock((_r, b) => { b.result.modules[0].content_base64 = 'b3duZXI=\n'; return b; }));
 await invalid(fetchMock((_r, b) => { b.result.modules[0].content_base64 = 'b3duZXJ='; return b; }));
 await invalid(fetchMock((_r, b) => { b.result.modules[0].name = '../escape'; return b; }));
+await invalid(fetchMock((_r, b) => { b.result.modules[0].name = './nested/main.js'; return b; }));
+await invalid(fetchMock((_r, b) => {
+  b.result.modules.push({...b.result.modules[0], name: './' + b.result.modules[0].name});
+  return b;
+}));
 await invalid(fetchMock((_r, b) => { delete b.result.modules[0].content_type; return b; }));
 await invalid(fetchMock((_r, b) => { delete b.result.main_module; return b; }));
 await invalid(fetchMock((_r, b) => { b.result.main_module = 'missing.js'; return b; }));
@@ -77,6 +94,8 @@ try {
     const configured = join(roleDirectory, 'main.js'), alternate = join(roleDirectory, 'other.js');
     configs[role] = { main: configured };
     await writeFile(configured, contents[role]['main.js']);
+    relativeApproved[role].moduleDirectory = roleDirectory;
+    if (role === 'owner') await writeFile(join(roleDirectory, 'main.wasm'), contents.owner['main.wasm']);
     await writeFile(alternate, contents[role]['main.js']);
     await checkReviewedEntry(approved, role, configured);
     const differentName = structuredClone(approved);
@@ -98,6 +117,10 @@ try {
     await assert.rejects(checkReviewedEntry(approved, role, configured), /Configured entry differs/);
     await writeFile(configured, contents[role]['main.js']);
   }
+  await checkLocalModules(relativeApproved);
+  const alias = structuredClone(relativeApproved);
+  alias.owner.modules['main.wasm'] = alias.owner.modules['./main.wasm'];
+  await assert.rejects(checkLocalModules(alias), /Reviewed local module mismatch: owner/);
   await checkReviewedOwnerEntry(approved, configs.owner.main);
   await assert.rejects(checkReviewedOwnerEntry(approved, undefined), /Owner entry differs from reviewed artifact/);
   // Exercise the same all-role helper that the postflight CLI invokes.

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { open, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { allPages, readFreshInventory } from './phase1-benchmark-page-inventory.mjs';
+import { allPages, readBenchmarkScripts, readFreshInventory } from './phase1-benchmark-page-inventory.mjs';
 
 const roles = ['owner', 'router', 'control', 'caller'];
 const classes = ['NextgenApplication', 'ProjectRegistry', 'RelocationCoordinator'];
@@ -12,6 +12,12 @@ const namesByClass = { NEXTGEN_APPLICATION: 'NextgenApplication', PROJECT_REGIST
 const sha = value => createHash('sha256').update(value).digest('hex');
 const hashPattern = /^[0-9a-f]{64}$/i, uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
+
+function versionModuleFile(name) {
+  if (typeof name !== 'string') return undefined;
+  const file = name.startsWith('./') ? name.slice(2) : name;
+  if (/^[A-Za-z0-9_.-]+$/.test(file) && file !== '.' && file !== '..') return file;
+}
 export function parseBenchmarkJson(bytes, label) {
   try { if (bytes.byteLength > MAX_JSON_BYTES) throw Error('invalid size'); return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
   catch { throw Error(`Invalid ${label} JSON`); }
@@ -156,8 +162,8 @@ export function checkBenchmarkInventory(manifest, configs, account, before, inve
 export async function collectBenchmarkInventory(account, token, manifest, fetcher = fetch) {
   const api = 'https://api.cloudflare.com/client/v4', root = `${api}/accounts/${account}`;
   async function request(url) { let r; try { r = await fetcher(url, { headers: { authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30000) }); } catch { throw Error('Inventory request failed'); } if (!r.ok) throw Error(`Inventory HTTP ${r.status}`); const j = await readBenchmarkJsonResponse(r); if (j.success !== true) throw Error('Inventory rejected'); return j; }
-  const get = path => request(root + path), scriptCheck = row => { if (!row || typeof row.id !== 'string' || !row.id || typeof row.script_name !== 'string' || !row.script_name) throw Error('Unknown script identity'); };
-  const scripts = await allPages(get, '/workers/scripts-search', 100, scriptCheck, row => JSON.stringify([row.id, row.script_name, row.environment_name ?? null]));
+  const get = path => request(root + path);
+  const scripts = await readBenchmarkScripts(get);
   const namespaces = await allPages(get, '/workers/durable_objects/namespaces', 1000, row => { if (!row || !/^[0-9a-f]{32}$/i.test(row.id ?? '') || !row.script || !row.class) throw Error('Unknown namespace identity'); }, row => row.id.toLowerCase());
   const accountSubdomain = (await get('/workers/subdomain')).result;
   const controlSubdomain = (await get(`/workers/scripts/${encodeURIComponent(manifest.names.control)}/subdomain`)).result;
@@ -248,10 +254,12 @@ export async function downloadVersionModuleHashes(account, token, names, version
       } finally { reader.releaseLock(); }
       const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))));
       if (data?.success !== true || data.result?.id?.toLowerCase() !== version.toLowerCase() || !Array.isArray(data.result.modules) || !data.result.modules.length) throw Error('invalid result');
-      const modules = Object.create(null), moduleTypes = Object.create(null); let decodedTotal = 0;
+      const modules = Object.create(null), moduleTypes = Object.create(null), filenames = new Set(); let decodedTotal = 0;
       for (const module of data.result.modules) {
         const { name: moduleName, content_type: contentType, content_base64: base64 } = module ?? {};
-        if (typeof moduleName !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(moduleName) || moduleName === '.' || moduleName === '..' || Object.hasOwn(modules, moduleName) || typeof contentType !== 'string' || !/^[\x21-\x7e][\x20-\x7e]{0,254}$/.test(contentType) || contentType.trim() !== contentType || typeof base64 !== 'string' || base64.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw Error('invalid module');
+        const file = versionModuleFile(moduleName);
+        if (!file || filenames.has(file) || typeof contentType !== 'string' || !/^[\x21-\x7e][\x20-\x7e]{0,254}$/.test(contentType) || contentType.trim() !== contentType || typeof base64 !== 'string' || base64.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw Error('invalid module');
+        filenames.add(file);
         const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
         const size = base64.length / 4 * 3 - padding;
         decodedTotal += size;
@@ -290,7 +298,7 @@ export function checkVersionModuleMetadata(approved, actual) {
 export async function checkReviewedEntry(approved, role, mainPath) {
   if (!roles.slice(0, 3).includes(role)) throw Error('Invalid entry role');
   const artifact = approved?.[role];
-  if (typeof mainPath !== 'string' || !mainPath || typeof artifact?.mainModule !== 'string' || basename(mainPath) !== artifact.mainModule || !artifact.modules || !Object.hasOwn(artifact.modules, artifact.mainModule) || !hashPattern.test(artifact.modules[artifact.mainModule]) || await hashBenchmarkLocalArtifact(mainPath) !== artifact.modules[artifact.mainModule]) throw Error(`Configured entry differs from reviewed artifact: ${role}`);
+  if (typeof mainPath !== 'string' || !mainPath || typeof artifact?.mainModule !== 'string' || basename(mainPath) !== versionModuleFile(artifact.mainModule) || !artifact.modules || !Object.hasOwn(artifact.modules, artifact.mainModule) || !hashPattern.test(artifact.modules[artifact.mainModule]) || await hashBenchmarkLocalArtifact(mainPath) !== artifact.modules[artifact.mainModule]) throw Error(`Configured entry differs from reviewed artifact: ${role}`);
 }
 
 // Preserve the earlier owner-specific prototype API for existing consumers.
@@ -307,8 +315,11 @@ export async function checkLocalModules(approved) {
   for (const role of roles.slice(0, 3)) {
     const base = approved?.[role]?.moduleDirectory, modules = approved?.[role]?.modules;
     if (typeof base !== 'string' || !base.startsWith('/') || !modules || typeof modules !== 'object' || Array.isArray(modules) || !Object.keys(modules).length) throw Error(`Reviewed local modules missing: ${role}`);
+    const filenames = new Set();
     for (const [name, expected] of Object.entries(modules)) {
-      if (!/^[A-Za-z0-9_.-]+$/.test(name) || name === '.' || name === '..' || !hashPattern.test(expected) || await hashBenchmarkLocalArtifact(resolve(base, name)) !== expected) throw Error(`Reviewed local module mismatch: ${role}`);
+      const file = versionModuleFile(name);
+      if (!file || filenames.has(file) || !hashPattern.test(expected) || await hashBenchmarkLocalArtifact(resolve(base, file)) !== expected) throw Error(`Reviewed local module mismatch: ${role}`);
+      filenames.add(file);
     }
   }
 }

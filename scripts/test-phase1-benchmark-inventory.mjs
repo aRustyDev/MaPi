@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import { readFreshInventory } from './phase1-benchmark-page-inventory.mjs';
 import { benchmarkSha256, checkBenchmarkConfigs, checkBenchmarkInventory, checkDownloadedModules, checkLocalModules, collectBenchmarkInventory, downloadScriptHashes, hashBenchmarkLocalArtifact, parseBenchmarkJson, readBenchmarkConfigs, readBenchmarkJsonFile, readBenchmarkJsonResponse, requireBenchmarkProof, validOrigin } from './phase1-benchmark-inventory.mjs';
 
 const now = Date.parse('2026-11-20T20:00:00Z'), account = 'a'.repeat(32), id = 'b'.repeat(32), names = Object.fromEntries(['owner','router','control','caller'].map(r => [r, `mapi-p1-rehearsal-${id}-${r}`]));
@@ -137,6 +138,26 @@ assert.equal(collected.controlPrivacy.domainsComplete,false);
 assert.throws(() => checkBenchmarkInventory(manifest,configs,account,before,collected,approved,now),/account inventory scope is unverified/);
 assert.ok(requests.some(path => path.includes('scripts-search?page=2')));
 assert.ok(requests.some(path => path.includes('namespaces?page=2')));
+const liveShape = (scriptRows = inventory.scripts, listRows = inventory.scripts.map(({id, script_name}) => ({id, name:script_name})), metadata) => async (input, options) => {
+  const url = new URL(input, 'https://mock.invalid');
+  if (url.pathname.endsWith('/workers/scripts-search')) return page(scriptRows, metadata);
+  if (url.pathname.endsWith('/workers/workers')) {
+    const current = Number(url.searchParams.get('page')), perPage = 2;
+    const items = listRows.slice((current - 1) * perPage, current * perPage);
+    return page(items, {page:current,per_page:perPage,count:items.length,total_count:listRows.length,total_pages:Math.max(1,Math.ceil(listRows.length / perPage))});
+  }
+  return fetcher(input, options);
+};
+const corroborated = await collectBenchmarkInventory(account,'read-only',manifest,liveShape());
+assert.deepEqual(corroborated.scripts, inventory.scripts);
+assert.equal(corroborated.inventoryScope, 'unknown');
+assert.throws(() => checkBenchmarkInventory(manifest,configs,account,before,corroborated,approved,now), /account inventory scope is unverified/);
+await assert.rejects(collectBenchmarkInventory(account,'read-only',manifest,liveShape(inventory.scripts.slice(1))), /Worker inventory sources differ/);
+await assert.rejects(collectBenchmarkInventory(account,'read-only',manifest,liveShape([...inventory.scripts, inventory.scripts[0]])), /Ambiguous Worker script identity/);
+await assert.rejects(collectBenchmarkInventory(account,'read-only',manifest,liveShape(undefined, undefined, {page:1})), /Incomplete inventory pagination metadata/);
+await assert.rejects(collectBenchmarkInventory(account,'read-only',manifest,liveShape(undefined, undefined, null)), /Incomplete inventory pagination metadata/);
+const aliasSearch = inventory.scripts.map((row, i) => i ? row : {...row, service_name:names.caller});
+await assert.rejects(readFreshInventory(async path => (await liveShape(aliasSearch)(path, {headers:{authorization:'Bearer read-only'}})).json(), names), /Worker name already exists/);
 const incomplete = async (input, options) => new URL(input).pathname.endsWith('/workers/routes') ? Response.json({success:true,result:[],result_info:{page:1,total_count:2}}) : fetcher(input,options);
 await assert.rejects(collectBenchmarkInventory(account,'read-only',manifest,incomplete),/Incomplete zone route/);
 const publicRoute = async (input, options) => new URL(input).pathname.endsWith('/workers/routes') ? Response.json({success:true,result:[{id:'route-1',pattern:'example.test/*',script:names.control}]}) : fetcher(input,options);
