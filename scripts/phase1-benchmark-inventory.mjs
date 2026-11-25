@@ -12,6 +12,12 @@ const namesByClass = { NEXTGEN_APPLICATION: 'NextgenApplication', PROJECT_REGIST
 const sha = value => createHash('sha256').update(value).digest('hex');
 const hashPattern = /^[0-9a-f]{64}$/i, uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
+
+function versionModuleFile(name) {
+  if (typeof name !== 'string') return undefined;
+  const file = name.startsWith('./') ? name.slice(2) : name;
+  if (/^[A-Za-z0-9_.-]+$/.test(file) && file !== '.' && file !== '..') return file;
+}
 export function parseBenchmarkJson(bytes, label) {
   try { if (bytes.byteLength > MAX_JSON_BYTES) throw Error('invalid size'); return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
   catch { throw Error(`Invalid ${label} JSON`); }
@@ -248,10 +254,12 @@ export async function downloadVersionModuleHashes(account, token, names, version
       } finally { reader.releaseLock(); }
       const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))));
       if (data?.success !== true || data.result?.id?.toLowerCase() !== version.toLowerCase() || !Array.isArray(data.result.modules) || !data.result.modules.length) throw Error('invalid result');
-      const modules = Object.create(null), moduleTypes = Object.create(null); let decodedTotal = 0;
+      const modules = Object.create(null), moduleTypes = Object.create(null), filenames = new Set(); let decodedTotal = 0;
       for (const module of data.result.modules) {
         const { name: moduleName, content_type: contentType, content_base64: base64 } = module ?? {};
-        if (typeof moduleName !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(moduleName) || moduleName === '.' || moduleName === '..' || Object.hasOwn(modules, moduleName) || typeof contentType !== 'string' || !/^[\x21-\x7e][\x20-\x7e]{0,254}$/.test(contentType) || contentType.trim() !== contentType || typeof base64 !== 'string' || base64.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw Error('invalid module');
+        const file = versionModuleFile(moduleName);
+        if (!file || filenames.has(file) || typeof contentType !== 'string' || !/^[\x21-\x7e][\x20-\x7e]{0,254}$/.test(contentType) || contentType.trim() !== contentType || typeof base64 !== 'string' || base64.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw Error('invalid module');
+        filenames.add(file);
         const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
         const size = base64.length / 4 * 3 - padding;
         decodedTotal += size;
@@ -290,7 +298,7 @@ export function checkVersionModuleMetadata(approved, actual) {
 export async function checkReviewedEntry(approved, role, mainPath) {
   if (!roles.slice(0, 3).includes(role)) throw Error('Invalid entry role');
   const artifact = approved?.[role];
-  if (typeof mainPath !== 'string' || !mainPath || typeof artifact?.mainModule !== 'string' || basename(mainPath) !== artifact.mainModule || !artifact.modules || !Object.hasOwn(artifact.modules, artifact.mainModule) || !hashPattern.test(artifact.modules[artifact.mainModule]) || await hashBenchmarkLocalArtifact(mainPath) !== artifact.modules[artifact.mainModule]) throw Error(`Configured entry differs from reviewed artifact: ${role}`);
+  if (typeof mainPath !== 'string' || !mainPath || typeof artifact?.mainModule !== 'string' || basename(mainPath) !== versionModuleFile(artifact.mainModule) || !artifact.modules || !Object.hasOwn(artifact.modules, artifact.mainModule) || !hashPattern.test(artifact.modules[artifact.mainModule]) || await hashBenchmarkLocalArtifact(mainPath) !== artifact.modules[artifact.mainModule]) throw Error(`Configured entry differs from reviewed artifact: ${role}`);
 }
 
 // Preserve the earlier owner-specific prototype API for existing consumers.
@@ -307,8 +315,11 @@ export async function checkLocalModules(approved) {
   for (const role of roles.slice(0, 3)) {
     const base = approved?.[role]?.moduleDirectory, modules = approved?.[role]?.modules;
     if (typeof base !== 'string' || !base.startsWith('/') || !modules || typeof modules !== 'object' || Array.isArray(modules) || !Object.keys(modules).length) throw Error(`Reviewed local modules missing: ${role}`);
+    const filenames = new Set();
     for (const [name, expected] of Object.entries(modules)) {
-      if (!/^[A-Za-z0-9_.-]+$/.test(name) || name === '.' || name === '..' || !hashPattern.test(expected) || await hashBenchmarkLocalArtifact(resolve(base, name)) !== expected) throw Error(`Reviewed local module mismatch: ${role}`);
+      const file = versionModuleFile(name);
+      if (!file || filenames.has(file) || !hashPattern.test(expected) || await hashBenchmarkLocalArtifact(resolve(base, file)) !== expected) throw Error(`Reviewed local module mismatch: ${role}`);
+      filenames.add(file);
     }
   }
 }
