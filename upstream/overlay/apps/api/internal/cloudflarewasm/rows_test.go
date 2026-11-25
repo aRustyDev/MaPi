@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ func TestRowsRejectMalformedHostResponses(t *testing.T) {
 		{"empty cell", []string{"a"}, []json.RawMessage{nil}, []driver.Value{"unchanged"}},
 		{"malformed JSON", []string{"a"}, []json.RawMessage{[]byte(`"synthetic-secret`)}, []driver.Value{"unchanged"}},
 		{"invalid integer", []string{"a"}, []json.RawMessage{[]byte(`{"integer":"synthetic-secret"}`)}, []driver.Value{"unchanged"}},
+		{"invalid REAL", []string{"a"}, []json.RawMessage{[]byte(`{"real":"synthetic-secret"}`)}, []driver.Value{"unchanged"}},
 		{"invalid blob", []string{"a"}, []json.RawMessage{[]byte(`{"blob":"synthetic-secret"}`)}, []driver.Value{"unchanged"}},
 		{"late overflow", []string{"a", "b"}, []json.RawMessage{[]byte(`1`), []byte(`{"integer":"9223372036854775808"}`)}, []driver.Value{"unchanged", "unchanged"}},
 		{"late invalid blob", []string{"a", "b"}, []json.RawMessage{[]byte(`1`), []byte(`{"blob":"synthetic-secret"}`)}, []driver.Value{"unchanged", "unchanged"}},
@@ -74,6 +76,22 @@ func TestRowsDecodeValidHostValues(t *testing.T) {
 	}
 	if err := r.Next(dest); !errors.Is(err, io.EOF) {
 		t.Fatalf("expected EOF, got %v", err)
+	}
+}
+
+func TestRowsDecodeSpecialREALs(t *testing.T) {
+	r := &rows{columns: []string{"positive", "negative", "signed zero"}, data: [][]json.RawMessage{{
+		json.RawMessage(`{"real":"inf"}`), json.RawMessage(`{"real":"-inf"}`), json.RawMessage(`{"real":"-0"}`),
+	}}}
+	dest := make([]driver.Value, len(r.columns))
+	if err := r.Next(dest); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []float64{math.Inf(1), math.Inf(-1), math.Copysign(0, -1)} {
+		got, ok := dest[i].(float64)
+		if !ok || math.Float64bits(got) != math.Float64bits(want) {
+			t.Fatalf("column %d: got %#v, want %v", i, dest[i], want)
+		}
 	}
 }
 

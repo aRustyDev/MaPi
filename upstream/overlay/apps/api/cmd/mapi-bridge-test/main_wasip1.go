@@ -318,6 +318,30 @@ func checkStoredValues(ctx context.Context, db *sql.DB) error {
 	if null != nil || real != 1.5 || text != "9007199254740993" {
 		return fmt.Errorf("SQLite types changed: %#v %#v %#v", null, real, text)
 	}
+	// Workerd exposes infinities as JavaScript numbers, but ordinary JSON
+	// serialization silently turns them into null.
+	for _, value := range []struct {
+		expression string
+		want       float64
+	}{
+		{"1e999", math.Inf(1)},
+		{"-1e999", math.Inf(-1)},
+	} {
+		statements := []string{
+			"SELECT " + value.expression,
+			"INSERT INTO bridge_types (id, value) VALUES (13, " + value.expression + ") RETURNING value",
+			"DELETE FROM bridge_types WHERE id = 13 RETURNING value",
+		}
+		for _, statement := range statements {
+			var got any
+			if err := db.QueryRowContext(ctx, statement).Scan(&got); err != nil {
+				return fmt.Errorf("SQLite REAL query failed: %w", err)
+			}
+			if got != value.want {
+				return fmt.Errorf("SQLite REAL %s changed across the host bridge: got %#v", value.expression, got)
+			}
+		}
+	}
 	var first, second, repeated int64
 	if err := db.QueryRowContext(ctx, "SELECT ?2, ?1, ?2", int64(math.MinInt64), int64(math.MaxInt64)).Scan(&first, &second, &repeated); err != nil {
 		return err
