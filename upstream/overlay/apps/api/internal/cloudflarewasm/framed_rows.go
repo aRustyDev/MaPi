@@ -8,17 +8,54 @@ import (
 	"io"
 	"math"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
-// Keep in sync with worker/sql-result-frames.js. The transport bounds scratch
-// space per callback. The snapshot remains owned by Go across rollback.
-const resultFrameBytes = 32 * 1024
+// The snapshot remains owned by Go across rollback. Charge actual retained
+// chunks until they are read, closed, or discarded on error.
+const (
+	resultFrameBytes      = 32 * 1024
+	resultSnapshotBytes   = 8 * 1024 * 1024
+	retainedSnapshotBytes = 24 * 1024 * 1024
+)
+
+var retainedSnapshots atomic.Int64
 
 type frameSnapshot struct {
 	chunks    [][]byte
 	offset    int
 	remaining uint64
+	charged   bool
+}
+
+func (s *frameSnapshot) receive(frame []byte) bool {
+	if s.remaining+uint64(len(frame)) > resultSnapshotBytes {
+		return false
+	}
+	size := int64(len(frame))
+	if retainedSnapshots.Add(size) > retainedSnapshotBytes {
+		retainedSnapshots.Add(-size)
+		return false
+	}
+	s.charged = true
+	s.append(frame)
+	return true
+}
+
+func (s *frameSnapshot) release(chunk []byte) {
+	if s.charged {
+		retainedSnapshots.Add(-int64(len(chunk)))
+	}
+}
+
+func (s *frameSnapshot) close() {
+	for _, chunk := range s.chunks {
+		s.release(chunk)
+	}
+	s.chunks = nil
+	s.offset = 0
+	s.remaining = 0
 }
 
 func (s *frameSnapshot) append(frame []byte) {
@@ -37,6 +74,7 @@ func (s *frameSnapshot) Read(dest []byte) (int, error) {
 		read += count
 		s.offset += count
 		if s.offset == len(chunk) {
+			s.release(chunk)
 			s.chunks[0] = nil
 			s.chunks = s.chunks[1:]
 			s.offset = 0
@@ -58,6 +96,9 @@ var _ driver.Rows = (*framedRows)(nil)
 func (r *framedRows) Columns() []string { return r.columns }
 
 func (r *framedRows) Close() error {
+	if r.data != nil {
+		r.data.close()
+	}
 	r.data = nil
 	return nil
 }

@@ -68,7 +68,9 @@ func receiveSQLFrame(pointer, size uint32) uint32 {
 		return 1
 	}
 	receiver := value.(frameReceiver)
-	receiver.snapshot.append(receiver.buffer[:size])
+	if !receiver.snapshot.receive(receiver.buffer[:size]) {
+		return 2
+	}
 	return 0
 }
 
@@ -83,6 +85,9 @@ func callSQL(input sqlRequest, output *sqlResponse) error {
 			activeReceivers.Delete(input.FramePointer)
 			clear(buffer[:])
 			reusableFrameBuffer.Put(buffer)
+			if output.snapshot != snapshot {
+				snapshot.close()
+			}
 		}()
 	}
 	encoded, err := json.Marshal(input)
@@ -98,7 +103,7 @@ func callSQL(input sqlRequest, output *sqlResponse) error {
 	if err := json.Unmarshal(result, output); err != nil {
 		return err
 	}
-	if output.FrameRows != nil {
+	if output.FrameRows != nil && output.Error == nil {
 		if snapshot == nil || len(output.Rows) != 0 || (*output.FrameRows == 0) != (snapshot.remaining == 0) {
 			return errors.New("invalid framed SQLite response")
 		}

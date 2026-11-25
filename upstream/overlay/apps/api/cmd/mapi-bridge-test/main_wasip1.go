@@ -201,6 +201,9 @@ func check() error {
 	if err := checkFrameTransferFailure(ctx, db); err != nil {
 		return fmt.Errorf("frame transfer failure: %w", err)
 	}
+	if err := checkBoundedContract(ctx, db); err != nil {
+		return fmt.Errorf("bounded SQL contract: %w", err)
+	}
 	if err := checkProjectStatements(ctx); err != nil {
 		return err
 	}
@@ -324,21 +327,103 @@ func checkFrameTransferFailure(ctx context.Context, db *sql.DB) error {
 	return readCounts(0, 2)
 }
 
-// The worker seeds a near-limit BLOB with a reserved codec prefix and 65
-// sparse bytes. Consume the returned rows after both rollback and commit.
-func checkWideReturning(ctx context.Context, db *sql.DB) error {
-	const size, header, tail = 8_388_530, 18, 64
-	expected := make([]byte, size)
-	expected[0] = 255
-	copy(expected[9:], "@MaPiRun1")
-	for i := 1; i <= 65; i++ {
-		expected[header+(size-header-tail)*i/66] = byte(i)
+func checkBoundedContract(ctx context.Context, db *sql.DB) error {
+	for _, statement := range []string{
+		"CREATE TABLE mapi_limit_probe (id INTEGER PRIMARY KEY, payload BLOB)",
+		"CREATE TABLE mapi_limit_audit (n INTEGER NOT NULL)",
+		"INSERT INTO mapi_limit_audit VALUES (0)",
+		`CREATE TRIGGER mapi_limit_delete AFTER DELETE ON mapi_limit_probe
+		 BEGIN UPDATE mapi_limit_audit SET n=n+1; END`,
+		`WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<65)
+		 INSERT INTO mapi_limit_probe SELECT id, X'' FROM ids`,
+		"UPDATE mapi_limit_probe SET payload=zeroblob(4194305) WHERE id=1",
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			return err
+		}
 	}
+	for _, test := range []struct{ statement, message string }{
+		{"DELETE FROM mapi_limit_probe RETURNING id", "MaPi SQLite RETURNING row limit exceeded"},
+		{"DELETE FROM mapi_limit_probe WHERE id=1 RETURNING payload", "MaPi SQLite result row byte limit exceeded"},
+		{"INSERT INTO mapi_limit_probe SELECT 100, X'' UNION ALL VALUES (101,X'') RETURNING id", "requires an admitted INSERT source"},
+		{"SELECT zeroblob(4194305) AS oversized", "MaPi SQLite result row byte limit exceeded"},
+		{"WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<4097) SELECT n FROM seq", "MaPi SQLite result row limit exceeded"},
+		{"SELECT zeroblob(3145728) UNION ALL SELECT zeroblob(3145728) UNION ALL SELECT zeroblob(3145728)", "MaPi SQLite result snapshot byte limit exceeded"},
+	} {
+		rows, err := db.QueryContext(ctx, test.statement)
+		if err == nil {
+			rows.Close()
+			return fmt.Errorf("expected %s for %q", test.message, test.statement)
+		}
+		if !strings.Contains(err.Error(), test.message) {
+			return fmt.Errorf("expected %s for %q: %w", test.message, test.statement, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM mapi_limit_probe RETURNING id"); err == nil || !strings.Contains(err.Error(), "requires query mode") {
+		return fmt.Errorf("Exec with RETURNING must be rejected: %v", err)
+	}
+	var remaining, audit int
+	if err := db.QueryRowContext(ctx, "SELECT (SELECT count(*) FROM mapi_limit_probe), n FROM mapi_limit_audit").Scan(&remaining, &audit); err != nil {
+		return err
+	}
+	if remaining != 65 || audit != 0 {
+		return fmt.Errorf("rejected statements changed %d rows and %d audit entries", 65-remaining, audit)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO mapi_limit_probe VALUES (?, X'01')", int64(math.MaxInt64)); err != nil {
+		return err
+	}
+	var identifier int64
+	if err := db.QueryRowContext(ctx, "DELETE FROM mapi_limit_probe WHERE id=? RETURNING id", int64(math.MaxInt64)).Scan(&identifier); err != nil || identifier != math.MaxInt64 {
+		return fmt.Errorf("bounded rowid mutation: id=%d error=%v", identifier, err)
+	}
+	for _, statement := range []string{
+		`CREATE TRIGGER mapi_limit_ignore BEFORE DELETE ON mapi_limit_probe WHEN OLD.id=2
+		 BEGIN SELECT RAISE(IGNORE); END`,
+		`CREATE TRIGGER mapi_limit_nested AFTER DELETE ON mapi_limit_probe WHEN OLD.id=3
+		 BEGIN DELETE FROM mapi_limit_probe WHERE id=4; END`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	returned, err := db.QueryContext(ctx, "DELETE FROM mapi_limit_probe WHERE id IN (2,3) RETURNING id")
+	if err != nil {
+		return err
+	}
+	defer returned.Close()
+	if !returned.Next() {
+		return fmt.Errorf("expected one directly deleted row: %v", returned.Err())
+	}
+	if err := returned.Scan(&identifier); err != nil || identifier != 3 || returned.Next() {
+		return fmt.Errorf("nested or ignored trigger changed the RETURNING result: id=%d error=%v", identifier, err)
+	}
+	if err := returned.Err(); err != nil {
+		return err
+	}
+	var changes int
+	err = db.QueryRowContext(ctx, "SELECT changes(), (SELECT count(*) FROM mapi_limit_probe), n FROM mapi_limit_audit").
+		Scan(&changes, &remaining, &audit)
+	if err != nil {
+		return err
+	}
+	if changes != 1 || remaining != 63 || audit != 3 {
+		return fmt.Errorf("nested or ignored trigger changed results: changes=%d retained=%d audit=%d", changes, remaining, audit)
+	}
+	return nil
+}
+
+// A dense, reserved-looking BLOB at the supported row byte limit can be
+// consumed from the Go result after both rollback and commit.
+func checkWideReturning(ctx context.Context, db *sql.DB) error {
+	const size = 4 * 1024 * 1024
+	expected := bytes.Repeat([]byte{0xaa}, size)
+	copy(expected, []byte{255, 0, 0, 0, 0, 0, 0, 0, 0})
+	copy(expected[9:], "@MaPiRun1")
 
 	columns := make([]string, 100)
 	columns[0] = "value"
 	for i := range columns[1:] {
-		columns[i+1] = fmt.Sprintf("column_identifier_for_test_%d%s", i, strings.Repeat("_", 512))
+		columns[i+1] = fmt.Sprintf("column_identifier_for_test_%d%s", i, strings.Repeat("_", 128))
 	}
 	statement := "DELETE FROM mapi_bridge_wide_returning RETURNING " + strings.Join(columns, ",")
 	abort := errors.New("rollback wide RETURNING")

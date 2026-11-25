@@ -1,41 +1,49 @@
 # Bounded SQLite results: design and 65-byte feasibility experiment
 
-Status: **experimental and unmounted**. The production bridge now passes the
-65-nonzero-byte exact-size `RETURNING` regression through the pinned Go/Wasm
-driver. The separate experiment in `experiments/sql-result-spill/` explores a
-transfer boundary for a known BLOB. The general SQLite type channel, bounded
-total memory, and spill authority remain open Phase 1 gates.
+MaPi uses a bounded result contract on the pinned Go/Wasm owner. The
+hosted runtime measurements are tracked in #4. The separate experiment in
+`experiments/sql-result-spill/` remains unmounted.
 
-## Synchronous Go/Wasm transport
+## Application SQL contract
 
-The owner and pinned Go driver can transfer rows in binary frames at most
-32 KiB each. The host drains the SQLite cursor synchronously under the
-existing owner authority and, for `RETURNING`, a statement transaction.
-The JSON envelope contains column names, write counts or errors. The
-binary snapshot preserves typed int64 and IEEE-754 values, TEXT, BLOB and
-NULL from the existing SQL projections. The Go iterator releases consumed
-chunks and drops the unread snapshot on close. SQLite has finished before
-Go returns `Rows`, so reading an escaped result requires no database access
-after rollback. There is no spill store or application result cap.
+| Boundary | Limit |
+| --- | --- |
+| SQLite result columns and names | 100 columns and 128 KiB of UTF-8 column names per result |
+| SELECT | 4,096 rows and 4 MiB of logical payload per row |
+| Mutation with RETURNING | 64 candidate rows sharing 4 MiB of logical payload, divided equally across the candidates |
+| Go snapshot | 8 MiB of framed bytes per result and 24 MiB of outstanding framed bytes per reactor |
+| Go/Wasm frame | 32 KiB of reusable transfer space |
 
-The pinned bridge test observed 600 frames with a maximum of 32,768 bytes.
-It covers a near-limit 100-column sparse BLOB, UTF-8 across frame boundaries,
-both infinities, int64 extrema, cancellation and SQLite connection counters.
-A frame error partway through a multi-row DELETE rolled back the rows and
-trigger audit even when the enclosing Go callback handled the error and
-committed. Retrying then committed two deletes and two audit writes.
+A result with more than 4,096 rows or 8 MiB of framed data returns an error.
+Use a paginated query when the result would exceed either read limit. The
+metadata probe preserves original column names and duplicates. An outer
+co-routine reads and encodes the caller's ordered result once. SQL operators
+inside the caller's query can require their own working memory.
 
-The frame bound applies to the host transfer region. Go still retains the
-compact encoded snapshot, so memory scales with the full result. The
-original SQL rewrites remain in place. A local workerd probe returned an
-8,388,530-byte dense reserved-prefix BLOB from direct 100-column
-`DELETE ... RETURNING` but the bridge rewrite returned `SQLITE_TOOBIG` before
-any frame. Raw workerd results also made INTEGER 9007199254740992,
-INTEGER 9007199254740993 and REAL 9007199254740992.0 indistinguishable.
-An exact type channel and a bound on SQLite's first-step accumulation
-remain separate requirements. See the
-[Workerd conversion](https://raw.githubusercontent.com/cloudflare/workerd/main/src/workerd/api/sql.c%2B%2B)
-and [SQLite processing order](https://sqlite.org/lang_returning.html#processing_order).
+RETURNING accepts simple column projections on finite INSERT/REPLACE VALUES
+lists, the pinned single-row aggregate password insert, and DELETE or UPDATE
+of an ordinary rowid table. Before an update or delete, the same synchronous
+transaction captures at most 65 candidate rowids. Sixty-five means rejection
+before mutation. Admitted statements can affect only the captured identities.
+The SQL projection checks the selected row's payload before SQLite appends its
+result. The statement transaction rolls back if either the SQL byte guard or
+the transfer fails, including when an enclosing Go transaction handles that
+error. SQLite's normal trigger, write-counter and rollback semantics apply.
+
+The SQL representation distinguishes exact decimal INTEGER, IEEE-754 REAL,
+tagged byte sequences for UTF-8 TEXT and BLOB, and NULL. This preserves signed
+int64 extrema and both REAL infinities without depending on JavaScript numeric
+type inference. TEXT must be valid UTF-8. The 4 MiB limit leaves space for tags
+and record headers under Workerd's SQLite row limit. Go consumes frames from the
+owned snapshot after the SQLite transaction ends, releasing chunks on scan
+and the remaining snapshot on Close or failure. Application reads require
+the framed ABI.
+
+The bridge test covers a dense 4 MiB BLOB returned across 100 columns after
+rollback and commit. It also proves rejection at the candidate-row, per-row,
+and aggregate snapshot limits. The direct 8,388,530-byte sparse regression
+is retained as a diagnostic of the earlier SQL codec. Applications use the
+4 MiB result contract.
 
 ## Goal and constraints
 
@@ -47,8 +55,9 @@ audit behavior. Results already returned by `QueryContext` must remain readable
 after rollback, including rows that existed only inside the aborted transaction.
 A stopped or cancelled consumer must not leave a live write cursor undrained.
 
-The bridge retains a complete snapshot for escaped Go rows. Its
-SQLite-side exact-value encodings can exceed a valid SQLite row's size. The
+For an unrestricted compatibility contract, complete escaped Go snapshots
+require scalable backing. SQLite-side type encodings can exceed a valid
+SQLite row's size. The
 [SQLite storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
 exposes no per-cell storage-class metadata on its cursor, and JavaScript numbers
 cannot represent all SQLite int64 values. Adding a type column can exceed the
@@ -62,9 +71,9 @@ promised to match write order. Consequently, transferring individual rows in
 bounded frames cannot by itself bound SQLite-internal memory for arbitrary
 multi-row RETURNING. The candidate needs either a supported engine/runtime
 primitive, a rigorously equivalent bounded statement transformation, or an
-explicitly approved compatibility limit. A limit is not currently authorized.
+explicitly approved compatibility limit. MaPi now chooses the bounded application contract above.
 
-## Candidate boundary
+## Alternative for unrestricted SQL
 
 1. **Acquire a typed, ordered result without growing its SQLite row.** For
    SELECT, evaluate a non-flattened projection once and emit typed vertical
@@ -268,7 +277,7 @@ It does not establish a general type channel, escaped `Rows` after rollback,
 secure spill, real application integration, or a bound on SQLite's own
 multi-row RETURNING accumulation.
 
-## Required next proof before integration
+## Further proof for an unrestricted transport
 
 - Resolve the general DML type-channel blocker at the 100-column and maximum
   row boundaries, with mixed NULL, BLOB, TEXT, int64 extrema and REAL,

@@ -11,12 +11,10 @@ const decoder = new TextDecoder();
 const rejected = Symbol("Go transaction failed");
 
 function seedWideReturning(sql) {
-  const extra = Array.from({ length: 99 }, (_, i) => `column_identifier_for_test_${i}${"_".repeat(512)}`);
-  const payload = new Uint8Array(8_388_530);
-  payload[0] = 255;
+  const extra = Array.from({ length: 99 }, (_, i) => `column_identifier_for_test_${i}${"_".repeat(128)}`);
+  const payload = new Uint8Array(4 * 1024 * 1024).fill(0xaa);
+  payload.set([255, 0, 0, 0, 0, 0, 0, 0, 0]);
   payload.set(encoder.encode("@MaPiRun1"), 9);
-  const span = payload.length - 18 - 64;
-  for (let i = 1; i <= 65; i++) payload[18 + Math.floor(span * i / 66)] = i;
 
   sql.exec(`CREATE TABLE mapi_bridge_wide_returning (value BLOB, ${extra.join(",")})`);
   sql.exec("CREATE TABLE mapi_bridge_wide_audit (n INTEGER NOT NULL)");

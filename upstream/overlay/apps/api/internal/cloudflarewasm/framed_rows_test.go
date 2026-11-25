@@ -53,3 +53,44 @@ func TestFramedRowsCloseDropsUnreadSnapshot(t *testing.T) {
 		t.Fatalf("Next after Close returned %v", err)
 	}
 }
+
+func TestSnapshotBudgetsReleaseOnlyDiscardedChunks(t *testing.T) {
+	frame := make([]byte, resultFrameBytes)
+	snapshots := make([]frameSnapshot, retainedSnapshotBytes/resultSnapshotBytes)
+	for i := range snapshots {
+		snapshot := &snapshots[i]
+		t.Cleanup(snapshot.close)
+		for range resultSnapshotBytes / resultFrameBytes {
+			if !snapshot.receive(frame) {
+				t.Fatal("snapshot rejected below its byte budget")
+			}
+		}
+		if snapshot.receive(frame) {
+			t.Fatal("snapshot exceeded its byte budget")
+		}
+	}
+	overflow := new(frameSnapshot)
+	t.Cleanup(overflow.close)
+	if overflow.receive(frame) {
+		t.Fatal("reactor exceeded its retained snapshot budget")
+	}
+	if _, err := io.ReadFull(&snapshots[0], frame[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if overflow.receive(frame) {
+		t.Fatal("a partially read chunk released its byte charge")
+	}
+	if _, err := io.ReadFull(&snapshots[0], frame[1:]); err != nil {
+		t.Fatal(err)
+	}
+	if !overflow.receive(frame) {
+		t.Fatal("fully consumed chunk did not release its byte charge")
+	}
+	overflow.close()
+	for i := range snapshots {
+		snapshots[i].close()
+	}
+	if got := retainedSnapshots.Load(); got != 0 {
+		t.Fatalf("snapshot byte charge was not released: %d", got)
+	}
+}
