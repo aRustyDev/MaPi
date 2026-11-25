@@ -333,6 +333,11 @@ export class NextgenApplication extends DurableObject {
     });
     if (outcome === 'stale') return { state: 'stale' };
     this.#fenceArmed = true;
+    // Relocation uses the storage bridge directly. Once this exact owner is
+    // durably frozen, do not retain its otherwise idle Go/Wasm instance.
+    // Release both references: the memory getter also retains the instance.
+    this.#reactor = undefined;
+    this.#memory = undefined;
     return { projectId: route.projectId, origin: route.origin, objectName: route.objectName, generation: route.generation, moveId, state: "frozen", objectId: this.ctx.id.toString() };
   }
 
@@ -348,7 +353,10 @@ export class NextgenApplication extends DurableObject {
         move.source_object !== route.objectName || move.generation !== route.generation) throw new Error("Source move is not reserved by registry");
     if (this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Source object identity mismatch");
     this.#assertRecoveryObjectEpoch();
-    return freezeOwnerFence(this.ctx.storage, route, moveId, true);
+    const result = freezeOwnerFence(this.ctx.storage, route, moveId, true);
+    this.#reactor = undefined;
+    this.#memory = undefined;
+    return result;
   }
 
   async armRecovery(secret, projectId, recoveryId) {
@@ -701,6 +709,16 @@ export class NextgenApplication extends DurableObject {
 
   #initialize() {
     if (this.#reactor) return;
+    // Check the same authority used by #call before allocating a Go/Wasm
+    // reactor. A stale request to a frozen owner must not allocate an entire
+    // reactor only to be rejected by its first call.
+    if (this.#recoveryAuthority) {
+      this.ctx.storage.transactionSync(() => this.#assertRecoveryInvalidation());
+    } else {
+      this.#detectFence();
+      if (this.#pendingAuthority) this.ctx.storage.transactionSync(() => this.#assertPendingAuthority());
+      else if (this.#fenceArmed) withOwnerFence(this.ctx.storage, this.#authority, () => {});
+    }
     const attempt = ++this.#reactorAttempts;
     const diagnostics = this.env.MAPI_RUNTIME_DIAGNOSTICS === "1";
     const logLifecycle = (phase) => {
@@ -868,6 +886,7 @@ export class NextgenApplication extends DurableObject {
       return this.#call("mapi_request", request);
     } catch (error) {
       this.#reactor = undefined;
+      this.#memory = undefined;
       if (this.env.MAPI_LOCAL_TEST === "1") console.error("Go reactor:", String(error));
       return { status: 503, headers: {}, body: null };
     }
@@ -1357,6 +1376,7 @@ export class NextgenApplication extends DurableObject {
       wasmHighWaterPages: this.#wasmHighWaterBytes / 65_536,
       bootId: this.#bootId,
       reactorInitializations: this.#reactorInitializations,
+      ...(this.env.MAPI_LOCAL_TEST === "1" ? { reactorAttempts: this.#reactorAttempts } : {}),
       maintenance: this.env.MAPI_MAINTENANCE === "1",
       recoveryReady: this.#recoveryReady(),
     };

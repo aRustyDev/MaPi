@@ -207,6 +207,8 @@ export default {
       await rejectsWith(() => target.reserveMoveDestination("move-secret", reservedRoute, "move-1"), "Destination is not reserved by registry");
       const login = await source.login("source@example.test", "Example-password-123!", "192.0.2.1", route);
       check(login.status === 200 && login.cookie, "Source login failed");
+      const liveRuntime = await source.status(true, route);
+      check(liveRuntime.ready && liveRuntime.wasmMemoryBytes > 0 && liveRuntime.reactorInitializations > 0 && liveRuntime.reactorAttempts >= liveRuntime.reactorInitializations, 'Active Go/Wasm reactor was not initialized');
       const sourceCounts = await source.testCounts(), tables = await source.manifest();
       const restoreAttempt = source.holdRestoreForTest("old-bookmark").then(() => false, error => String(error).includes("Coordinated recovery is required"));
       while (!await source.restoreHeldForTest()) await new Promise(resolve => setTimeout(resolve, 0));
@@ -216,6 +218,16 @@ export default {
         if (move.phase !== "preflighting") break;
       }
       check(move?.phase === "moving", "Bounded preflight did not finish");
+      const frozenRuntime = await source.status(true, route);
+      check(!frozenRuntime.ready && !frozenRuntime.fenceReady && frozenRuntime.wasmMemoryBytes === 0 && frozenRuntime.reactorInitializations === liveRuntime.reactorInitializations && frozenRuntime.reactorAttempts === liveRuntime.reactorAttempts, 'Frozen source retained or recreated its Go/Wasm reactor');
+      const staleRequest = await source.handleRequest({ method: 'GET', url: `${origin}/readyz`, headers: {}, body: '', peer: '192.0.2.9' }, route);
+      check(staleRequest.status === 503, 'Frozen source accepted stale ingress');
+      await rejects(() => source.addUser('frozen-stale@example.test', 'Stale-password-123!', route));
+      const afterStale = await source.status(true, route);
+      check(afterStale.wasmMemoryBytes === 0 && afterStale.reactorInitializations === frozenRuntime.reactorInitializations && afterStale.reactorAttempts === frozenRuntime.reactorAttempts, 'Stale ingress attempted to recreate the frozen Go/Wasm reactor');
+      await source.freezeRelocation('move-secret', route, 'move-1');
+      const afterFreezeRetry = await source.status(true, route);
+      check(afterFreezeRetry.wasmMemoryBytes === 0 && afterFreezeRetry.reactorInitializations === frozenRuntime.reactorInitializations && afterFreezeRetry.reactorAttempts === frozenRuntime.reactorAttempts, 'Idempotent freeze retry attempted to recreate the reactor');
       const targetName = move.destination_object;
       target = env.OWNER.getByName(targetName);
       reservedRoute = { ...route, objectName: targetName, generation: 2 };
