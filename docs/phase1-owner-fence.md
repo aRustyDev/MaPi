@@ -73,6 +73,52 @@ recorded in-flight drain remain prerequisites for move authorization. See
 [Cloudflare’s version module API](https://developers.cloudflare.com/api/resources/workers/subresources/beta/subresources/workers/subresources/versions/methods/get/)
 and [Durable Object code updates](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/).
 
+## Isolated Woven upgrade rehearsal
+
+On November 25, 2026, an isolated owner started with the byte-identical
+JavaScript and Go/Wasm downloaded from the configured legacy owner's
+immutable version. A fresh SQLite namespace was provisioned with a
+synthetic schema-v2 project and user. A password sign-in verified the
+legacy Go/Wasm path before deployment changed.
+
+A temporary legacy entrypoint kept both legacy modules intact and added an
+authenticated RPC to hold real legacy Go user writes before execution.
+Both requests were observed in the same running object. Admission closed
+before the candidate deployment. After the deployment API listed the
+byte-identical #121 Worker at 100%, both old requests were still held.
+Their releases occurred after that observation. Following an isolated
+rollback, the durable SQLite journal showed two committed entries, both
+users could sign in, and there were no active admitted operations.
+Deployment request timestamps were unavailable in one API response, so
+causal ordering comes from the active-version observation followed by
+release. A separate repeat reached the new owner constructor during
+release and did not establish both terminal outcomes. A deployment
+percentage or a deferred update window alone cannot establish drain.
+
+The direct #121 upgrade rejected the unchanged legacy schema with
+`Legacy owner schema requires authorized adoption`. Inspection on the
+rolled-back synthetic object identified `mapi_project_origin` as the only
+missing table among the four required by that constructor. The rehearsal
+checked that the old ledger was terminal, the database was schema v2, and
+the project and configured origin matched the synthetic fixture. A
+private rehearsal RPC then created and populated only that metadata table
+in one transaction.
+
+The exact #121 bundle was activated again. Its candidate-only fence RPC
+succeeded at generation 1, the object and project IDs were preserved, and
+the old hold RPC was unavailable. A generation-2 write to the generation-1
+owner rejected. Four synthetic users could sign in, including both held
+legacy writes and a new #121 write. The seed and new user each had one
+creation audit event, and the stale-generation user could not sign in.
+No relocation or drained-writers flag was enabled.
+
+The configured Woven owner's active deployment ID stayed the same. Both
+rehearsals used generated Worker names, isolated bindings, and synthetic
+data. The prepared result establishes an upgrade path for that fixture.
+The existing owner still requires a reviewed origin-metadata adoption
+procedure and its own independently attested writer drain before moves
+can be authorized. See [Durable Object code updates](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/).
+
 ## Recovery
 
 Recovery remains deliberately incomplete. The registry can close a project route, prevent relocation, arm and freeze its owner, and anchor an exact timestamp-clock high-water independently when that clock exists. It refuses recovery during an unfinalized cutover. A per-object recovery epoch map uses canonical lowercase object IDs and guards every listed object, including previously targeted projects after the current target changes. The registry validates every listed entry against its independent anchor and retains a ledger to reject omitted previously deployed object entries on restart; unrelated projects continue. Deployment must retain and verify the complete map on every owner build: a direct RPC to an owner cannot consult the registry synchronously if an operator omits that owner from its environment. The legacy restore and recover RPCs are disabled for all owners, including unfenced objects and objects without a clock table: a scheduled restore must never race a move reservation or erase a fence. There is no production restore/reactivation coordinator, and out-of-band PITR could bypass the code.
