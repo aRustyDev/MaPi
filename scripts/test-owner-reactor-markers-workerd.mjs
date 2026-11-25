@@ -54,7 +54,7 @@ export class Probe extends NextgenApplication {
     this.fixtureRegistryRoute=registryRoute;
   }
   async check() {
-    const original=console.log, logs=[]; console.log=value=>logs.push(String(value));
+    const original=console.log, originalError=console.error, logs=[]; console.log=value=>logs.push(String(value));
     try {
       const route={projectId:null,origin,objectName,generation:1};
       let failed=false; try { await this.provision('Synthetic marker project',origin,route); } catch {failed=true}
@@ -78,8 +78,29 @@ export class Probe extends NextgenApplication {
       console.log=()=>{flowLog=true;throw Error('injected flow log failure')};
       const actual=this.flowRequest(request,activeRoute);
       if(!flowLog || actual.status!==expected.status) throw Error('Failed diagnostic changed the flow result');
-      return {events:events.map(x=>({event:x.event,attempt:x.attempt})),projectCreated:true};
-    } finally {console.log=original}
+
+      const before=this.testCounts();
+      const failedMutation=()=>{
+        this.failNextAudit();
+        try { this.addUser('rolled-back@example.test','Synthetic-rollback-123!',activeRoute); }
+        catch(error) { return {message:error.message,code:error.code}; }
+        throw Error('The injected audit failure committed');
+      };
+      const expectedError=failedMutation();
+      let errorLog=false;
+      console.error=()=>{errorLog=true;throw Error('injected error log failure')};
+      const actualError=failedMutation();
+      if(!errorLog || JSON.stringify(actualError)!==JSON.stringify(expectedError) || JSON.stringify(this.testCounts())!==JSON.stringify(before)) {
+        throw Error('Failed diagnostic changed the audit failure or its rollback');
+      }
+      const email='login@example.test', password='Synthetic-login-123!';
+      this.addUser(email,password,activeRoute);
+      const login=this.login(email,password,'192.0.2.39',activeRoute);
+      if(login.status!==200 || !login.cookie || this.session(login.cookie,'read','',activeRoute).status!==200) {
+        throw Error('Throwing diagnostics changed the real sign-in outcome');
+      }
+      return {events:events.map(x=>({event:x.event,attempt:x.attempt})),projectCreated:true,loginVerified:true};
+    } finally {console.log=original;console.error=originalError}
   }
 }
 export default {async fetch(req,env){
@@ -95,13 +116,13 @@ export default {async fetch(req,env){
 let mf;
 try {
   mf=new Miniflare(convertV4MiniflareOptions({host:'127.0.0.1',port:0,telemetry:{enabled:false},workers:[{
-    name:'owner-reactor-attempt-local',compatibilityDate:'2026-11-19',bindings:{TEST_MASTER:master,MAPI_RUNTIME_DIAGNOSTICS:'1'},
+    name:'owner-reactor-attempt-local',compatibilityDate:'2026-11-19',bindings:{TEST_MASTER:master,MAPI_RUNTIME_DIAGNOSTICS:'1',MAPI_LOCAL_TEST:'1'},
     durableObjects:{PROBE:{className:'Probe',useSQLite:true}},modules:[{type:'ESModule',path:'worker/test-worker.mjs',contents:worker},...modules],
   }]}));
   const response=await mf.dispatchFetch('http://localhost/');const body=await response.text();
-  assert.equal(response.status,200,body);assert.equal(JSON.parse(body).projectCreated,true);
+  assert.equal(response.status,200,body);assert.equal(JSON.parse(body).projectCreated,true);assert.equal(JSON.parse(body).loginVerified,true);
   const sha=value=>createHash('sha256').update(value).digest('hex');
   assert.equal(sha(await readFile('worker/app.js')),sha(appSource));
-  console.log('Throwing diagnostic sinks preserved Worker boot, owner provisioning, reactor retry and flow outcomes in local Workerd.');
+  console.log('Throwing diagnostic sinks preserved Worker boot, owner provisioning, reactor retry, flow outcomes, audit rollback and sign-in in local Workerd.');
   console.log(JSON.stringify({app:sha(appSource),wasm:sha(wasm),worker:sha(worker)}));
 }finally{if(mf)await mf.dispose()}
