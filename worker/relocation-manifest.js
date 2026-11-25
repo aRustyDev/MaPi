@@ -412,7 +412,7 @@ export async function digestRelocationPage(storage, manifest, role, table, curso
       const args = current ? toArgs(current) : [];
       // One bounded descriptor per column; avoid pulling any complete TEXT or
       // BLOB across the JS bridge merely to decide whether the row is large.
-      const descriptor = names.map(name => `json_array(typeof(${quote(name)}),CASE WHEN typeof(${quote(name)}) IN ('text','blob') THEN length(CAST(${quote(name)} AS BLOB)) ELSE 8 END)`).join(', ');
+      const descriptor = names.map(name => `json_array(typeof(${quote(name)}),CASE WHEN typeof(${quote(name)}) IN ('text','blob') THEN octet_length(${quote(name)}) ELSE 8 END)`).join(', ');
       const result = execute(storage, { statement: `SELECT ${descriptor} ${source}`, args, query: true }).rows;
       if (!result.length) { if (isSlice) throw Error('Reconciliation row changed'); done = true; break; }
       const kinds = result[0].map(value => {

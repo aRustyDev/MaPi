@@ -12,8 +12,8 @@ export default {
     if (env.MAPI_REHEARSAL_SYNTHETIC_ONLY !== '1' || !authorized(request.headers.get('authorization'), env.MAPI_REHEARSAL_OPERATOR_TOKEN)) return new Response(null, { status: 404 });
     if (request.method !== 'POST') return new Response(null, { status: 405 });
     if (!env.MAPI_RELOCATION_CONTROL_TOKEN || !env.MAPI_REHEARSAL_ORIGIN || !env.MAPI_REHEARSAL_PROJECT_ID || !env.MAPI_REHEARSAL_MOVE_ID || !env.RELOCATION_COORDINATOR) return new Response(null, { status: 503 });
+    const path = new URL(request.url).pathname;
     try {
-      const path = new URL(request.url).pathname;
       if (path === '/management-token') {
         if (!env.MAPI_PHASE1_CONTROL_TOKEN || !env.MAPI_REHEARSAL_OTHER_ORIGIN || !env.MAPI_REHEARSAL_OTHER_PROJECT_ID || !env.PROJECT_REGISTRY || !env.NEXTGEN_APPLICATION || env.MAPI_REHEARSAL_OTHER_ORIGIN === env.MAPI_REHEARSAL_ORIGIN || env.MAPI_REHEARSAL_OTHER_PROJECT_ID === env.MAPI_REHEARSAL_PROJECT_ID) return new Response(null, { status: 503 });
         const route = await env.PROJECT_REGISTRY.getByName('projects').resolve(env.MAPI_REHEARSAL_OTHER_ORIGIN);
@@ -49,7 +49,8 @@ export default {
       const coordinator = env.RELOCATION_COORDINATOR.getByName('synthetic-rehearsal');
       const result = await coordinator.advance(env.MAPI_RELOCATION_CONTROL_TOKEN, env.MAPI_REHEARSAL_ORIGIN, env.MAPI_REHEARSAL_PROJECT_ID, env.MAPI_REHEARSAL_MOVE_ID);
       return Response.json(result, { headers: { 'cache-control': 'no-store' } });
-    } catch {
+    } catch (error) {
+      if (path === '/evidence' && String(error).includes('Evidence index preparation in progress; retry')) return Response.json({ pending: true }, { status: 503, headers: { 'cache-control': 'no-store' } });
       return new Response(null, { status: 503 });
     }
   },

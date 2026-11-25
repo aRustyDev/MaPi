@@ -164,7 +164,10 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
       const keyValues = key
         ? `CASE WHEN typeof(${column}) = 'integer' THEN printf('%lld', ${column}) END AS integer_value, CASE WHEN typeof(${column}) = 'real' AND ${column} <= 1.7976931348623157e308 AND ${column} >= -1.7976931348623157e308 THEN ${column} END AS real_value`
         : 'NULL AS integer_value, NULL AS real_value';
-      const result = query(`SELECT typeof(${column}) AS kind, CASE WHEN typeof(${column}) IN ('text', 'blob') THEN length(CAST(${column} AS BLOB)) END AS size, CASE WHEN typeof(${column}) = 'real' AND (${column} > 1.7976931348623157e308 OR ${column} < -1.7976931348623157e308) THEN 1 ELSE 0 END AS nonfinite, ${keyValues} FROM ${table} WHERE ${rowid} = CAST(? AS INTEGER)`, checkpoint.row).toArray();
+      // SQLite can read octet_length directly from a stored value's record
+      // metadata. Casting a near-limit TEXT cell to BLOB just for its length
+      // repeatedly materializes the entire cell during a resumable scan.
+      const result = query(`SELECT typeof(${column}) AS kind, CASE WHEN typeof(${column}) IN ('text', 'blob') THEN octet_length(${column}) END AS size, CASE WHEN typeof(${column}) = 'real' AND (${column} > 1.7976931348623157e308 OR ${column} < -1.7976931348623157e308) THEN 1 ELSE 0 END AS nonfinite, ${keyValues} FROM ${table} WHERE ${rowid} = CAST(? AS INTEGER)`, checkpoint.row).toArray();
       if (result.length !== 1) throw Error('TEXT preflight source changed');
       if (result[0].nonfinite) throw Error('Non-finite REAL is not supported by relocation');
       // Match encodeFragmentRow's aggregate accounting. With at most 100

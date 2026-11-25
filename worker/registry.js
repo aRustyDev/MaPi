@@ -7,6 +7,7 @@ import { RELOCATION_RECONCILIATION_VERSION } from "./relocation-values.js";
 import { authorizeSchemaMigration } from "./schema-migration.js";
 import { RELOCATION_TEXT_PREFLIGHT_VERSION } from "./relocation-text-preflight.js";
 import { validReconciliationCursor } from "./relocation-reconcile-cursor.js";
+import { initializeNewEvidenceJournal, assertEvidenceAppendAllowed, recordEvidencePage, advanceEvidencePaging, verifyEvidencePage } from "./registry-evidence.js";
 
 function authorizeRelocation(env, secret) {
   if (env.MAPI_RELOCATION_ENABLED !== "1" || !env.MAPI_RELOCATION_CONTROL_TOKEN ||
@@ -639,6 +640,7 @@ export class ProjectRegistry extends DurableObject {
       if (!row) {
         sql.exec("INSERT INTO mapi_move_reconciliation (project_id, move_id, tables, table_index, cursor, journal_version) VALUES (?, ?, ?, 0, NULL, ?)", projectId, moveId, tables, RELOCATION_RECONCILIATION_VERSION);
         sql.exec("INSERT INTO mapi_move_journals VALUES (?, ?, 0)", moveId, projectId);
+        initializeNewEvidenceJournal(sql, projectId, moveId);
       }
       return row ?? { table_index: 0, cursor: null, journal_version: RELOCATION_RECONCILIATION_VERSION };
     });
@@ -661,7 +663,9 @@ export class ProjectRegistry extends DurableObject {
       if (!row || row.move_id !== moveId || row.tables !== tables || row.table_index !== checkpoint.table_index || row.cursor !== checkpoint.cursor || row.journal_version !== RELOCATION_RECONCILIATION_VERSION) throw new Error("Reconciliation checkpoint changed; retry");
       const next = row.table_index + (a.done ? 1 : 0), nextCursor = a.done ? null : JSON.stringify(a.cursor);
       if (!a.done && nextCursor === row.cursor) throw new Error("Reconciliation did not advance");
+      assertEvidenceAppendAllowed(sql, projectId, moveId);
       sql.exec("INSERT INTO mapi_move_evidence (move_id, project_id, table_index, table_name, cursor_in, cursor_out, row_count, digest, table_done) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", moveId, projectId, row.table_index, table, JSON.stringify(cursor), JSON.stringify(a.cursor), a.count, a.digest, a.done ? 1 : 0);
+      recordEvidencePage(sql, projectId, moveId);
       sql.exec("UPDATE mapi_move_reconciliation SET table_index = ?, cursor = ? WHERE project_id = ?", next, nextCursor, projectId);
       if (next === manifest.tables.length) sql.exec("UPDATE mapi_move_journals SET complete = 1 WHERE move_id = ? AND project_id = ?", moveId, projectId);
       return { done: next === manifest.tables.length, tableIndex: next, evidence: { table, cursor, nextCursor: a.cursor, count: a.count, digest: a.digest, tableDone: a.done } };
@@ -674,17 +678,22 @@ export class ProjectRegistry extends DurableObject {
     const sql = this.ctx.storage.sql;
     const journal = sql.exec("SELECT complete FROM mapi_move_journals WHERE move_id = ? AND project_id = ?", moveId, projectId).toArray()[0];
     if (!journal) throw new Error("Move evidence not available");
+    // Commit bounded backfill progress before asking a legacy caller to retry.
+    if (!advanceEvidencePaging(this.ctx.storage, projectId, moveId)) throw new Error("Evidence index preparation in progress; retry");
     // Evidence remains readable after a completed historical move; validate
     // each returned page without reinterpreting its checkpoint version.
-    const rows = sql.exec(`SELECT rowid AS sequence,
-      CASE WHEN typeof(table_name) = 'text' AND length(CAST(table_name AS BLOB)) BETWEEN 1 AND 1024 THEN CAST(table_name AS BLOB) END AS table_name,
-      CASE WHEN typeof(cursor_in) = 'text' AND length(CAST(cursor_in AS BLOB)) <= ? THEN CAST(cursor_in AS BLOB) END AS cursor_in,
-      CASE WHEN cursor_out IS NULL THEN 1 WHEN typeof(cursor_out) = 'text' AND length(CAST(cursor_out AS BLOB)) <= ? THEN 1 ELSE 0 END AS cursor_out_valid,
-      CASE WHEN typeof(cursor_out) = 'text' AND length(CAST(cursor_out AS BLOB)) <= ? THEN CAST(cursor_out AS BLOB) END AS cursor_out,
-      row_count, CASE WHEN typeof(digest) = 'text' AND length(CAST(digest AS BLOB)) = 64 THEN CAST(digest AS BLOB) END AS digest, table_done
-      FROM mapi_move_evidence WHERE move_id = ? AND project_id = ? AND rowid > ? ORDER BY rowid LIMIT 33`, RECONCILIATION_CURSOR_BYTES, RECONCILIATION_CURSOR_BYTES, RECONCILIATION_CURSOR_BYTES, moveId, projectId, after).toArray();
+    const rows = sql.exec(`SELECT page.sequence AS sequence, page.previous AS previous, page.following AS following,
+      CASE WHEN e.move_id = ? COLLATE BINARY AND e.project_id = ? COLLATE BINARY THEN 1 ELSE 0 END AS owner,
+      CASE WHEN typeof(e.table_name) = 'text' AND length(CAST(e.table_name AS BLOB)) BETWEEN 1 AND 1024 THEN CAST(e.table_name AS BLOB) END AS table_name,
+      CASE WHEN typeof(e.cursor_in) = 'text' AND length(CAST(e.cursor_in AS BLOB)) <= ? THEN CAST(e.cursor_in AS BLOB) END AS cursor_in,
+      CASE WHEN e.cursor_out IS NULL THEN 1 WHEN typeof(e.cursor_out) = 'text' AND length(CAST(e.cursor_out AS BLOB)) <= ? THEN 1 ELSE 0 END AS cursor_out_valid,
+      CASE WHEN typeof(e.cursor_out) = 'text' AND length(CAST(e.cursor_out AS BLOB)) <= ? THEN CAST(e.cursor_out AS BLOB) END AS cursor_out,
+      e.row_count, CASE WHEN typeof(e.digest) = 'text' AND length(CAST(e.digest AS BLOB)) = 64 THEN CAST(e.digest AS BLOB) END AS digest, e.table_done
+      FROM mapi_move_evidence_pages page LEFT JOIN mapi_move_evidence e ON e.rowid = page.sequence
+      WHERE page.move_id = ? AND page.project_id = ? AND page.sequence > ? ORDER BY page.sequence LIMIT 33`, moveId, projectId, RECONCILIATION_CURSOR_BYTES, RECONCILIATION_CURSOR_BYTES, RECONCILIATION_CURSOR_BYTES, moveId, projectId, after).toArray();
+    verifyEvidencePage(sql, projectId, moveId, after, rows);
     const page = rows.slice(0, 32).map(row => {
-      if (!Number.isSafeInteger(row.sequence) || row.sequence <= after || !Number.isSafeInteger(row.row_count) || row.row_count < 0 || row.row_count > 64 || row.cursor_out_valid !== 1 || ![0, 1].includes(row.table_done)) throw Error('Invalid relocation evidence');
+      if (!Number.isSafeInteger(row.sequence) || row.sequence <= after || row.owner !== 1 || !Number.isSafeInteger(row.row_count) || row.row_count < 0 || row.row_count > 64 || row.cursor_out_valid !== 1 || ![0, 1].includes(row.table_done)) throw Error('Invalid relocation evidence');
       const table = reconciliationText(row.table_name), digest = reconciliationText(row.digest);
       if (!/^[0-9a-f]{64}$/.test(digest)) throw Error('Invalid relocation evidence');
       return { sequence: row.sequence, table, cursor: parseReconciliationCursor(reconciliationText(row.cursor_in)), nextCursor: row.cursor_out === null ? null : parseReconciliationCursor(reconciliationText(row.cursor_out)), count: row.row_count, digest, tableDone: !!row.table_done };

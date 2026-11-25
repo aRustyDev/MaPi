@@ -59,7 +59,7 @@ export function inspectStreamRow(storage, table, names, keys, cursor, explicitCo
  for (let start = 0; start < names.length; start += 20) {
   const projection = names.slice(start, start + 20).flatMap(name => {
    const c = quote(name);
-   return [`typeof(${c})`, `CASE WHEN typeof(${c}) IN ('text','blob') THEN length(CAST(${c} AS BLOB)) END`, `CASE WHEN typeof(${c}) = 'integer' THEN printf('%lld', ${c}) END`, `CASE WHEN typeof(${c}) = 'real' THEN ${c} END`];
+   return [`typeof(${c})`, `CASE WHEN typeof(${c}) IN ('text','blob') THEN octet_length(${c}) END`, `CASE WHEN typeof(${c}) = 'integer' THEN printf('%lld', ${c}) END`, `CASE WHEN typeof(${c}) = 'real' THEN ${c} END`];
   });
   const values = storage.sql.exec(`SELECT ${projection.join(', ')} FROM ${quote(table)} WHERE ${rowid} = CAST(? AS INTEGER)`, found[0]).raw().toArray();
   if (values.length !== 1) throw Error('Relocation stream source changed');
