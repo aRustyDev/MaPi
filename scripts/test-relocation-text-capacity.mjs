@@ -34,6 +34,7 @@ try {
       assert.equal(value.oversizedRejected, true, 'Oversized row must be rejected before freeze');
       assert.equal(value.legacyRejected, true, 'Older checkpoints must be rejected');
       assert.equal(value.frozenLegacyRejected, true, 'Frozen source must reject older checkpoints');
+      assert.equal(value.legacyActiveRecovered, true, 'Active older checkpoints must restart safely');
       assert.equal(value.longKeyRejected, true, 'Oversized primary key must be rejected before freeze');
       assert.equal(value.nonfiniteRejected, true, 'Non-finite REAL must be rejected before freeze');
       console.log(`Synthetic capacity transfer, pre-freeze rejection and legacy checks passed: ${value.seeded} rows, 8,300,000-byte TEXT, ${value.pages} preflight calls.`);

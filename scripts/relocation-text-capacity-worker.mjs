@@ -2,6 +2,7 @@
 // Each request performs one bounded seed batch or one relocation advance.
 import { NextgenApplication, ProjectRegistry as BaseRegistry } from '../worker/phase1-owner.js';
 import { invalidateTextPreflightMarker } from '../worker/relocation-text-marker.js';
+import { validateRelocationSourceSchema } from '../worker/relocation-manifest.js';
 
 const ROWS = 2000;
 const BATCH = 100;
@@ -10,6 +11,7 @@ const LARGE_BYTES = 8300000;
 const OVERSIZED_BYTES = 8385000;
 const largeText = () => 'z' + '😀'.repeat(2074999) + 'xyz';
 const key = i => `capacity-${String(i).padStart(6, '0')}`;
+const boundedKey = 'capacity-' + 'k'.repeat(991);
 const check = (condition, message) => { if (!condition) throw Error(message); };
 const rejectsWith = async (action, message) => {
   try { await action(); } catch (error) { if (String(error).includes(message)) return; throw error; }
@@ -36,7 +38,7 @@ export class CapacityRegistry extends BaseRegistry {
       if (version === 1) delete cursor.rowBytes;
       sql.exec('UPDATE mapi_move_text_preflight SET cursor = ?, done = ? WHERE project_id = ? AND move_id = ?', JSON.stringify(cursor), done, projectId, moveId);
       try {
-        await this.beginRelocation(secret, origin, projectId, moveId);
+        this.relocationTextPreflightStatus(secret, projectId, moveId);
         throw Error('Legacy checkpoint was accepted');
       } catch (error) {
         if (!String(error).includes('Legacy TEXT preflight requires manual review')) throw error;
@@ -50,6 +52,14 @@ export class CapacityRegistry extends BaseRegistry {
 }
 
 export class CapacityOwner extends NextgenApplication {
+  textPreflightTableCount(route) { return validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true }).length; }
+  #profileBoot = crypto.randomUUID();
+  async holdForSyntheticMemorySample() {
+    const boot = this.#profileBoot;
+    await new Promise(resolve => setTimeout(resolve, 120000));
+    return { sameBoot: boot === this.#profileBoot };
+  }
+
   seedBatch(projectId, userId, start) {
     if (!Number.isInteger(start) || start < 0 || start >= ROWS || start % BATCH) throw Error('Invalid seed cursor');
     return this.ctx.storage.transactionSync(() => {
@@ -66,6 +76,7 @@ export class CapacityOwner extends NextgenApplication {
     return this.ctx.storage.transactionSync(() => {
       invalidateTextPreflightMarker(this.ctx.storage);
       this.ctx.storage.sql.exec('INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, ?, ?)', projectId, userId, 'capacity-large', largeText());
+      this.ctx.storage.sql.exec('INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, ?, ?)', projectId, userId, boundedKey, 'x'.repeat(VALUE_BYTES));
     });
   }
 
@@ -105,11 +116,16 @@ export class CapacityOwner extends NextgenApplication {
     return this.ctx.storage.sql.exec(`SELECT COUNT(*) AS count,
       COALESCE(SUM(length(CAST(value AS BLOB))),0) AS bytes,
       COALESCE(SUM(CASE WHEN key = 'capacity-large' AND typeof(value) = 'text' AND length(CAST(value AS BLOB)) = ? AND value = ? THEN 1 ELSE 0 END),0) AS large_matches,
+      COALESCE(SUM(CASE WHEN key = ? AND value = ? THEN 1 ELSE 0 END),0) AS bounded_key_matches,
       COALESCE(SUM(CASE WHEN key <> 'capacity-large' AND typeof(value) = 'text' AND value = ? THEN 1 ELSE 0 END),0) AS small_matches
       FROM user_attributes WHERE project_id = ? AND user_id = ? AND key GLOB 'capacity-*'`,
-      LARGE_BYTES, largeText(), 'x'.repeat(VALUE_BYTES), projectId, userId).one();
+      LARGE_BYTES, largeText(), boundedKey, 'x'.repeat(VALUE_BYTES), 'x'.repeat(VALUE_BYTES), projectId, userId).one();
   }
   fence() { return this.ctx.storage.sql.exec('SELECT project_id, origin, object_name, generation, state, move_id FROM mapi_owner_fence LIMIT 2').toArray(); }
+  syntheticBusinessState() {
+    const sql = this.ctx.storage.sql;
+    return { users: sql.exec('SELECT COUNT(*) AS count FROM users').one().count, events: sql.exec('SELECT COUNT(*) AS count FROM events').one().count };
+  }
 }
 
 const encoder = new TextEncoder();
@@ -119,6 +135,13 @@ export default {
     const expected = encoder.encode(`Bearer ${env.MAPI_STAGING_PROOF_TOKEN ?? ''}`);
     if (!env.MAPI_STAGING_PROOF_TOKEN || provided.length !== expected.length || !crypto.subtle.timingSafeEqual(provided, expected)) return new Response(null, { status: 404 });
     const registry = env.PROJECT_REGISTRY.getByName('projects');
+    if (request.method === 'GET' && new URL(request.url).pathname === '/profile-hold') {
+      const state = await registry.proofState();
+      const which = new URL(request.url).searchParams.get('which');
+      if (!state?.objectName || !['source', 'destination'].includes(which) || which === 'destination' && !state.destination) return new Response(null, { status: 404 });
+      const objectName = which === 'source' ? state.objectName : state.destination;
+      return Response.json(await env.NEXTGEN_APPLICATION.getByName(objectName).holdForSyntheticMemorySample());
+    }
     if (request.method === 'GET' && new URL(request.url).pathname === '/profile-target') {
       const state = await registry.proofState();
       if (!state?.objectName) return new Response(null, { status: 404 });
@@ -151,7 +174,7 @@ export default {
         } else if (stage === 'seed-large') {
           await owner.seedLarge(projectId, userId);
           const snapshot = await owner.snapshot(projectId, userId);
-          check(snapshot.count === ROWS + 1 && snapshot.bytes === ROWS * VALUE_BYTES + LARGE_BYTES && snapshot.large_matches === 1 && snapshot.small_matches === ROWS, 'Synthetic seed differs');
+          check(snapshot.count === ROWS + 2 && snapshot.bytes === (ROWS + 1) * VALUE_BYTES + LARGE_BYTES && snapshot.large_matches === 1 && snapshot.bounded_key_matches === 1 && snapshot.small_matches === ROWS + 1, 'Synthetic seed differs');
           state.before = snapshot;
           state.stage = 'preflight';
         } else if (stage === 'preflight') {
@@ -301,17 +324,57 @@ export default {
               JSON.stringify(prior) === JSON.stringify(await registry.relocationTextPreflightStatus(secret, item.projectId, item.moveId)) &&
               JSON.stringify(fence) === JSON.stringify(await extra.fence()) && preserved, 'Invalid fixture rejection changed state');
             if (stage === 'long-key-preflight') { state.longKeyRejected = true; state.stage = 'nonfinite-seed'; }
-            else { state.nonfiniteRejected = true; state.stage = 'complete'; }
+            else { state.nonfiniteRejected = true; state.stage = 'legacy-active-provision'; }
           }
         } else if (stage === 'nonfinite-seed') {
           const item = state.oversize, extra = env.NEXTGEN_APPLICATION.getByName(item.objectName);
           await extra.replaceLongKeyWithNonfinite(item.projectId, item.userId);
           check(await extra.nonfiniteMatches(item.projectId, item.userId), 'Non-finite fixture differs');
           state.stage = 'nonfinite-preflight';
+        } else if (stage === 'legacy-active-provision') {
+          const run = crypto.randomUUID();
+          const legacyOrigin = `https://${run}.example.test`, legacyName = `legacy-${run}`, legacyMove = `legacy-${run}`;
+          const legacyOwner = env.NEXTGEN_APPLICATION.getByName(legacyName);
+          await registry.reserve(legacyOrigin, legacyName);
+          const { projectId: legacyId } = await legacyOwner.provision('Synthetic legacy recovery', legacyOrigin, { projectId: null, origin: legacyOrigin, objectName: legacyName, generation: 1 });
+          await registry.activate(legacyOrigin, legacyName, legacyId);
+          const route = { projectId: legacyId, origin: legacyOrigin, objectName: legacyName, generation: 1 };
+          await legacyOwner.addUser('legacy@example.test', 'Synthetic-password-123!', route);
+          state.legacyActive = { origin: legacyOrigin, objectName: legacyName, moveId: legacyMove, projectId: legacyId, step: 0, tableCount: await legacyOwner.textPreflightTableCount(route), fence: await legacyOwner.fence(), business: await legacyOwner.syntheticBusinessState() };
+          state.stage = 'legacy-active-scan';
+        } else if (stage === 'legacy-active-scan') {
+          const item = state.legacyActive, legacyOwner = env.NEXTGEN_APPLICATION.getByName(item.objectName);
+          const result = await registry.beginRelocation(secret, item.origin, item.projectId, item.moveId);
+          check(result.phase === 'preflighting', 'Legacy test source did not remain active');
+          const current = await registry.relocationTextPreflightStatus(secret, item.projectId, item.moveId);
+          check(current && !current.done, 'Legacy test needs an intermediate checkpoint');
+          if (item.step > 0) check(current.marker !== item.marker && current.cursor.version === 4, 'Legacy recovery did not start a fresh scan');
+          item.marker = current.marker;
+          const version = item.step < 2 ? 1 : 2, done = item.step % 2 === 1;
+          const cursor = { version, table: done ? item.tableCount : 0, after: null, row: null, column: 0, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done };
+          // v2 is a synthetic reconstruction of the intermediate checkpoint.
+          if (version === 2) cursor.rowBytes = 0;
+          await registry.testSetCheckpoint(item.projectId, item.moveId, JSON.stringify(cursor), cursor.done ? 1 : 0);
+          state.stage = 'legacy-active-reset';
+        } else if (stage === 'legacy-active-reset') {
+          const item = state.legacyActive, legacyOwner = env.NEXTGEN_APPLICATION.getByName(item.objectName);
+          const result = await registry.beginRelocation(secret, item.origin, item.projectId, item.moveId);
+          check(result.phase === 'preflighting' && await registry.relocationTextPreflightStatus(secret, item.projectId, item.moveId) === null, 'Legacy checkpoint was not reset');
+          check(JSON.stringify(await legacyOwner.fence()) === JSON.stringify(item.fence) && JSON.stringify(await legacyOwner.syntheticBusinessState()) === JSON.stringify(item.business), 'Legacy reset changed source state');
+          item.step++;
+          if (item.step === 4) state.stage = 'legacy-active-finish';
+          else state.stage = 'legacy-active-scan';
+        } else if (stage === 'legacy-active-finish') {
+          const item = state.legacyActive;
+          const result = await registry.beginRelocation(secret, item.origin, item.projectId, item.moveId);
+          const current = await registry.relocationTextPreflightStatus(secret, item.projectId, item.moveId);
+          check(result.phase === 'preflighting' && current && current.cursor.version === 4 && current.marker !== item.marker, 'Final legacy reset did not start a fresh scan');
+          state.legacyActiveRecovered = true;
+          state.stage = 'complete';
         } else if (stage !== 'complete') throw Error('Unknown synthetic capacity stage');
       }
       await registry.saveProofState(state);
-      return Response.json({ stage: state.stage, done: state.stage === 'complete', seeded: state.seeded, pages: state.pages, largePages: state.largePages, oversizedRejected: state.oversizedRejected === true, legacyRejected: state.legacyRejected === true, frozenLegacyRejected: state.frozenLegacyRejected === true, longKeyRejected: state.longKeyRejected === true, nonfiniteRejected: state.nonfiniteRejected === true });
+      return Response.json({ stage: state.stage, done: state.stage === 'complete', seeded: state.seeded, pages: state.pages, largePages: state.largePages, oversizedRejected: state.oversizedRejected === true, legacyRejected: state.legacyRejected === true, frozenLegacyRejected: state.frozenLegacyRejected === true, legacyActiveRecovered: state.legacyActiveRecovered === true, longKeyRejected: state.longKeyRejected === true, nonfiniteRejected: state.nonfiniteRejected === true });
     } catch (error) {
       console.error('Synthetic capacity proof failed', stage, error?.message);
       return Response.json({ done: false, stage }, { status: 500 });

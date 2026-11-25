@@ -4,6 +4,20 @@ import { validateRelocationSourceSchema } from "../worker/relocation-manifest.js
 
 export class TestRegistry extends ProjectRegistry {
   evict() { this.ctx.abort("registry restart"); }
+  setLegacyPreflight(projectId, version, done, tableCount) {
+    const sql = this.ctx.storage.sql;
+    const row = sql.exec('SELECT * FROM mapi_move_text_preflight WHERE project_id = ?', projectId).one();
+    const cursor = { version, table: done ? tableCount : 0, after: null, row: null, column: 0, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done };
+    // v2 was an intermediate local format, reconstructed from its known fields.
+    if (version >= 2) cursor.rowBytes = 0;
+    if (version >= 3) cursor.cursorBytes = 2;
+    sql.exec('UPDATE mapi_move_text_preflight SET cursor = ?, done = ? WHERE project_id = ?', JSON.stringify(cursor), done ? 1 : 0, projectId);
+    return row;
+  }
+  setLegacyJournal(projectId, moveId, present) {
+    if (present) this.ctx.storage.sql.exec('INSERT INTO mapi_move_journals VALUES (?, ?, 0)', moveId, projectId);
+    else this.ctx.storage.sql.exec('DELETE FROM mapi_move_journals WHERE move_id = ? AND project_id = ?', moveId, projectId);
+  }
   setTestGeneration(projectId, generation) {
     this.ctx.storage.sql.exec('UPDATE project_routes SET generation = CAST(? AS INTEGER) WHERE project_id = ?', generation, projectId);
   }
@@ -34,6 +48,8 @@ export class TestOwner extends NextgenApplication {
   #nextLoginStatus = null;
   #nextSessionStatus = new Map();
   addUnsupportedSchema() { this.ctx.storage.sql.exec("CREATE TABLE unsupported_source_schema (id INTEGER PRIMARY KEY)"); }
+  addLegacyTransferState() { this.ctx.storage.sql.exec('CREATE TABLE mapi_chunk_export (test INTEGER)'); this.ctx.storage.sql.exec('INSERT INTO mapi_chunk_export VALUES (1)'); }
+  removeLegacyTransferState() { this.ctx.storage.sql.exec('DROP TABLE mapi_chunk_export'); }
   removeUnsupportedSchema() { this.ctx.storage.sql.exec("DROP TABLE unsupported_source_schema"); }
   addOversizedSchemaDefinition() { this.ctx.storage.sql.exec(`CREATE TABLE oversized_source_schema (id INTEGER /* ${'x'.repeat(17000)} */ PRIMARY KEY)`); }
   removeOversizedSchemaDefinition() { this.ctx.storage.sql.exec('DROP TABLE oversized_source_schema'); }
@@ -84,6 +100,7 @@ export class TestOwner extends NextgenApplication {
     this.ctx.storage.sql.exec(`UPDATE mapi_revision_clock SET stamp = ${values[kind]} WHERE id = 1`);
   }
   validateTestSourceSchema(route) { validateRelocationSourceSchema(this.ctx.storage, route); }
+  textPreflightTableCount(route) { return validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true }).length; }
   dropTestRevisionScopes() { this.ctx.storage.sql.exec("DROP TABLE mapi_revision_scopes"); }
   holdNextProof() { this.#hold = true; }
   proofHeld() { return this.#held; }
@@ -225,7 +242,64 @@ export default {
       await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move');
       const afterMutation = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
       check(afterMutation && afterMutation.marker !== afterEviction.marker, 'Go mutation did not invalidate preflight');
+      const beforeLegacyFence = await progressOwner.ownerFence(), beforeLegacyBusiness = await progressOwner.businessSnapshot();
+      const progressTableCount = await progressOwner.textPreflightTableCount(progressRoute);
+      for (const [version, done] of [[1, false], [1, true], [2, false], [2, true], [3, false], [3, true]]) {
+        const prior = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+        await registry.setLegacyPreflight(progressId, version, done, progressTableCount);
+        const results = await Promise.allSettled([
+          registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move'),
+          registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move'),
+        ]);
+        check(results.some(result => result.status === 'fulfilled' && result.value.phase === 'preflighting') && results.every(result => result.status === 'fulfilled' ? result.value.phase === 'preflighting' : String(result.reason).includes('Stale legacy TEXT preflight')), 'Legacy recovery did not remain in preflight');
+        check(await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move') === null, 'Legacy checkpoint was not reset');
+        check(JSON.stringify(await progressOwner.ownerFence()) === JSON.stringify(beforeLegacyFence) && JSON.stringify(await progressOwner.businessSnapshot()) === JSON.stringify(beforeLegacyBusiness), 'Legacy recovery changed source state');
+        await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move');
+        const restarted = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+        check(restarted && restarted.cursor.version === 4 && restarted.marker !== prior.marker, 'Legacy recovery did not start a fresh scan');
+      }
+      await registry.setLegacyPreflight(progressId, 1, true, progressTableCount);
+      const legacyBefore = await registry.legacyRelocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+      await progressOwner.addLegacyTransferState();
+      let blocked = '';
+      try { await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move'); } catch (error) { blocked = String(error); }
+      check(blocked.includes('Legacy transfer state requires manual review') && JSON.stringify(await registry.legacyRelocationTextPreflightStatus('move-secret', progressId, 'progress-move')) === JSON.stringify(legacyBefore) && JSON.stringify(await progressOwner.ownerFence()) === JSON.stringify(beforeLegacyFence) && JSON.stringify(await progressOwner.businessSnapshot()) === JSON.stringify(beforeLegacyBusiness), 'Legacy transfer evidence was changed');
+      await progressOwner.removeLegacyTransferState();
+      await registry.setLegacyJournal(progressId, 'progress-move', true);
+      blocked = '';
+      try { await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move'); } catch (error) { blocked = String(error); }
+      check(blocked.includes('Legacy transfer state requires manual review') && JSON.stringify(await registry.legacyRelocationTextPreflightStatus('move-secret', progressId, 'progress-move')) === JSON.stringify(legacyBefore) && JSON.stringify(await progressOwner.ownerFence()) === JSON.stringify(beforeLegacyFence) && JSON.stringify(await progressOwner.businessSnapshot()) === JSON.stringify(beforeLegacyBusiness), 'Legacy registry evidence was changed');
+      await registry.setLegacyJournal(progressId, 'progress-move', false);
+      await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move');
       check((await beginRelocation('move-secret', progressOrigin, progressId, 'progress-move')).phase === 'moving', 'Invalidated preflight did not complete');
+      const lostOrigin = 'https://legacy-frozen.example', lostName = 'legacy-frozen-source', lostMove = 'legacy-frozen-move';
+      const lostOwner = env.NEXTGEN_APPLICATION.getByName(lostName);
+      await registry.reserve(lostOrigin, lostName);
+      const lostId = (await lostOwner.provision('Legacy frozen', lostOrigin, { projectId: null, origin: lostOrigin, objectName: lostName, generation: 1 })).projectId;
+      await registry.activate(lostOrigin, lostName, lostId);
+      for (let page = 0; page < 10000; page++) {
+        const current = await registry.relocationTextPreflightStatus('move-secret', lostId, lostMove).catch(() => null);
+        if (current?.done) break;
+        const result = await registry.beginRelocation('move-secret', lostOrigin, lostId, lostMove);
+        check(result.phase === 'preflighting' && page < 9999, 'Legacy frozen scan did not reach its last page');
+      }
+      await lostOwner.holdNextProof();
+      const lost = registry.beginRelocation('move-secret', lostOrigin, lostId, lostMove).then(() => false, () => true);
+      for (let attempt = 0; attempt < 1000 && !await lostOwner.proofHeld(); attempt++) await new Promise(resolve => setTimeout(resolve, 1));
+      check(await lostOwner.proofHeld(), 'Freeze acknowledgement was not held');
+      const frozenBefore = await lostOwner.ownerFence(), frozenBusiness = await lostOwner.businessSnapshot();
+      check(frozenBefore[0]?.state === 'frozen', 'Lost-ack source was not frozen');
+      await registry.setLegacyPreflight(lostId, 2, true, (await registry.relocationTextPreflightStatus('move-secret', lostId, lostMove)).cursor.table);
+      await lostOwner.releaseProof();
+      check(await lost, 'Injected lost acknowledgement did not fail');
+      check((await registry.beginRelocation('move-secret', lostOrigin, lostId, lostMove)).phase === 'preflighting', 'Frozen legacy recovery did not restart');
+      check(JSON.stringify(await lostOwner.ownerFence()) === JSON.stringify(frozenBefore) && JSON.stringify(await lostOwner.businessSnapshot()) === JSON.stringify(frozenBusiness), 'Frozen recovery changed source state');
+      check((await beginRelocation('move-secret', lostOrigin, lostId, lostMove)).phase === 'moving', 'Frozen legacy recovery failed to resume');
+      await registry.setLegacyPreflight(lostId, 1, true, (await registry.relocationTextPreflightStatus('move-secret', lostId, lostMove)).cursor.table);
+      const movingBefore = await registry.relocationStatus('move-secret', lostId), movingFence = await lostOwner.ownerFence();
+      let movingError = '';
+      try { await registry.beginRelocation('move-secret', lostOrigin, lostId, lostMove); } catch (error) { movingError = String(error); }
+      check(movingError.includes('Legacy TEXT preflight requires manual review') && JSON.stringify(await registry.relocationStatus('move-secret', lostId)) === JSON.stringify(movingBefore) && JSON.stringify(await lostOwner.ownerFence()) === JSON.stringify(movingFence), 'Moving legacy recovery did not fail closed');
       const maximumRoute = { projectId: maximumId, origin: maximumOrigin, objectName: maximumName, generation: Number.MAX_SAFE_INTEGER };
       const maximumFence = await maximumOwner.ownerFence(), maximumBefore = await maximumOwner.testCounts();
       let maximumError = '';

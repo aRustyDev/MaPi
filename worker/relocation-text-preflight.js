@@ -11,6 +11,7 @@ const MAX_CHUNK_BYTES = 128 * 1024;
 const MAX_INT64 = 9223372036854775807n;
 const MIN_INT64 = -9223372036854775808n;
 const quote = name => '"' + name.replaceAll('"', '""') + '"';
+export const RELOCATION_TEXT_PREFLIGHT_VERSION = 4;
 
 function validRowid(value) {
   if (typeof value !== 'string' || !/^(0|-?[1-9][0-9]*)$/.test(value)) return false;
@@ -19,13 +20,13 @@ function validRowid(value) {
 }
 
 function initial() {
-  return { version: 3, table: 0, after: null, row: null, column: 0, rowBytes: 0, cursorBytes: 2, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done: false };
+  return { version: RELOCATION_TEXT_PREFLIGHT_VERSION, table: 0, after: null, row: null, column: 0, rowBytes: 0, cursorBytes: 2, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done: false };
 }
 
 function validCheckpoint(value, tables) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).sort().join(',') !== 'after,column,cursorBytes,done,length,maximum,minimum,offset,remaining,row,rowBytes,table,version' ||
-      value.version !== 3 || !Number.isSafeInteger(value.table) || value.table < 0 || value.table > tables.length ||
+      value.version !== RELOCATION_TEXT_PREFLIGHT_VERSION || !Number.isSafeInteger(value.table) || value.table < 0 || value.table > tables.length ||
       !(value.after === null || validRowid(value.after)) || !(value.row === null || validRowid(value.row)) ||
       !Number.isSafeInteger(value.column) || value.column < 0 || value.column > 100 ||
       !Number.isSafeInteger(value.rowBytes) || value.rowBytes < 0 || value.rowBytes > MAX_ROW_VALUE_BYTES ||
@@ -72,7 +73,7 @@ function tableDetails(query, name, identity) {
   return { table, rowid, columns: columns.map(column => ({ name: quote(column.name), key: column.pk > 0 })) };
 }
 
-function consumeUtf8(checkpoint, bytes) {
+function consumeUtf8(checkpoint, bytes, key) {
   for (const byte of bytes) {
     if (checkpoint.remaining) {
       if (byte < checkpoint.minimum || byte > checkpoint.maximum) throw Error('Invalid UTF-8 TEXT in relocation row');
@@ -80,7 +81,7 @@ function consumeUtf8(checkpoint, bytes) {
       checkpoint.minimum = 128;
       checkpoint.maximum = 191;
     } else if (byte <= 127) {
-      continue;
+      // ASCII bytes need no UTF-8 continuation state.
     } else if (byte >= 194 && byte <= 223) {
       checkpoint.remaining = 1;
     } else if (byte >= 224 && byte <= 239) {
@@ -93,6 +94,15 @@ function consumeUtf8(checkpoint, bytes) {
       if (byte === 244) checkpoint.maximum = 143;
     } else {
       throw Error('Invalid UTF-8 TEXT in relocation row');
+    }
+    if (key) {
+      // JSON.stringify emits UTF-8 unchanged except for ASCII control bytes,
+      // quotes and backslashes. Count these bytes while validating each slice
+      // so an incomplete multibyte character can resume without re-reading.
+      checkpoint.cursorBytes += byte < 0x20
+        ? ([8, 9, 10, 12, 13].includes(byte) ? 2 : 6)
+        : (byte === 0x22 || byte === 0x5c ? 2 : 1);
+      if (checkpoint.cursorBytes > MAX_CURSOR_BYTES) throw Error('Relocation primary key exceeds cursor limit');
     }
   }
 }
@@ -151,7 +161,10 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
     const key = columns[checkpoint.column].key;
     if (checkpoint.length === null) {
       if (queries >= MAX_QUERIES) break;
-      const result = query(`SELECT typeof(${column}) AS kind, CASE WHEN typeof(${column}) IN ('text', 'blob') THEN length(CAST(${column} AS BLOB)) END AS size, CASE WHEN typeof(${column}) = 'real' AND (${column} > 1.7976931348623157e308 OR ${column} < -1.7976931348623157e308) THEN 1 ELSE 0 END AS nonfinite FROM ${table} WHERE ${rowid} = CAST(? AS INTEGER)`, checkpoint.row).toArray();
+      const keyValues = key
+        ? `CASE WHEN typeof(${column}) = 'integer' THEN printf('%lld', ${column}) END AS integer_value, CASE WHEN typeof(${column}) = 'real' AND ${column} <= 1.7976931348623157e308 AND ${column} >= -1.7976931348623157e308 THEN ${column} END AS real_value`
+        : 'NULL AS integer_value, NULL AS real_value';
+      const result = query(`SELECT typeof(${column}) AS kind, CASE WHEN typeof(${column}) IN ('text', 'blob') THEN length(CAST(${column} AS BLOB)) END AS size, CASE WHEN typeof(${column}) = 'real' AND (${column} > 1.7976931348623157e308 OR ${column} < -1.7976931348623157e308) THEN 1 ELSE 0 END AS nonfinite, ${keyValues} FROM ${table} WHERE ${rowid} = CAST(? AS INTEGER)`, checkpoint.row).toArray();
       if (result.length !== 1) throw Error('TEXT preflight source changed');
       if (result[0].nonfinite) throw Error('Non-finite REAL is not supported by relocation');
       // Match encodeFragmentRow's aggregate accounting. With at most 100
@@ -163,10 +176,14 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
       if (checkpoint.rowBytes > MAX_ROW_VALUE_BYTES) throw Error('Row exceeds conservative SQLite size limit');
       if (key) {
         if (result[0].kind === 'null') throw Error('Export primary key contains NULL');
-        // JSON can encode each control byte as six ASCII bytes. Blob keys are
-        // base64-wrapped and integers are decimal strings in the bridge.
-        const keySize = result[0].kind === 'text' ? 2 + 6 * size : result[0].kind === 'blob' ? 11 + 4 * Math.ceil(size / 3) : 48;
-        checkpoint.cursorBytes += keySize + 1;
+        // The bridge wraps integers and blobs in tagged objects. Their JSON
+        // sizes are exact without reading the full blob into JavaScript.
+        const keySize = result[0].kind === 'text' ? 2
+          : result[0].kind === 'blob' ? 11 + 4 * Math.ceil(size / 3)
+          : result[0].kind === 'integer' ? JSON.stringify({ integer: result[0].integer_value }).length
+          : JSON.stringify(result[0].real_value).length;
+        const comma = columns.slice(0, checkpoint.column).some(item => item.key) ? 1 : 0;
+        checkpoint.cursorBytes += keySize + comma;
         if (checkpoint.cursorBytes > MAX_CURSOR_BYTES) throw Error('Relocation primary key exceeds cursor limit');
       }
       if (result[0].kind !== 'text') {
@@ -180,7 +197,7 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
       const amount = Math.min(SLICE_BYTES, MAX_BYTES - bytes, checkpoint.length - checkpoint.offset);
       const result = query(`SELECT substr(CAST(${column} AS BLOB), ?, ?) AS data FROM ${table} WHERE ${rowid} = CAST(? AS INTEGER)`, checkpoint.offset + 1, amount, checkpoint.row).toArray();
       if (result.length !== 1 || !(result[0].data instanceof ArrayBuffer) || result[0].data.byteLength !== amount) throw Error('TEXT preflight source changed');
-      consumeUtf8(checkpoint, new Uint8Array(result[0].data));
+      consumeUtf8(checkpoint, new Uint8Array(result[0].data), key);
       checkpoint.offset += amount;
       bytes += amount;
     }

@@ -5,6 +5,7 @@ import { assertRecoveryEnvelope, readAnchoredRecoveryScopes, recoveryPageDigest,
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
 import { RELOCATION_RECONCILIATION_VERSION } from "./relocation-values.js";
 import { authorizeSchemaMigration } from "./schema-migration.js";
+import { RELOCATION_TEXT_PREFLIGHT_VERSION } from "./relocation-text-preflight.js";
 
 function authorizeRelocation(env, secret) {
   if (env.MAPI_RELOCATION_ENABLED !== "1" || !env.MAPI_RELOCATION_CONTROL_TOKEN ||
@@ -35,6 +36,15 @@ function currentReconciliation(sql, projectId, moveId) {
   let tables;
   try { tables = JSON.parse(row.tables); } catch { return false; }
   return Array.isArray(tables) && tables.length > 0 && row.table_index === tables.length && !!sql.exec('SELECT 1 FROM mapi_move_journals WHERE move_id = ? AND project_id = ? AND complete = 1', moveId, projectId).toArray().length;
+}
+
+function assertNoLegacyTransferEvidence(sql, projectId, moveId) {
+  for (const name of ['mapi_move_reconciliation', 'mapi_move_journals', 'mapi_move_evidence', 'mapi_move_completion', 'mapi_move_history', 'mapi_move_history_verification']) {
+    const objects = sql.exec('SELECT type FROM sqlite_schema WHERE lower(name) = ?', name).toArray();
+    if (!objects.length && name === 'mapi_move_history_verification') continue;
+    if (objects.length !== 1 || objects[0].type !== 'table') throw new Error('Legacy transfer state requires manual review');
+    if (sql.exec(`SELECT 1 FROM ${name} WHERE project_id = ? AND move_id = ? LIMIT 1`, projectId, moveId).toArray().length) throw new Error('Legacy transfer state requires manual review');
+  }
 }
 
 function validateRecoveryScopeCheckpoint(row, projectId, recoveryId, sql) {
@@ -247,7 +257,7 @@ export class ProjectRegistry extends DurableObject {
     return { route: route ?? null, move, intent };
   }
 
-  relocationTextPreflightStatus(secret, projectId, moveId) {
+  #readRelocationTextPreflight(secret, projectId, moveId) {
     const { route, intent } = this.relocationStatus(secret, projectId);
     if (!route || !intent || intent.move_id !== moveId || intent.project_id !== projectId ||
         intent.origin !== route.origin || intent.source_object !== route.object_name ||
@@ -262,10 +272,22 @@ export class ProjectRegistry extends DurableObject {
     let cursor;
     try { cursor = JSON.parse(row.cursor); } catch { throw new Error('Invalid TEXT preflight checkpoint'); }
     if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor) || cursor.done !== Boolean(row.done)) throw new Error('Invalid TEXT preflight checkpoint');
-    // Earlier scans did not validate all export bounds and cannot authorize a
-    // freeze, even when already marked complete before an upgrade.
-    if (cursor.version !== 3) throw new Error('Legacy TEXT preflight requires manual review');
-    return { marker: row.marker, cursor, done: Boolean(row.done) };
+    return { marker: row.marker, cursor, done: Boolean(row.done), revision: row.revision };
+  }
+
+  relocationTextPreflightStatus(secret, projectId, moveId) {
+    const checkpoint = this.#readRelocationTextPreflight(secret, projectId, moveId);
+    if (!checkpoint) return null;
+    if (checkpoint.cursor.version !== RELOCATION_TEXT_PREFLIGHT_VERSION) throw new Error('Legacy TEXT preflight requires manual review');
+    const { marker, cursor, done } = checkpoint;
+    return { marker, cursor, done };
+  }
+
+  legacyRelocationTextPreflightStatus(secret, projectId, moveId) {
+    const checkpoint = this.#readRelocationTextPreflight(secret, projectId, moveId);
+    if (!checkpoint || checkpoint.cursor.version === RELOCATION_TEXT_PREFLIGHT_VERSION) return null;
+    if (![1, 2, 3].includes(checkpoint.cursor.version) || !/^[0-9a-f]{32}$/.test(checkpoint.marker)) throw new Error('Invalid legacy TEXT preflight checkpoint');
+    return { marker: checkpoint.marker, version: checkpoint.cursor.version, done: checkpoint.done, revision: checkpoint.revision };
   }
 
   recoveryStatus(secret, projectId) {
@@ -421,6 +443,10 @@ export class ProjectRegistry extends DurableObject {
     if (existing?.phase === "moving") {
       this.relocationStatus(secret, projectId);
       if (existing.move_id !== moveId || existing.source_object !== route.object_name || existing.generation !== route.generation) throw new Error("Conflicting move");
+      // Moving sources may already have transfer or reconciliation state.
+      // Never reset that evidence automatically.
+      const checkpoint = this.relocationTextPreflightStatus(secret, projectId, moveId);
+      if (!checkpoint?.done) throw new Error('Moving TEXT preflight requires manual review');
       return existing;
     }
     if (existing?.phase === "committed") {
@@ -459,6 +485,22 @@ export class ProjectRegistry extends DurableObject {
     });
     const sourceRoute = { projectId, origin, objectName: route.object_name, generation: route.generation };
     const namespace = this.env.NEXTGEN_APPLICATION;
+    const legacy = this.legacyRelocationTextPreflightStatus(secret, projectId, moveId);
+    if (legacy) {
+      assertNoLegacyTransferEvidence(this.ctx.storage.sql, projectId, moveId);
+      const proof = await namespace.getByName(route.object_name).prepareLegacyTextPreflightRecovery(secret, sourceRoute, moveId, legacy);
+      if (!proof || !['active', 'frozen'].includes(proof.state) || proof.projectId !== projectId || proof.origin !== origin || proof.objectName !== route.object_name || proof.generation !== route.generation || proof.moveId !== moveId || proof.objectId !== namespace.idFromName(route.object_name).toString()) throw new Error('Legacy TEXT preflight recovery proof mismatch');
+      this.ctx.storage.transactionSync(() => {
+        const status = this.relocationStatus(secret, projectId);
+        const current = this.legacyRelocationTextPreflightStatus(secret, projectId, moveId);
+        if (!current || JSON.stringify(current) !== JSON.stringify(legacy) || status.move?.phase === 'moving' || status.route?.state !== 'active' || status.route.project_id !== projectId || status.route.origin !== origin || status.route.object_name !== route.object_name || status.route.generation !== route.generation || status.intent?.move_id !== moveId || status.intent.destination_object !== intent.destination_object) return;
+        assertNoLegacyTransferEvidence(this.ctx.storage.sql, projectId, moveId);
+        const next = legacy.revision + 1;
+        if (!Number.isSafeInteger(next)) throw new Error('TEXT preflight revision exhausted');
+        this.ctx.storage.sql.exec("UPDATE mapi_move_text_preflight SET marker = '', cursor = 'null', done = 0, revision = ? WHERE project_id = ? AND move_id = ? AND revision = ?", next, projectId, moveId, legacy.revision);
+      });
+      return { ...intent, phase: 'preflighting' };
+    }
     const saved = this.relocationTextPreflightStatus(secret, projectId, moveId);
     const savedRow = this.ctx.storage.sql.exec('SELECT revision FROM mapi_move_text_preflight WHERE project_id = ?', projectId).toArray()[0] ?? null;
     const preflighting = { ...intent, phase: 'preflighting' };

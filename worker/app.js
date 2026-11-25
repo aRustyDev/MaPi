@@ -233,9 +233,46 @@ export class NextgenApplication extends DurableObject {
     this.#fenceArmed = true;
   }
 
-  // Freeze the source before the registry closes ingress. The registry calls
-  // this on its selected owner and then checks the returned durable fence.
-  // A lost acknowledgement is safe to retry with the same move ID.
+  // Revoke an old active-source marker before the registry resets its cursor.
+  // A source already frozen for this intent keeps its matching seal, allowing
+  // a read-only rescan after a lost freeze acknowledgement.
+  async prepareLegacyTextPreflightRecovery(secret, route, moveId, expected) {
+    if (this.env.MAPI_RELOCATION_ENABLED !== "1" || this.env.MAPI_FENCE_WRITERS_DRAINED !== "1" || !this.env.MAPI_RELOCATION_CONTROL_TOKEN || !sameKey(secret, this.env.MAPI_RELOCATION_CONTROL_TOKEN)) throw new Error("Fence adoption is not enabled");
+    if (!route || canonicalOrigin(route.origin) !== route.origin || this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Invalid source route");
+    const registry = this.env.PROJECT_REGISTRY.getByName("projects");
+    const status = await registry.relocationStatus(secret, route.projectId);
+    const legacy = await registry.legacyRelocationTextPreflightStatus(secret, route.projectId, moveId);
+    if (!legacy || JSON.stringify(legacy) !== JSON.stringify(expected) || !status.route || status.route.state !== 'active' || status.route.project_id !== route.projectId || status.route.origin !== route.origin || status.route.object_name !== route.objectName || status.route.generation !== route.generation || status.intent?.move_id !== moveId || status.move?.phase === 'moving') throw new Error('Stale legacy TEXT preflight');
+    const state = this.ctx.storage.transactionSync(() => {
+      this.#assertRecoveryObjectEpoch();
+      const sql = this.ctx.storage.sql;
+      const objects = sql.exec("SELECT name, type FROM sqlite_schema WHERE lower(name) IN ('mapi_owner_fence', 'mapi_relocation_text_preflight_seal', 'mapi_chunk_export', 'mapi_chunk_export_data', 'mapi_chunk_import', 'mapi_chunk_import_data', 'mapi_chunk_import_fragment', 'mapi_chunk_import_fragment_data', 'mapi_relocation_project', 'mapi_destination_reservation', 'mapi_relocation_prepared')").toArray();
+      for (const object of objects) {
+        if (object.name.toLowerCase() === 'mapi_owner_fence' || object.name.toLowerCase() === 'mapi_relocation_text_preflight_seal') {
+          if (object.type !== 'table') throw new Error('Invalid legacy source control state');
+          continue;
+        }
+        if (object.type !== 'table' || sql.exec(`SELECT 1 FROM "${object.name}" LIMIT 1`).toArray().length) throw new Error('Legacy transfer state requires manual review');
+      }
+      const fence = objects.some(object => object.name.toLowerCase() === 'mapi_owner_fence') ? sql.exec('SELECT * FROM mapi_owner_fence LIMIT 2').toArray() : [];
+      if (fence.length > 1) throw new Error('Invalid owner fence');
+      const frozen = fence.length === 1 && fence[0].state === 'frozen' && fence[0].project_id === route.projectId && fence[0].origin === route.origin && fence[0].object_name === route.objectName && fence[0].generation === route.generation && fence[0].move_id === moveId;
+      if (fence.length === 1 && !frozen && (fence[0].state !== 'active' || fence[0].project_id !== route.projectId || fence[0].origin !== route.origin || fence[0].object_name !== route.objectName || fence[0].generation !== route.generation)) throw new Error('Legacy source requires manual review');
+      const marker = readTextPreflightMarker(this.ctx.storage);
+      if (frozen) {
+        if (marker !== legacy.marker || assertTextPreflightSeal(this.ctx.storage, route, moveId) !== marker) throw new Error('Legacy frozen source requires manual review');
+      } else {
+        if (objects.some(object => object.name.toLowerCase() === 'mapi_relocation_text_preflight_seal') || (marker && marker !== legacy.marker)) throw new Error('Legacy source marker differs');
+        if (marker) invalidateTextPreflightMarker(this.ctx.storage);
+      }
+      validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true });
+      return frozen ? 'frozen' : 'active';
+    });
+    return { projectId: route.projectId, origin: route.origin, objectName: route.objectName, generation: route.generation, moveId, objectId: this.ctx.id.toString(), state };
+  }
+
+  // Scan either an active source or a matching source frozen before an older
+  // preflight acknowledgement reached the registry.
   async advanceRelocationTextPreflight(secret, route, moveId, checkpoint) {
     if (this.env.MAPI_RELOCATION_ENABLED !== "1" || this.env.MAPI_FENCE_WRITERS_DRAINED !== "1" || !this.env.MAPI_RELOCATION_CONTROL_TOKEN || !sameKey(secret, this.env.MAPI_RELOCATION_CONTROL_TOKEN)) throw new Error("Fence adoption is not enabled");
     if (!route || canonicalOrigin(route.origin) !== route.origin || this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Invalid source route");
@@ -247,12 +284,16 @@ export class NextgenApplication extends DurableObject {
       this.#assertRecoveryObjectEpoch();
       const sql = this.ctx.storage.sql;
       const fence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length ? sql.exec("SELECT * FROM mapi_owner_fence LIMIT 2").toArray() : [];
-      if (fence.length > 1 || fence.length === 1 && (fence[0].state !== 'active' || fence[0].project_id !== route.projectId || fence[0].origin !== route.origin || fence[0].object_name !== route.objectName || fence[0].generation !== route.generation)) throw new Error("Source is not active");
-      if (sql.exec("SELECT 1 FROM sqlite_schema WHERE name = 'mapi_relocation_text_preflight_seal' COLLATE NOCASE LIMIT 1").toArray().length) throw new Error("Unexpected TEXT preflight seal");
+      const frozen = fence.length === 1 && fence[0].state === 'frozen' && fence[0].project_id === route.projectId && fence[0].origin === route.origin && fence[0].object_name === route.objectName && fence[0].generation === route.generation && fence[0].move_id === moveId;
+      if (fence.length > 1 || fence.length === 1 && !frozen && (fence[0].state !== 'active' || fence[0].project_id !== route.projectId || fence[0].origin !== route.origin || fence[0].object_name !== route.objectName || fence[0].generation !== route.generation)) throw new Error("Source is not active");
+      const hasSeal = sql.exec("SELECT 1 FROM sqlite_schema WHERE name = 'mapi_relocation_text_preflight_seal' COLLATE NOCASE LIMIT 1").toArray().length;
+      if (frozen) assertTextPreflightSeal(this.ctx.storage, route, moveId);
+      else if (hasSeal) throw new Error("Unexpected TEXT preflight seal");
       const tables = validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true });
       let marker = readTextPreflightMarker(this.ctx.storage);
       let cursor = checkpoint?.cursor ?? null;
-      if (!checkpoint || marker !== checkpoint.marker) {
+      if (frozen && (!marker || checkpoint && marker !== checkpoint.marker)) throw new Error('Frozen TEXT preflight marker differs');
+      if (!frozen && (!checkpoint || marker !== checkpoint.marker)) {
         if (marker) invalidateTextPreflightMarker(this.ctx.storage);
         marker = crypto.randomUUID().replaceAll('-', '');
         createTextPreflightMarker(this.ctx.storage, marker);
