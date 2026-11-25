@@ -246,7 +246,7 @@ export class NextgenApplication extends DurableObject {
     const state = this.ctx.storage.transactionSync(() => {
       this.#assertRecoveryObjectEpoch();
       const sql = this.ctx.storage.sql;
-      const objects = sql.exec("SELECT name, type FROM sqlite_schema WHERE lower(name) IN ('mapi_owner_fence', 'mapi_relocation_text_preflight_seal', 'mapi_chunk_export', 'mapi_chunk_export_data', 'mapi_chunk_import', 'mapi_chunk_import_data', 'mapi_chunk_import_fragment', 'mapi_chunk_import_fragment_data', 'mapi_relocation_project', 'mapi_destination_reservation', 'mapi_relocation_prepared')").toArray();
+      const objects = sql.exec("SELECT name, type FROM sqlite_schema WHERE lower(name) IN ('mapi_owner_fence', 'mapi_relocation_text_preflight_seal', 'mapi_chunk_export', 'mapi_chunk_export_data', 'mapi_chunk_import', 'mapi_chunk_import_data', 'mapi_chunk_import_fragment', 'mapi_chunk_import_fragment_data', 'mapi_chunk_import_stream', 'mapi_chunk_import_stream_data', 'mapi_relocation_project', 'mapi_destination_reservation', 'mapi_relocation_prepared')").toArray();
       for (const object of objects) {
         if (object.name.toLowerCase() === 'mapi_owner_fence' || object.name.toLowerCase() === 'mapi_relocation_text_preflight_seal') {
           if (object.type !== 'table') throw new Error('Invalid legacy source control state');

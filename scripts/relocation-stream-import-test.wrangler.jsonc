@@ -1,0 +1,1 @@
+{"name":"mapi-relocation-stream-import-test","main":"relocation-stream-import-test-worker.mjs","compatibility_date":"2026-11-18","durable_objects":{"bindings":[{"name":"OWNER","class_name":"StreamOwner"}]},"migrations":[{"tag":"v1","new_sqlite_classes":["StreamOwner"]}]}

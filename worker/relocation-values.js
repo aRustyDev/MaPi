@@ -1,6 +1,6 @@
-// Version 3 requires evidence produced after the stored TEXT byte check.
-export const RELOCATION_RECONCILIATION_VERSION = 3;
-export const RELOCATION_TEXT_GUARD_VERSION = 1;
+// Version 4 requires bounded per-cell slices for large reconciliation rows.
+export const RELOCATION_RECONCILIATION_VERSION = 4;
+export const RELOCATION_TEXT_GUARD_VERSION = 2;
 
 export function assertRelocationTextGuard(checkpoint) {
   if (checkpoint?.text_guard !== RELOCATION_TEXT_GUARD_VERSION) {

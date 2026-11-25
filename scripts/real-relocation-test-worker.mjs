@@ -18,6 +18,23 @@ export class RealRegistry extends ProjectRegistry {
   move(project) { return this.ctx.storage.sql.exec("SELECT * FROM mapi_route_moves WHERE project_id = ?", project).toArray()[0] ?? null; }
   history(project) { return this.ctx.storage.sql.exec("SELECT move_id, source_object, destination_object, generation FROM mapi_move_history WHERE project_id = ? ORDER BY generation", project).toArray(); }
   journalVersion(project, version) { this.ctx.storage.sql.exec('UPDATE mapi_move_reconciliation SET journal_version = ? WHERE project_id = ?', version, project); }
+  corruptJournal(project, field, kind) {
+    if (!['cursor', 'tables'].includes(field)) throw Error('Invalid fixture');
+    const sql = this.ctx.storage.sql, expr = kind === 'invalid-utf8' ? "CAST(X'80' AS TEXT)" : '?';
+    const value = kind === 'oversized' ? 'x'.repeat(150000) : '{synthetic_private_sentinel';
+    sql.exec(`UPDATE mapi_move_reconciliation SET ${field} = ${expr} WHERE project_id = ?`, ...(kind === 'invalid-utf8' ? [project] : [value, project]));
+  }
+  restoreJournal(project, value) { this.ctx.storage.sql.exec('UPDATE mapi_move_reconciliation SET tables = ?, cursor = ? WHERE project_id = ?', value.tables, value.cursor, project); }
+  journalFingerprint(project) { return this.ctx.storage.sql.exec("SELECT typeof(tables) AS tables_type, length(CAST(tables AS BLOB)) AS tables_size, hex(substr(CAST(tables AS BLOB),1,32)) AS tables_head, typeof(cursor) AS cursor_type, length(CAST(cursor AS BLOB)) AS cursor_size, hex(substr(CAST(cursor AS BLOB),1,32)) AS cursor_head, table_index, journal_version FROM mapi_move_reconciliation WHERE project_id = ?", project).one(); }
+  evidenceCursor(project) { return this.ctx.storage.sql.exec('SELECT cursor_in FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1', project).one().cursor_in; }
+  evidenceNextCursor(project) { return this.ctx.storage.sql.exec('SELECT cursor_out FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1', project).one().cursor_out; }
+  setEvidenceNextCursor(project, value) { this.ctx.storage.sql.exec('UPDATE mapi_move_evidence SET cursor_out = ? WHERE rowid = (SELECT rowid FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1)', value, project); }
+  corruptEvidenceCursor(project, kind) {
+    const expr = kind === 'invalid-utf8' ? "CAST(X'80' AS TEXT)" : '?';
+    const value = kind === 'oversized' ? 'x'.repeat(150000) : '{synthetic_private_sentinel';
+    this.ctx.storage.sql.exec(`UPDATE mapi_move_evidence SET cursor_in = ${expr} WHERE rowid = (SELECT rowid FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1)`, ...(kind === 'invalid-utf8' ? [project] : [value, project]));
+  }
+  restoreEvidenceCursor(project, value) { this.ctx.storage.sql.exec('UPDATE mapi_move_evidence SET cursor_in = ? WHERE rowid = (SELECT rowid FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1)', value, project); }
   journal(project) { return this.ctx.storage.sql.exec('SELECT * FROM mapi_move_reconciliation WHERE project_id = ?', project).toArray()[0] ?? null; }
   evidenceCount(project) { return this.ctx.storage.sql.exec('SELECT count(*) AS n FROM mapi_move_evidence WHERE project_id = ?', project).one().n; }
   historyVerification(project, move) { return this.ctx.storage.sql.exec('SELECT total_chunks, next_index, chain, final_digest, complete FROM mapi_move_history_verification WHERE project_id = ? AND move_id = ?', project, move).toArray()[0] ?? null; }
@@ -165,7 +182,9 @@ export default {
         check(rejected, 'Noncanonical blob key was accepted');
       }
       const largeBlob = 'A'.repeat(8_388_608);
-      validateReconciliationPage(page(1, [{ blob: largeBlob }], true), null);
+      let largeKeyRejected = false;
+      try { validateReconciliationPage(page(1, [{ blob: largeBlob }], true), null); } catch { largeKeyRejected = true; }
+      check(largeKeyRejected, 'Oversized blob key was accepted');
       let largeCorruptionRejected = false;
       try { validateReconciliationPage(page(1, [{ blob: largeBlob.slice(0, -2) + '!A' }], true), null); } catch { largeCorruptionRejected = true; }
       check(largeCorruptionRejected, 'Late corruption in large blob key was accepted');
@@ -296,6 +315,25 @@ export default {
       await registry.reconcileRelocation('move-secret', projectId, 'move-1');
       check(await registry.evidenceCount(projectId) === originalEvidenceCount + 1, 'Valid page retry did not advance exactly once');
       checkpoint = await registry.journal(projectId);
+      for (const field of ['cursor', 'tables']) for (const kind of ['oversized', 'invalid-utf8', 'malformed']) {
+        await registry.corruptJournal(projectId, field, kind);
+        const before = JSON.stringify(await registry.journalFingerprint(projectId));
+        let message = ''; try { await registry.reconcileRelocation('move-secret', projectId, 'move-1'); } catch (error) { message = String(error); }
+        check(message.includes('Invalid reconciliation checkpoint') && !message.includes('synthetic_private_sentinel'), 'Invalid journal was accepted or leaked data');
+        check(JSON.stringify(await registry.journalFingerprint(projectId)) === before, 'Invalid journal changed state');
+        await registry.restoreJournal(projectId, checkpoint);
+      }
+      const originalCursor = await registry.evidenceCursor(projectId);
+      for (const kind of ['oversized', 'invalid-utf8', 'malformed']) {
+        await registry.corruptEvidenceCursor(projectId, kind);
+        let message = ''; try { await registry.relocationEvidence('move-secret', projectId, 'move-1'); } catch (error) { message = String(error); }
+        check(message.includes('Invalid reconciliation checkpoint') && !message.includes('synthetic_private_sentinel'), 'Invalid evidence was accepted or leaked data');
+        await registry.restoreEvidenceCursor(projectId, originalCursor);
+      }
+      const originalNextCursor = await registry.evidenceNextCursor(projectId);
+      await registry.setEvidenceNextCursor(projectId, null);
+      check((await registry.relocationEvidence('move-secret', projectId, 'move-1')).pages[0].nextCursor === null, 'Historical NULL evidence cursor became unreadable');
+      await registry.setEvidenceNextCursor(projectId, originalNextCursor);
       await registry.journalVersion(projectId, 2);
       const journalState = async () => JSON.stringify({
         checkpoint: await registry.journal(projectId), evidenceCount: await registry.evidenceCount(projectId),
@@ -317,7 +355,7 @@ export default {
       await rejectsWith(() => registry.commitRelocation("move-secret", projectId, "move-1"), "Reconciliation is incomplete");
       await rejects(() => coordinator.evict()); coordinator = env.COORDINATOR.getByName("coordinator");
       while (!(await registry.reconcileRelocation('move-secret', projectId, 'move-1')).done) {}
-      await registry.journalVersion(projectId, 2);
+      await registry.journalVersion(projectId, 3);
       const completeState = await journalState();
       const oldComplete = async () => {
         await rejectsWith(() => registry.reconcileRelocation('move-secret', projectId, 'move-1'), 'Legacy reconciliation');
