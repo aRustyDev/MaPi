@@ -51,6 +51,28 @@ establish the visible inventory at collection time. Adoption by the actual
 object, old selectable versions, in-flight work, and out-of-band callers
 remain unverified. No Woven resource was changed.
 
+### Read-only adoption follow-up
+
+The active configured Woven owner still selected one version at 100%. The
+same version was active before and after the read-only check. Cloudflare's
+immutable-version module response returned its JavaScript entrypoint and one
+Wasm module. Their SHA-256 digests begin `7a50610e0c8a` and `254f17e7dcb2`.
+The reviewed #121 bundle begins `7ad9e647418b` and `a92046490a63`.
+Both deployed modules differ from the candidate.
+
+The binding's complete cursor traversal returned one stored Durable Object.
+Seven bounded daily GraphQL queries on that object attributed 63 requests to
+the currently deployed version and two to a different version. The five most
+recent daily windows returned zero groups. Stored invocation logs returned
+HTTP 403 for the available identity. These aggregates establish historical
+execution of the old version. Zero groups leave current in-flight drain
+unverified. No probe invoked the owner and no Woven deployment was changed.
+
+The legacy owner has not adopted the reviewed candidate. Adoption and a
+recorded in-flight drain remain prerequisites for move authorization. See
+[Cloudflare’s version module API](https://developers.cloudflare.com/api/resources/workers/subresources/beta/subresources/workers/subresources/versions/methods/get/)
+and [Durable Object code updates](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/).
+
 Recovery remains deliberately incomplete. The registry can close a project route, prevent relocation, arm and freeze its owner, and anchor an exact timestamp-clock high-water independently when that clock exists. It refuses recovery during an unfinalized cutover. A per-object recovery epoch map uses canonical lowercase object IDs and guards every listed object, including previously targeted projects after the current target changes. The registry validates every listed entry against its independent anchor and retains a ledger to reject omitted previously deployed object entries on restart; unrelated projects continue. Deployment must retain and verify the complete map on every owner build: a direct RPC to an owner cannot consult the registry synchronously if an operator omits that owner from its environment. The legacy restore and recover RPCs are disabled for all owners, including unfenced objects and objects without a clock table: a scheduled restore must never race a move reservation or erase a fence. There is no production restore/reactivation coordinator, and out-of-band PITR could bypass the code.
 
 Earlier experimental scoped revision allocation takes maxima from individual tables. Those maxima can go backwards when rows are deleted, so scanning a frozen object is not an acknowledged high-water proof. A revision-only durable clock records per-scope high-water marks as part of the corresponding owner write. Once the registry has reserved recovery, the owner is frozen, and the aggregate is anchored, `captureRecoveryScopes` copies every scope and exact int64 value into the independent registry. Each call processes at most 64 rows and a 124 KiB encoded page; indexed lookups materialize one scope row at a time. Recovery identifiers are limited to 128 UTF-8 bytes and the complete RPC response is checked against 128 KiB. A shared validator checks scope kind, arity, project ownership and exact Go `json.Marshal` encoding for recovery and relocation, including HTML and Unicode line-separator escapes. Equivalent noncanonical JSON keys are rejected. The cursor, count and hash chain commit atomically with the rows. An absent, malformed or incomplete clock fails closed. History deleted before clock adoption cannot be reconstructed by this capture.
