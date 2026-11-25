@@ -1,0 +1,8 @@
+{
+  "name": "mapi-typedrows-workerd-local-only",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-19",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "PROBE", "class_name": "Probe" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Probe"] }]
+}

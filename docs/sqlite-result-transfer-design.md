@@ -179,6 +179,67 @@ matched. This is not a 100-column type channel: it omits the replaced column,
 which could hold a value in a general query, and it does not establish how to
 represent all per-cell types without increasing a maximum-size row.
 
+## Typed-frame consumer prototype
+
+`npm run test:sqlite-typedrows-prototype` runs an unmounted Go
+`database/sql/driver.Rows` consumer in `experiments/sql-result-spill/typedrows`.
+`npm run test:sqlite-typedrows-wasi` compiles and runs the same tests using Go
+1.26.9 `wasip1/wasm` in Node's WASI host. The latter is not a Workerd or real
+MaPi owner test. Both use synthetic frame sources that assert, rather than
+establish, their type and snapshot authority.
+
+The proposed frame includes row and column ordinals, storage class, byte
+offset, total length and final marker. Integers and REAL values use eight
+big-endian bytes; TEXT and BLOB retain their byte sequences and remain distinct
+when empty. The consumer checks ordering, consistent type/length, frame and
+row limits, zero progress, scalar sizes, integer precision, NaN, and the row
+count supplied from a purported authenticated seal. It rejects malformed,
+truncated, extra and replayed rows without publishing a partial destination
+row. It consumes at most one row before returning and does not prefetch a
+10,000-row synthetic source. The test covers duplicate names, signed int64
+extrema, positive and negative infinity, negative zero, invalid UTF-8 bytes,
+empty values, reused source buffers, and an 8,388,530-byte BLOB with the
+65-byte pattern in a 100-column synthetic row. A `database/sql` test uses a
+fake driver, not the application driver or an actual SQLite transaction.
+
+Frame, cell, row, column and metadata bounds are supplied by the caller only
+for this prototype; they are not approved production limits. The consumer can
+hold a complete row, and decoding TEXT can temporarily copy a value. Its source
+may allocate before yielding a frame. No isolate peak, SQLite internal memory,
+cancellation, concurrent `Close`, spill authority or real source is measured.
+A supplied type or row count is not proof: the source must authenticate the
+seal and each frame's complete context, and must produce a consistent snapshot
+and exact SQLite types before this consumer could be integrated. In particular,
+this prototype does not make the production 65-byte `RETURNING` test pass and
+adds no schema objects to the owner.
+
+`npm run test:sqlite-typedrows-workerd` builds this consumer into a test-only
+Go 1.26.9 WASI reactor and runs a disposable local Workerd SQLite Durable Object.
+The producer executes one `DELETE ... RETURNING` with three SQL output columns:
+a known small integer ID, `typeof(v)`, and a value expression that converts
+integers to exact decimal before framing. It synchronously supplies the resulting
+two logical cells to Go in JSON/base64 frames. The fixed fixture includes ten
+rows with dynamic NULL, integer, REAL, TEXT and BLOB values, int64 extrema,
+positive infinity, empty values and the 8,388,530-byte BLOB pattern. Go
+`database/sql` scans and checks all rows before the source transaction ends.
+A nested-delete variant emits nine rows while recording ten delete effects.
+Commit and rollback both pass; deliberately corrupt, truncated and extra
+streams fail and drain the cursor before rolling back business and audit rows.
+An early Go `Rows.Close` also drains the source before rollback.
+The test compares the owner schema before and after; the transport itself
+creates no staging tables. Its largest JSON frame was 43,778 bytes and the
+largest observed Wasm boundary sample was 592 pages. These are local samples,
+not total isolate or SQLite peak memory.
+
+This is a restricted proof: the producer consumes an extra SQL type column,
+the expected row count is a fixture constant rather than an authenticated
+seal, the near-limit BLOB is a three-column result rather than the failing
+100-column statement, and Go consumes rows before transaction completion.
+It does not establish a general type channel, escaped `Rows` after rollback,
+secure spill, real application integration, or a bound on SQLite's own
+multi-row RETURNING accumulation. The existing production 65-byte regression
+remains failing.
+
 ## Required next proof before integration
 
 - Resolve the general DML type-channel blocker at the 100-column and maximum
