@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 )
 
@@ -37,8 +38,8 @@ func base64Digit(b byte) int {
 	}
 }
 
-// The host emits tagged objects with one integer or blob field. Inspect the
-// already-validated JSON bytes before allocating the decoded value; malformed
+// The host emits objects with one tag for an integer, BLOB, or special REAL.
+// Inspect the validated JSON before allocating the decoded value. Malformed
 // tags and invalid base64 must not trigger an allocation proportional to an
 // untrusted payload. The output of JSON.stringify contains no escaped
 // characters in these field names or in decimal/base64 values.
@@ -56,6 +57,17 @@ func decodeTagged(value []byte) (driver.Value, error) {
 			return nil, errors.New("invalid tagged integer")
 		}
 		return strconv.ParseInt(string(data), 10, 64)
+	case bytes.Equal(name, []byte(`"real"`)):
+		switch {
+		case bytes.Equal(data, []byte("inf")):
+			return math.Inf(1), nil
+		case bytes.Equal(data, []byte("-inf")):
+			return math.Inf(-1), nil
+		case bytes.Equal(data, []byte("-0")):
+			return math.Copysign(0, -1), nil
+		default:
+			return nil, errors.New("invalid tagged REAL")
+		}
 	case bytes.Equal(name, []byte(`"blob"`)):
 		if len(data)%4 != 0 {
 			return nil, errors.New("invalid tagged blob")

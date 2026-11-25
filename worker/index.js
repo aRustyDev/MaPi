@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import wasm from "./generated/nextgen.wasm";
 import fixture from "./generated/fixture.json";
 import { instantiateReactor } from "./wasi.js";
-import { execute, sqliteError } from "./sql.js";
+import { execute, sqliteError, stringifySQLResponse } from "./sql.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -64,7 +64,7 @@ export class NextgenProject extends DurableObject {
               if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
               result = { error: sqliteError(error) };
             }
-            output = encoder.encode(JSON.stringify(result));
+            output = encoder.encode(stringifySQLResponse(result));
             return output.length;
           },
           result: (ptr, size) => {
