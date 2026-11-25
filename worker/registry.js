@@ -3,7 +3,7 @@ import { beginRegistryMove, initializeMoveRegistry, validRelocationDigest } from
 import { initializeHistoryCheckpoint, readHistoryCheckpoint, advanceHistoryCheckpoint } from "./registry-history.js";
 import { assertRecoveryEnvelope, readAnchoredRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScope, validateRecoveryScopePage } from "./recovery-scopes.js";
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
-import { RELOCATION_RECONCILIATION_VERSION } from "./relocation-values.js";
+import { isRelocationRealTag, RELOCATION_RECONCILIATION_VERSION } from "./relocation-values.js";
 import { authorizeSchemaMigration } from "./schema-migration.js";
 
 function authorizeRelocation(env, secret) {
@@ -72,7 +72,7 @@ function validBase64(value) {
 
 function validReconciliationKey(value) {
   if (typeof value === 'string') return true;
-  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0);
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const keys = Object.keys(value);
   if (keys.length !== 1) return false;
@@ -82,6 +82,7 @@ function validReconciliationKey(value) {
     const number = BigInt(integer);
     return number >= -9223372036854775808n && number <= 9223372036854775807n;
   }
+  if (keys[0] === 'real') return isRelocationRealTag(value.real);
   // Validate toBase64() output without regex backtracking or allocating a
   // decoded copy of a potentially large key.
   return keys[0] === 'blob' && typeof value.blob === 'string' && validBase64(value.blob);

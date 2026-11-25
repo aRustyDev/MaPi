@@ -6,10 +6,11 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
 const source = `import { DurableObject } from 'cloudflare:workers';
 import { beginChunkImport, importChunk } from './relocation-chunks.js';
+import { RELOCATION_CHUNK_VERSION } from './relocation-values.js';
 const marker='synthetic-private-marker';
 const hex=b=>[...new Uint8Array(b)].map(v=>v.toString(16).padStart(2,'0')).join('');
 async function envelope(fragment) {
- const content=JSON.stringify({projectId:'p',generation:1,moveId:'m',index:0,prev:'',table:'users',columns:['id'],offset:0,rows:[],last:false,done:false,cursor:[{integer:'7'}],fragment});
+ const content=JSON.stringify({format:RELOCATION_CHUNK_VERSION,projectId:'p',generation:1,moveId:'m',index:0,prev:'',table:'users',columns:['id'],offset:0,rows:[],last:false,done:false,cursor:[{integer:'7'}],fragment});
  return {content,digest:hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(content)))};
 }
 export class Probe extends DurableObject {
