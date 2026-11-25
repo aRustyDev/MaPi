@@ -109,7 +109,7 @@ export class NextgenApplication extends DurableObject {
     ctx.storage.sql.exec("PRAGMA case_sensitive_like = ON");
     this.#recoveryObjectEpoch = recoveryObjectEpoch(env, ctx.id.toString());
     if (this.#recoveryObjectEpoch !== null) {
-      const epochTable = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_recovery_epoch'").toArray().length;
+      const epochTable = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_recovery_epoch' COLLATE NOCASE").toArray().length;
       const epochs = epochTable ? ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch LIMIT 2").toArray() : [];
       if (epochs.length !== 1 || epochs[0].epoch !== this.#recoveryObjectEpoch) return;
     }
@@ -129,7 +129,7 @@ export class NextgenApplication extends DurableObject {
     }
     // Empty and interrupted pending owners must not create schema in a
     // constructor, which has no registry reservation authority.
-    const hasSchema = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version'").toArray().length;
+    const hasSchema = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version' COLLATE NOCASE").toArray().length;
     if (!hasSchema || control.has("mapi_pending_owner")) return;
     // A legacy owner has no route authority during construction. Check its
     // existing schema without applying missing setup or a target migration.
@@ -169,7 +169,7 @@ export class NextgenApplication extends DurableObject {
     this.#assertRecoveryObjectEpoch();
     const sql = this.ctx.storage.sql;
     const control = ownerControlTables(sql);
-    const schema = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version'").toArray().length;
+    const schema = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version' COLLATE NOCASE").toArray().length;
     if ((!schema || control.has("mapi_pending_owner")) && !this.#pendingAuthority) throw new Error("Owner provisioning is not active");
     if (this.#pendingAuthority) this.#assertPendingAuthority();
     if (control.has("mapi_destination_reservation") && this.ctx.storage.sql.exec("SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1").toArray().length) {
@@ -191,7 +191,7 @@ export class NextgenApplication extends DurableObject {
   #assertRecoveryObjectEpoch() {
     if (this.#recoveryObjectEpoch === null) return;
     const sql = this.ctx.storage.sql;
-    if (!sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_recovery_epoch'").toArray().length) throw new Error("Project recovery is not reconciled");
+    if (!sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_recovery_epoch' COLLATE NOCASE").toArray().length) throw new Error("Project recovery is not reconciled");
     const epochs = sql.exec("SELECT epoch FROM mapi_recovery_epoch LIMIT 2").toArray();
     if (epochs.length !== 1 || epochs[0].epoch !== this.#recoveryObjectEpoch) throw new Error("Project recovery is not reconciled");
   }
@@ -208,7 +208,7 @@ export class NextgenApplication extends DurableObject {
         move.source_object !== current.object_name || move.generation !== current.generation) throw new Error("Destination is not reserved by registry");
     if (this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Destination object identity mismatch");
     const result = reserveMoveDestination(this.ctx.storage, route, moveId);
-    if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version'").toArray().length) this.#initializeSchema(true);
+    if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version' COLLATE NOCASE").toArray().length) this.#initializeSchema(true);
     return result;
   }
 
@@ -221,7 +221,7 @@ export class NextgenApplication extends DurableObject {
     const projects = sql.exec("SELECT project_id FROM mapi_project LIMIT 2").toArray();
     const origins = sql.exec("SELECT origin FROM mapi_project_origin LIMIT 2").toArray();
     if (projects.length !== 1 || projects[0].project_id !== projectId || origins.length !== 1 || origins[0].origin !== route.origin) throw new Error("Source identity mismatch");
-    if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length) {
+    if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length) {
       const existing = sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
       if (existing?.state === "frozen" && existing.project_id === projectId && existing.origin === route.origin && existing.object_name === route.object_name && existing.generation === route.generation && existing.move_id === moveId) { this.#fenceArmed = true; return; }
     }
@@ -244,7 +244,7 @@ export class NextgenApplication extends DurableObject {
     this.#assertRecoveryObjectEpoch();
     const sql = this.ctx.storage.sql;
     if (!sourceIdentityMatches(this.ctx.storage, 'owner', route.projectId) || !sourceIdentityMatches(this.ctx.storage, 'origin', route.origin)) throw new Error("Source identity mismatch");
-    const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
+    const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length;
     const existing = hasFence ? sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0] : null;
     if (!(existing?.state === "frozen" && existing.project_id === route.projectId && existing.origin === route.origin && existing.object_name === route.objectName && existing.generation === route.generation && existing.move_id === moveId)) {
       validateRelocationSourceSchema(this.ctx.storage, route);
@@ -285,7 +285,7 @@ export class NextgenApplication extends DurableObject {
     if (projects.length !== 1 || projects[0].project_id !== projectId || origins.length !== 1 || origins[0].origin !== recovery.origin) throw new Error("Recovery source identity mismatch");
     const epochs = sql.exec('SELECT epoch FROM mapi_recovery_epoch').toArray();
     if (epochs.length !== 1 || epochs[0].epoch === recovery.epoch) throw new Error('Recovery epoch is not fresh');
-    if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length) {
+    if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length) {
       const fence = sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
       if (fence?.state === "frozen" && fence.project_id === projectId && fence.origin === recovery.origin && fence.object_name === recovery.object_name && fence.generation === recovery.generation && fence.move_id === `recovery:${recoveryId}`) { this.#fenceArmed = true; return; }
     }
@@ -370,7 +370,7 @@ export class NextgenApplication extends DurableObject {
       if (clock.length !== 1 || clock[0].id !== 1 || clock[0].kind !== 'integer' || !validRecoveryStamp(clock[0].stamp)) throw new Error('Restored revision clock is invalid');
       const existing = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_recovery_scope_stage'").toArray().length;
       if (!existing) {
-        const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
+        const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length;
         if (hasFence) {
           const fence = sql.exec('SELECT * FROM mapi_owner_fence WHERE singleton = 1').toArray()[0];
           if (!fence || fence.project_id !== projectId || fence.origin !== recovery.origin || fence.object_name !== recovery.object_name || fence.generation !== recovery.generation || !['active', 'frozen'].includes(fence.state) || (fence.state === 'frozen' && fence.move_id !== `recovery:${recoveryId}`)) throw new Error('Restored owner fence mismatch');
@@ -412,7 +412,7 @@ export class NextgenApplication extends DurableObject {
     if (this.env.MAPI_RELOCATION_ENABLED !== "1" || !this.env.MAPI_RELOCATION_CONTROL_TOKEN ||
         !sameKey(secret, this.env.MAPI_RELOCATION_CONTROL_TOKEN)) throw new Error("Relocation control denied");
     const sql = this.ctx.storage.sql;
-    const names = sql.exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('mapi_owner_fence', 'mapi_relocation_project', 'mapi_destination_reservation')").toArray().map(row => row.name);
+    const names = sql.exec("SELECT lower(name) AS name FROM sqlite_schema WHERE type = 'table' AND name COLLATE NOCASE IN ('mapi_owner_fence', 'mapi_relocation_project', 'mapi_destination_reservation')").toArray().map(row => row.name);
     const source = names.includes("mapi_owner_fence") ? sql.exec("SELECT project_id, object_name, generation, state, move_id, digest FROM mapi_owner_fence WHERE singleton = 1 AND project_id = ?", projectId).toArray()[0] : null;
     const destination = names.includes("mapi_relocation_project") ? sql.exec("SELECT project_id, object_name, generation, state, move_id, digest FROM mapi_relocation_project WHERE project_id = ?", projectId).toArray()[0] : null;
     if (source && destination) throw new Error("Conflicting owner state");
@@ -549,7 +549,7 @@ export class NextgenApplication extends DurableObject {
     this.#assertRecoveryObjectEpoch();
     this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
-      const exists = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
+      const exists = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length;
       if (exists) {
         const fence = sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
         if (!fence || fence.state !== "active" || fence.project_id !== projectId || fence.origin !== route.origin || fence.object_name !== route.object_name || fence.generation !== route.generation || fence.move_id !== moveId || fence.digest !== move.digest) throw new Error("Conflicting destination activation");
@@ -597,6 +597,16 @@ export class NextgenApplication extends DurableObject {
     finally { this.#recoveryAuthority = undefined; }
   }
 
+  #assertSQLAuthority() {
+    if (this.#recoveryAuthority) {
+      this.#assertRecoveryInvalidation();
+      return;
+    }
+    this.#assertRecoveryObjectEpoch();
+    if (this.#pendingAuthority) this.#assertPendingAuthority();
+    else if (this.#fenceArmed) assertOwnerFence(this.ctx.storage, this.#authority);
+  }
+
   #withRoute(route, callback) {
     this.#detectFence();
     if (!this.#fenceArmed) return callback();
@@ -624,30 +634,28 @@ export class NextgenApplication extends DurableObject {
               this.#failAudit--;
               if (this.#failAudit === 0) throw new Error("Injected mutation audit write failure");
             }
-            const run = () => execute(this.ctx.storage, query, resultSink);
-            if (this.#recoveryAuthority && this.#insideTransaction) { this.#assertRecoveryInvalidation(); return run(); }
-            if (this.#recoveryAuthority) return this.ctx.storage.transactionSync(() => { this.#assertRecoveryInvalidation(); return run(); });
-            if (this.#pendingAuthority && this.#insideTransaction) { this.#assertPendingAuthority(); return run(); }
-            if (this.#pendingAuthority) return this.ctx.storage.transactionSync(() => { this.#assertPendingAuthority(); return run(); });
-            if (!this.#fenceArmed && this.#recoveryObjectEpoch === null) return run();
-            if (!this.#fenceArmed) return this.ctx.storage.transactionSync(() => { this.#assertRecoveryObjectEpoch(); return run(); });
-            if (this.#insideTransaction) {
-              this.#assertRecoveryObjectEpoch();
-              assertOwnerFence(this.ctx.storage, this.#authority);
-              return run();
-            }
-            return withOwnerFence(this.ctx.storage, this.#authority, () => { this.#assertRecoveryObjectEpoch(); return run(); });
+            const run = () => {
+              this.#assertSQLAuthority();
+              return execute(this.ctx.storage, query, resultSink);
+            };
+            if (this.#insideTransaction) return run();
+            if (!this.#recoveryAuthority && !this.#pendingAuthority && !this.#fenceArmed && this.#recoveryObjectEpoch === null) return run();
+            return this.ctx.storage.transactionSync(() => {
+              const result = run();
+              this.#assertSQLAuthority();
+              return result;
+            });
           }, (query, error) => {
             if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
           }),
           transaction: () => {
             try {
               this.ctx.storage.transactionSync(() => {
-                if (this.#recoveryAuthority) this.#assertRecoveryInvalidation();
-                else { this.#assertRecoveryObjectEpoch(); if (this.#pendingAuthority) this.#assertPendingAuthority(); else if (this.#fenceArmed) assertOwnerFence(this.ctx.storage, this.#authority); }
+                this.#assertSQLAuthority();
                 this.#insideTransaction = true;
                 try {
                   if (this.#reactor.mapi_transaction_body() !== 0) throw rejected;
+                  this.#assertSQLAuthority();
                 } finally { this.#insideTransaction = false; }
               });
               return 0;
@@ -846,7 +854,7 @@ export class NextgenApplication extends DurableObject {
   }
 
   projectId() {
-    if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_project'").toArray().length) return "";
+    if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_project' COLLATE NOCASE").toArray().length) return "";
     return this.ctx.storage.sql.exec("SELECT project_id FROM mapi_project").toArray()[0]?.project_id ?? "";
   }
 
@@ -854,7 +862,7 @@ export class NextgenApplication extends DurableObject {
     // A Go commit can precede the durable owner-fence transition. Until that
     // transition completes, ingress must retry provision rather than attempt
     // registry activation using the partially provisioned identity.
-    if (this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner'").toArray().length) return "";
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner' COLLATE NOCASE").toArray().length) return "";
     return this.projectId();
   }
 
@@ -870,7 +878,7 @@ export class NextgenApplication extends DurableObject {
     if (current.state === "active") return this.#withRoute(route, () => this.#provision(name, origin));
     if (route.projectId !== null) throw new Error("Invalid pending route");
     // A completed provisioning call may be retried after a lost response.
-    const hasFence = this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
+    const hasFence = this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length;
     if (hasFence) {
       const fence = this.ctx.storage.sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
       if (!fence || !["pending", "active"].includes(fence.state) || fence.origin !== origin || fence.object_name !== route.objectName || fence.generation !== route.generation || fence.project_id !== this.projectId()) throw new Error("Pending owner already belongs to a different route");
@@ -878,11 +886,11 @@ export class NextgenApplication extends DurableObject {
     }
     this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
-      const relocation = sql.exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('mapi_destination_reservation', 'mapi_relocation_project')").toArray().map(row => row.name);
+      const relocation = sql.exec("SELECT lower(name) AS name FROM sqlite_schema WHERE type = 'table' AND name COLLATE NOCASE IN ('mapi_destination_reservation', 'mapi_relocation_project')").toArray().map(row => row.name);
       if ((relocation.includes("mapi_destination_reservation") && sql.exec("SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1").toArray().length) ||
           (relocation.includes("mapi_relocation_project") && sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing', 'staged')").toArray().length)) throw new Error("Owner is reserved for relocation");
-      const schema = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version'").toArray().length;
-      const pending = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner'").toArray().length;
+      const schema = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version' COLLATE NOCASE").toArray().length;
+      const pending = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner' COLLATE NOCASE").toArray().length;
       if (schema && !pending) throw new Error("Existing owner requires separate adoption");
       sql.exec("CREATE TABLE IF NOT EXISTS mapi_pending_owner (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), origin TEXT NOT NULL, object_name TEXT NOT NULL, generation INTEGER NOT NULL)");
       const existing = sql.exec("SELECT * FROM mapi_pending_owner WHERE singleton = 1").toArray()[0];
@@ -908,10 +916,10 @@ export class NextgenApplication extends DurableObject {
   provisioningAttestation(origin, objectName, generation) {
     if (this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(objectName).toString()) throw new Error("Provisioning object mismatch");
     const sql = this.ctx.storage.sql;
-    if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner'").toArray().length) throw new Error("Provisioning is incomplete");
+    if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner' COLLATE NOCASE").toArray().length) throw new Error("Provisioning is incomplete");
     const projectId = this.projectId();
     if (!projectId || this.projectOrigin() !== origin) throw new Error("Provisioning identity mismatch");
-    const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
+    const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length;
     if (hasFence) {
       const fence = sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
       if (!fence || !["pending", "active"].includes(fence.state) || fence.project_id !== projectId || fence.origin !== origin || fence.object_name !== objectName || fence.generation !== generation) throw new Error("Provisioning fence mismatch");
@@ -925,7 +933,7 @@ export class NextgenApplication extends DurableObject {
     if (!current || current.state !== "active" || current.project_id !== route.projectId || current.origin !== route.origin || current.object_name !== route.objectName || current.generation !== route.generation) throw new Error("Provisioning route is not active");
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
-      const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
+      const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length;
       if (!hasFence) {
         if (route.objectName !== "application" || route.generation !== 1 || this.projectId() !== route.projectId || this.projectOrigin() !== route.origin) throw new Error("Existing owner requires adoption");
         return;
@@ -940,7 +948,7 @@ export class NextgenApplication extends DurableObject {
   #schemaMigrationSource(route, epoch) {
     if (!route || this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString() || typeof epoch !== 'string' || !epoch || (this.#recoveryObjectEpoch ?? '0') !== epoch || (this.env.MAPI_RECOVERY_EPOCH ?? '0') !== epoch) throw new Error('Schema migration epoch or object mismatch');
     const sql = this.ctx.storage.sql;
-    const metadata = sql.exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('mapi_pending_owner', 'mapi_destination_reservation', 'mapi_relocation_project', 'mapi_owner_fence')").toArray().map(row => row.name);
+    const metadata = sql.exec("SELECT lower(name) AS name FROM sqlite_schema WHERE type = 'table' AND name COLLATE NOCASE IN ('mapi_pending_owner', 'mapi_destination_reservation', 'mapi_relocation_project', 'mapi_owner_fence')").toArray().map(row => row.name);
     if (metadata.includes('mapi_pending_owner') || (metadata.includes('mapi_destination_reservation') && sql.exec('SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1').toArray().length) || (metadata.includes('mapi_relocation_project') && sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing', 'staged')").toArray().length)) throw new Error('Schema migration owner is not active');
     const projects = sql.exec('SELECT project_id FROM mapi_project').toArray(), origins = sql.exec('SELECT origin FROM mapi_project_origin').toArray(), epochs = sql.exec('SELECT epoch FROM mapi_recovery_epoch').toArray(), versions = sql.exec('SELECT version FROM mapi_schema_version').toArray();
     if (projects.length !== 1 || projects[0].project_id !== route.projectId || origins.length !== 1 || origins[0].origin !== route.origin || epochs.length !== 1 || epochs[0].epoch !== epoch || versions.length !== 1 || ![1, 2].includes(versions[0].version)) throw new Error('Schema migration source mismatch');
@@ -957,7 +965,7 @@ export class NextgenApplication extends DurableObject {
       const source = this.#schemaMigrationSource(route, epoch);
       if (source.version !== 1 || (source.hasFence && (!source.fence || source.fence.state !== 'active'))) throw new Error('Schema migration source is not ready');
       if (source.hasFence) assertOwnerFence(this.ctx.storage, route);
-      if (this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_history'").toArray().length) throw new Error('Schema migration history already exists');
+      if (this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_history' COLLATE NOCASE").toArray().length) throw new Error('Schema migration history already exists');
       return { ...route, epoch, version: 1, objectId: this.ctx.id.toString() };
     });
   }
@@ -979,7 +987,7 @@ export class NextgenApplication extends DurableObject {
       }
       if (source.hasFence) assertOwnerFence(this.ctx.storage, route);
       else { createOwnerFenceTable(this.ctx.storage); sql.exec("INSERT INTO mapi_owner_fence VALUES (1, ?, ?, ?, ?, 'active', NULL, NULL)", projectId, route.origin, route.objectName, route.generation); }
-      if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_history'").toArray().length) throw new Error('Schema migration history already exists');
+      if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_history' COLLATE NOCASE").toArray().length) throw new Error('Schema migration history already exists');
       sql.exec("UPDATE mapi_owner_fence SET state = 'frozen', move_id = ?, digest = NULL WHERE singleton = 1", `schema:${migrationId}`);
       sql.exec('CREATE TABLE mapi_schema_history (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)');
       sql.exec('INSERT INTO mapi_schema_history VALUES (2, ?)', Date.now());
@@ -1013,7 +1021,7 @@ export class NextgenApplication extends DurableObject {
     this.#assertRecoveryObjectEpoch();
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
-      const metadata = sql.exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('mapi_pending_owner', 'mapi_destination_reservation', 'mapi_relocation_project', 'mapi_owner_fence')").toArray().map(row => row.name);
+      const metadata = sql.exec("SELECT lower(name) AS name FROM sqlite_schema WHERE type = 'table' AND name COLLATE NOCASE IN ('mapi_pending_owner', 'mapi_destination_reservation', 'mapi_relocation_project', 'mapi_owner_fence')").toArray().map(row => row.name);
       if (metadata.includes("mapi_pending_owner") || (metadata.includes("mapi_destination_reservation") && sql.exec("SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1").toArray().length) || (metadata.includes("mapi_relocation_project") && sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing', 'staged')").toArray().length)) throw new Error("Recovery owner is not active");
       const projects = sql.exec("SELECT project_id FROM mapi_project").toArray(), origins = sql.exec("SELECT origin FROM mapi_project_origin").toArray();
       if (projects.length !== 1 || projects[0].project_id !== route.projectId || origins.length !== 1 || origins[0].origin !== route.origin) throw new Error("Recovery project identity mismatch");
@@ -1035,7 +1043,7 @@ export class NextgenApplication extends DurableObject {
     const sql = this.ctx.storage.sql;
     const projects = sql.exec("SELECT project_id FROM mapi_project").toArray(), origins = sql.exec("SELECT origin FROM mapi_project_origin").toArray(), epochs = sql.exec("SELECT epoch FROM mapi_recovery_epoch").toArray();
     if (projects.length !== 1 || projects[0].project_id !== route.projectId || origins.length !== 1 || origins[0].origin !== route.origin || epochs.length !== 1 || epochs[0].epoch === epoch) throw new Error("Recovery source identity mismatch");
-    const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
+    const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence' COLLATE NOCASE").toArray().length;
     const fence = hasFence ? sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0] : null;
     if (!(fence?.state === "frozen" && fence.project_id === route.projectId && fence.origin === route.origin && fence.object_name === route.objectName && fence.generation === route.generation && fence.move_id === `recovery:${recoveryId}`)) {
       initializeOwnerFence(this.ctx.storage, route);
@@ -1152,9 +1160,10 @@ export class NextgenApplication extends DurableObject {
     if (!["password", "oauth"].includes(scope)) throw new Error("Invalid throttle scope");
     this.#detectFence();
     const allowed = this.ctx.storage.transactionSync(() => {
-      this.#assertRecoveryObjectEpoch();
-      if (this.#fenceArmed) assertOwnerFence(this.ctx.storage, this.#authority);
-      return admitLogin(this.ctx.storage.sql, ip, scope, Date.now());
+      this.#assertSQLAuthority();
+      const allowed = admitLogin(this.ctx.storage.sql, ip, scope, Date.now());
+      this.#assertSQLAuthority();
+      return allowed;
     });
     return allowed;
   }
@@ -1197,8 +1206,8 @@ export class NextgenApplication extends DurableObject {
 
   status(verifyRuntime = false, route) {
     const sql = this.ctx.storage.sql;
-    const schema = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version'").toArray().length;
-    const pending = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner'").toArray().length;
+    const schema = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version' COLLATE NOCASE").toArray().length;
+    const pending = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner' COLLATE NOCASE").toArray().length;
     if (!schema || pending) return { schemaVersion: 0, ready: false, configurationReady: false, fenceReady: false, wasmMemoryBytes: 0, wasmHighWaterBytes: 0, wasmHighWaterPages: 0, bootId: this.#bootId, reactorInitializations: 0, maintenance: this.env.MAPI_MAINTENANCE === "1", recoveryReady: this.#recoveryObjectEpoch === null && (this.env.MAPI_RECOVERY_EPOCH ?? "0") === "0" };
     return this.#withRoute(route, () => this.#status(verifyRuntime));
   }

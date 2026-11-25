@@ -147,6 +147,7 @@ export function withOwnerFence(storage, route, mutation) {
     if (result !== null && (typeof result === "object" || typeof result === "function") && typeof result.then === "function") {
       throw new Error("Owner fence mutation must be synchronous");
     }
+    assertOwnerFence(storage, route);
     return result;
   });
 }
