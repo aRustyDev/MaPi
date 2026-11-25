@@ -130,6 +130,10 @@ export class ProjectRegistry extends DurableObject {
         source_object TEXT NOT NULL, destination_object TEXT NOT NULL UNIQUE,
         generation INTEGER NOT NULL
       )`);
+      ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_move_text_preflight (
+        project_id TEXT PRIMARY KEY, move_id TEXT NOT NULL, marker TEXT NOT NULL,
+        cursor TEXT NOT NULL, done INTEGER NOT NULL CHECK (done IN (0, 1)), revision INTEGER NOT NULL
+      )`);
       ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS mapi_project_recoveries (
         project_id TEXT PRIMARY KEY,
         recovery_id TEXT NOT NULL UNIQUE,
@@ -241,6 +245,24 @@ export class ProjectRegistry extends DurableObject {
     const intent = sql.exec("SELECT * FROM mapi_move_intents WHERE project_id = ?", projectId).toArray()[0] ?? null;
     if (move?.phase === "moving" && (!route || !intent || intent.project_id !== projectId || intent.origin !== route.origin || intent.move_id !== move.move_id || intent.source_object !== move.source_object || intent.destination_object !== move.destination_object || intent.generation !== move.generation || route.object_name !== move.source_object || route.generation !== move.generation)) throw new Error("Legacy or inconsistent moving route requires manual reconciliation");
     return { route: route ?? null, move, intent };
+  }
+
+  relocationTextPreflightStatus(secret, projectId, moveId) {
+    const { route, intent } = this.relocationStatus(secret, projectId);
+    if (!route || !intent || intent.move_id !== moveId || intent.project_id !== projectId ||
+        intent.origin !== route.origin || intent.source_object !== route.object_name ||
+        intent.generation !== route.generation) throw new Error('Stale TEXT preflight');
+    const row = this.ctx.storage.sql.exec('SELECT * FROM mapi_move_text_preflight WHERE project_id = ?', projectId).toArray()[0];
+    if (!row) return null;
+    if (row.move_id !== moveId || typeof row.marker !== 'string' || row.marker.length > 128 ||
+        typeof row.cursor !== 'string' || row.cursor.length > 8192 || ![0, 1].includes(row.done) ||
+        !Number.isSafeInteger(row.revision) || row.revision < 1) throw new Error('Invalid TEXT preflight checkpoint');
+    if (row.marker === '' && row.cursor === 'null' && row.done === 0) return null;
+    if (!row.marker) throw new Error('Invalid TEXT preflight checkpoint');
+    let cursor;
+    try { cursor = JSON.parse(row.cursor); } catch { throw new Error('Invalid TEXT preflight checkpoint'); }
+    if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor) || cursor.done !== Boolean(row.done)) throw new Error('Invalid TEXT preflight checkpoint');
+    return { marker: row.marker, cursor, done: Boolean(row.done) };
   }
 
   recoveryStatus(secret, projectId) {
@@ -434,10 +456,49 @@ export class ProjectRegistry extends DurableObject {
     });
     const sourceRoute = { projectId, origin, objectName: route.object_name, generation: route.generation };
     const namespace = this.env.NEXTGEN_APPLICATION;
-    const proof = await namespace.getByName(route.object_name).preFreezeRelocation(secret, sourceRoute, moveId);
+    const saved = this.relocationTextPreflightStatus(secret, projectId, moveId);
+    const savedRow = this.ctx.storage.sql.exec('SELECT revision FROM mapi_move_text_preflight WHERE project_id = ?', projectId).toArray()[0] ?? null;
+    const preflighting = { ...intent, phase: 'preflighting' };
+    const stillCurrent = () => {
+      const status = this.relocationStatus(secret, projectId);
+      const row = this.ctx.storage.sql.exec('SELECT revision FROM mapi_move_text_preflight WHERE project_id = ?', projectId).toArray()[0] ?? null;
+      return status.move?.phase !== 'moving' && status.route?.state === 'active' && status.route.project_id === projectId && status.route.origin === origin &&
+        status.route.object_name === route.object_name && status.route.generation === route.generation &&
+        status.intent?.move_id === moveId && status.intent.destination_object === intent.destination_object &&
+        (row?.revision ?? null) === (savedRow?.revision ?? null);
+    };
+    if (!saved?.done) {
+      const page = await namespace.getByName(route.object_name).advanceRelocationTextPreflight(secret, sourceRoute, moveId, saved);
+      if (!page || typeof page.marker !== 'string' || !page.marker || page.marker.length > 128 ||
+          !page.checkpoint || typeof page.checkpoint !== 'object' || Array.isArray(page.checkpoint) ||
+          typeof page.done !== 'boolean' || page.checkpoint.done !== page.done) throw new Error('Invalid TEXT preflight page');
+      const cursor = JSON.stringify(page.checkpoint);
+      if (cursor.length > 8192) throw new Error('TEXT preflight checkpoint exceeds bounds');
+      this.ctx.storage.transactionSync(() => {
+        if (!stillCurrent()) return;
+        const next = (savedRow?.revision ?? 0) + 1;
+        if (!Number.isSafeInteger(next)) throw new Error('TEXT preflight revision exhausted');
+        this.ctx.storage.sql.exec(`INSERT INTO mapi_move_text_preflight VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(project_id) DO UPDATE SET move_id=excluded.move_id, marker=excluded.marker,
+          cursor=excluded.cursor, done=excluded.done, revision=excluded.revision`,
+          projectId, moveId, page.marker, cursor, page.done ? 1 : 0, next);
+      });
+      return preflighting;
+    }
+    const proof = await namespace.getByName(route.object_name).preFreezeRelocation(secret, sourceRoute, moveId, saved.marker);
+    if (proof?.state === 'stale') {
+      this.ctx.storage.transactionSync(() => {
+        if (!stillCurrent()) return;
+        const next = savedRow.revision + 1;
+        if (!Number.isSafeInteger(next)) throw new Error('TEXT preflight revision exhausted');
+        this.ctx.storage.sql.exec("UPDATE mapi_move_text_preflight SET marker = '', cursor = 'null', done = 0, revision = ? WHERE project_id = ? AND move_id = ?", next, projectId, moveId);
+      });
+      return preflighting;
+    }
     if (proof?.state !== "frozen" || proof.projectId !== projectId || proof.origin !== origin || proof.objectName !== route.object_name || proof.generation !== route.generation || proof.moveId !== moveId || proof.objectId !== namespace.idFromName(route.object_name).toString()) throw new Error("Source freeze attestation mismatch");
     const latest = this.relocationStatus(secret, projectId);
     if (latest.move?.phase === "moving" && latest.move.move_id === moveId && latest.move.source_object === route.object_name && latest.move.generation === route.generation && latest.move.destination_object === intent.destination_object) return latest.move;
+    if (!stillCurrent()) throw new Error('TEXT preflight changed during source freeze');
     const current = this.resolve(origin);
     if (!current || current.state !== "active" || current.project_id !== projectId || current.object_name !== route.object_name || current.generation !== route.generation) throw new Error("Project route changed during source freeze");
     if (!latest.intent || latest.intent.move_id !== moveId || latest.intent.destination_object !== intent.destination_object) throw new Error("Relocation intent changed during source freeze");
@@ -590,6 +651,7 @@ export class ProjectRegistry extends DurableObject {
       this.ctx.storage.sql.exec("INSERT OR IGNORE INTO mapi_move_history VALUES (?, ?, ?, ?, ?, ?)", moveId, projectId, move.source_object, move.destination_object, move.generation, move.digest);
       this.ctx.storage.sql.exec("INSERT OR IGNORE INTO mapi_move_completion VALUES (?, ?)", projectId, moveId);
       this.ctx.storage.sql.exec("DELETE FROM mapi_move_intents WHERE project_id = ? AND move_id = ?", projectId, moveId);
+      this.ctx.storage.sql.exec("DELETE FROM mapi_move_text_preflight WHERE project_id = ? AND move_id = ?", projectId, moveId);
       return { done: true };
     });
   }

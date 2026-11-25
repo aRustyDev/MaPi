@@ -8,6 +8,7 @@ import { initializeOwnerFence } from "../worker/owner-fence.js";
 import { projectFenceStatus } from "../worker/relocation.js";
 import { execute } from "../worker/sql.js";
 import { inspectRelocationDestination } from "../worker/relocation-manifest.js";
+import { assertNoTextPreflightMarkerAccess } from "../worker/relocation-text-marker.js";
 const quote = (s) => `"${s.replaceAll('"', '""')}"`;
 const check = (condition, message) => { if (!condition) throw Error(message); };
 const rejects = async (fn) => { try { await fn(); } catch { return; } throw Error("Expected rejection"); };
@@ -144,6 +145,16 @@ export default {
     const url = new URL(request.url);
     if (env.MAPI_LOCAL_TEST !== "1" || url.protocol !== "http:" || url.hostname !== "127.0.0.1") return new Response(null, { status: 404 });
     try {
+      for (const statement of [
+        "CREATE VIEW 'mapi_relocation_text_preflight_marker' AS SELECT '0123456789abcdef0123456789abcdef' AS token",
+        "UPDATE users SET name='synthetic'; CREATE VIEW 'mapi_relocation_text_preflight_marker' AS SELECT '0123456789abcdef0123456789abcdef' AS token",
+        'DROP VIEW "MAPI_RELOCATION_TEXT_PREFLIGHT_MARKER"',
+        "DELETE FROM 'mapi_relocation_text_preflight_seal'",
+      ]) {
+        let denied = false;
+        try { assertNoTextPreflightMarkerAccess(statement); } catch { denied = true; }
+        check(denied, 'Reserved preflight object was accessible through SQL');
+      }
       const page = (count, cursor, done) => ({ guardVersion: RELOCATION_RECONCILIATION_VERSION, count, cursor, done, digest: 'a'.repeat(64) });
       validateReconciliationPage(page(0, null, true), null);
       validateReconciliationPage(page(0, [{ integer: '-9223372036854775808' }], true), [{ integer: '-9223372036854775808' }]);
@@ -180,7 +191,12 @@ export default {
       const sourceCounts = await source.testCounts(), tables = await source.manifest();
       const restoreAttempt = source.holdRestoreForTest("old-bookmark").then(() => false, error => String(error).includes("Coordinated recovery is required"));
       while (!await source.restoreHeldForTest()) await new Promise(resolve => setTimeout(resolve, 0));
-      const move = await registry.beginRelocation("move-secret", origin, projectId, "move-1");
+      let move;
+      for (let page = 0; page < 4096; page++) {
+        move = await registry.beginRelocation("move-secret", origin, projectId, "move-1");
+        if (move.phase !== "preflighting") break;
+      }
+      check(move?.phase === "moving", "Bounded preflight did not finish");
       const targetName = move.destination_object;
       target = env.OWNER.getByName(targetName);
       reservedRoute = { ...route, objectName: targetName, generation: 2 };

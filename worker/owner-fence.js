@@ -1,3 +1,5 @@
+import { invalidateTextPreflightMarker } from './relocation-text-marker.js';
+
 // These helpers are used by the migration coordinator and owner mutation
 // paths. The caller must obtain route authority from the registry.
 // These identifiers cross a JavaScript/SQLite boundary and must have a stable
@@ -100,9 +102,10 @@ function requireNoFenceTriggers(storage, message) {
   }
 }
 
-export function initializeOwnerFence(storage, route) {
+export function initializeOwnerFence(storage, route, invalidatePreflight = false) {
   validateRoute(route);
   return storage.transactionSync(() => {
+    if (invalidatePreflight) invalidateTextPreflightMarker(storage);
     createOwnerFenceTable(storage);
     requireNoFenceTriggers(storage, "Owner fence initialization did not take effect");
     const current = storage.sql.exec("SELECT project_id, origin, object_name, generation, state FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
@@ -151,7 +154,7 @@ export function withOwnerFence(storage, route, mutation) {
   });
 }
 
-export function freezeOwnerFence(storage, route, moveId) {
+export function freezeOwnerFence(storage, route, moveId, invalidatePreflight = false) {
   validateRoute(route);
   if (!validFenceText(moveId)) throw new Error("Invalid move ID");
   return storage.transactionSync(() => {
@@ -160,6 +163,7 @@ export function freezeOwnerFence(storage, route, moveId) {
     if (current?.state === "frozen" && current.project_id === route.projectId && current.origin === route.origin &&
         current.object_name === route.objectName && current.generation === route.generation && current.move_id === moveId) return;
     assertOwnerFence(storage, route);
+    if (invalidatePreflight) invalidateTextPreflightMarker(storage);
     // A move needs a distinct, exactly representable generation for the
     // destination. Do not freeze an active source that cannot have one.
     // Preserve idempotent retries for a fence already frozen by older code.

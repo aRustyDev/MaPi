@@ -8,6 +8,7 @@ import { sourceIdentityMatches } from './relocation-source-identity.js';
 import { assertRelocationValuesRepresentable, RELOCATION_RECONCILIATION_VERSION } from './relocation-values.js';
 import { readOwnerRecoveryScopes, validRecoveryStamp } from './recovery-scopes.js';
 import { readRelocationSequences } from './relocation-sequences.js';
+import { readTextPreflightMarker } from './relocation-text-marker.js';
 
 const SHARED_TABLES = new Set([
   'authz_bundle_members', 'authz_bundles', 'authz_catalogs',
@@ -33,6 +34,7 @@ const CONTROL_TABLES = new Set([
   'mapi_relocation_prepared', 'mapi_chunk_export', 'mapi_chunk_export_data',
   'mapi_chunk_import', 'mapi_chunk_import_data', 'mapi_chunk_import_fragment',
   'mapi_chunk_import_fragment_data',
+  'mapi_relocation_text_preflight_seal',
 ]);
 const ISSUER_SINGLETONS = new Set(['mapi_oauth_schema', 'mapi_private_par_schema', 'mapi_fapi_prompts']);
 const quote = name => '"' + name.replaceAll('"', '""') + '"';
@@ -57,7 +59,7 @@ function schemaObjects(storage, expected) {
   // Bound data returned to JS even when a corrupt or unreviewed schema has
   // many objects or unusually large definitions. The count accommodates all
   // reviewed object names, including optional issuer and control objects.
-  const maxObjects = expected.length + issuerSchema.length + RUNTIME_TABLES.size + CONTROL_TABLES.size;
+  const maxObjects = expected.length + issuerSchema.length + RUNTIME_TABLES.size + CONTROL_TABLES.size + 1;
   const encoder = new TextEncoder();
   const maxDefinitionBytes = Math.max(16 * 1024, ...expected.map(item => encoder.encode(item.sql).length), ...issuerSchema.map(item => encoder.encode(item.sql).length), ...Object.values(RUNTIME_SCHEMA).map(sql => encoder.encode(sql).length));
   const maxIdentifierBytes = 1024;
@@ -83,6 +85,10 @@ function schemaInventory(storage) {
   }
   for (const item of actual) {
     if (expectedNames.has(item.name)) continue;
+    if (item.name === 'mapi_relocation_text_preflight_marker') {
+      if (item.type !== 'view' || readTextPreflightMarker(storage) === null) throw Error('Invalid TEXT preflight marker');
+      continue;
+    }
     const issuer = issuerObjects.get(item.name);
     if (issuer) {
       if (issuer.type !== item.type || issuer.tbl_name !== item.tbl_name || issuer.sql !== item.sql) throw Error(`Issuer schema differs: ${item.name}`);
@@ -106,7 +112,7 @@ function schemaInventory(storage) {
 }
 
 // Advisory schema check before the fence; full inspection repeats after freezing.
-export function validateRelocationSourceSchema(storage, route) {
+export function validateRelocationSourceSchema(storage, route, { textGuard = false } = {}) {
   const schema = schemaInventory(storage);
   const metadata = readSourceSchemaMetadata(storage, schema);
   validateSourceRecoveryEpoch(storage);
@@ -115,7 +121,8 @@ export function validateRelocationSourceSchema(storage, route) {
   assertSourceSchemaHistory(metadata);
   if (metadata.clockPresent) validateSourceClockRecord(storage);
   assertSourceClockPair(metadata);
-  validateSourceText(storage, schema);
+  if (!textGuard) validateSourceText(storage, schema);
+  return schema.filter(item => item.type === 'table').map(item => item.name);
 }
 
 function validateSourceText(storage, schema) {
@@ -131,10 +138,16 @@ function validateSourceProjectIdentity(storage, projectId) {
   if (!sourceIdentityMatches(storage, 'owner', projectId)) throw Error('Owner project identity differs');
 }
 
-function validateSourceRecoveryEpoch(storage) {
-  const epochs = storage.sql.exec('SELECT epoch FROM mapi_recovery_epoch LIMIT 2').toArray();
-  if (epochs.length !== 1 || typeof epochs[0].epoch !== 'string' || !epochs[0].epoch) throw Error('Invalid recovery epoch');
-  return epochs[0].epoch;
+export function validateSourceRecoveryEpoch(storage) {
+  const epochs = storage.sql.exec(`SELECT CASE
+    WHEN typeof(epoch) = 'text' AND length(CAST(epoch AS BLOB)) BETWEEN 1 AND 128
+    THEN CAST(epoch AS BLOB) END AS bytes FROM mapi_recovery_epoch LIMIT 2`).toArray();
+  if (epochs.length !== 1 || epochs[0].bytes === null) throw Error('Invalid recovery epoch');
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(epochs[0].bytes);
+  } catch {
+    throw Error('Invalid recovery epoch');
+  }
 }
 
 function validateSourceOrigin(storage, origin) {
@@ -300,15 +313,15 @@ export function prepareRelocationDestination(storage, manifest, route) {
 }
 
 // Call after all writers have adopted the fence and the source has frozen.
-export function inspectRelocationSource(storage, route, moveId) {
+export function inspectRelocationSource(storage, route, moveId, { textGuard = false } = {}) {
   return storage.transactionSync(() => {
     assertSourceFence(storage, route, moveId);
     const schema = schemaInventory(storage);
-    validateSourceText(storage, schema);
+    const recoveryEpoch = validateSourceRecoveryEpoch(storage);
+    if (!textGuard) validateSourceText(storage, schema);
     const pinnedTables = schema.filter(item => item.type === 'table' && !RUNTIME_TABLES.has(item.name)).map(item => item.name);
     validateOwnership(storage, route.projectId, pinnedTables);
     const { schemaVersion, historyPresent, clockPresent, scopesPresent } = readSourceSchemaMetadata(storage, schema);
-    const recoveryEpoch = validateSourceRecoveryEpoch(storage);
     validateSourceOrigin(storage, route.origin);
     assertSourceSchemaHistory({ schemaVersion, historyPresent });
     if (clockPresent) validateSourceClockRecord(storage);

@@ -11,10 +11,12 @@ import { logOverload, logReactorLifecycle, observeWasmHighWater } from "./runtim
 import { classifyFlowSubmission } from "./flow-diagnostics.js";
 import { assertOwnerFence, createOwnerFenceTable, freezeOwnerFence, initializeOwnerFence, reserveMoveDestination, retireOwnerFence, withOwnerFence } from "./owner-fence.js";
 import { sourceIdentityMatches } from "./relocation-source-identity.js";
-import { digestRelocationPage, inspectRelocationDestination, inspectRelocationSource, prepareRelocationDestination, restoreRelocationMetadata, validateRelocationSourceSchema } from "./relocation-manifest.js";
+import { digestRelocationPage, inspectRelocationDestination, inspectRelocationSource, prepareRelocationDestination, restoreRelocationMetadata, validateRelocationSourceSchema, validateSourceRecoveryEpoch } from "./relocation-manifest.js";
 import { beginChunkExport, beginChunkImport, chunkExportStatus, chunkImportStatus, exportChunk, importChunk } from "./relocation-chunks.js";
 import { destinationTransferHistory, sourceTransferHistory, transferHistoryStatus } from "./relocation-history.js";
 import { assertRelocationTextGuard, RELOCATION_TEXT_GUARD_VERSION } from "./relocation-values.js";
+import { assertNoTextPreflightMarkerAccess, invalidateTextPreflightMarker, hasTextPreflightMarker, readTextPreflightMarker, createTextPreflightMarker, writeTextPreflightSeal, assertTextPreflightSeal } from "./relocation-text-marker.js";
+import { advanceRelocationTextPreflight } from "./relocation-text-preflight.js";
 import { assertRecoveryEnvelope, readOwnerRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScope } from "./recovery-scopes.js";
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
 import { authorizeSchemaMigration } from "./schema-migration.js";
@@ -103,8 +105,10 @@ export class NextgenApplication extends DurableObject {
     this.#recoveryObjectEpoch = recoveryObjectEpoch(env, ctx.id.toString());
     if (this.#recoveryObjectEpoch !== null) {
       const epochTable = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_recovery_epoch'").toArray().length;
-      const epochs = epochTable ? ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch LIMIT 2").toArray() : [];
-      if (epochs.length !== 1 || epochs[0].epoch !== this.#recoveryObjectEpoch) return;
+      if (!epochTable) return;
+      let epoch;
+      try { epoch = validateSourceRecoveryEpoch(ctx.storage); } catch { return; }
+      if (epoch !== this.#recoveryObjectEpoch) return;
     }
     if (env.MAPI_RUNTIME_DIAGNOSTICS === "1") console.log(JSON.stringify({ event: "mapi.owner.boot", bootId: this.#bootId, objectId: ctx.id.toString() }));
     const hasReservation = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_destination_reservation'").toArray().length > 0;
@@ -139,6 +143,7 @@ export class NextgenApplication extends DurableObject {
   #initializeSchema(baselineOnly = false) {
     const { ctx, env } = this;
     ctx.storage.transactionSync(() => {
+      invalidateTextPreflightMarker(ctx.storage);
       if (this.#pendingAuthority) this.#assertPendingAuthority();
       ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS mapi_schema_version (version INTEGER PRIMARY KEY)");
       ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS mapi_project (project_id TEXT PRIMARY KEY, schema_url TEXT NOT NULL)");
@@ -189,8 +194,10 @@ export class NextgenApplication extends DurableObject {
     if (this.#recoveryObjectEpoch === null) return;
     const sql = this.ctx.storage.sql;
     if (!sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_recovery_epoch'").toArray().length) throw new Error("Project recovery is not reconciled");
-    const epochs = sql.exec("SELECT epoch FROM mapi_recovery_epoch LIMIT 2").toArray();
-    if (epochs.length !== 1 || epochs[0].epoch !== this.#recoveryObjectEpoch) throw new Error("Project recovery is not reconciled");
+    let epoch;
+    try { epoch = validateSourceRecoveryEpoch(this.ctx.storage); }
+    catch { throw new Error("Project recovery is not reconciled"); }
+    if (epoch !== this.#recoveryObjectEpoch) throw new Error("Project recovery is not reconciled");
   }
 
   async reserveMoveDestination(secret, route, moveId) {
@@ -222,33 +229,68 @@ export class NextgenApplication extends DurableObject {
       const existing = sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
       if (existing?.state === "frozen" && existing.project_id === projectId && existing.origin === route.origin && existing.object_name === route.object_name && existing.generation === route.generation && existing.move_id === moveId) { this.#fenceArmed = true; return; }
     }
-    initializeOwnerFence(this.ctx.storage, { projectId, origin: route.origin, objectName: route.object_name, generation: route.generation });
+    initializeOwnerFence(this.ctx.storage, { projectId, origin: route.origin, objectName: route.object_name, generation: route.generation }, true);
     this.#fenceArmed = true;
   }
 
   // Freeze the source before the registry closes ingress. The registry calls
   // this on its selected owner and then checks the returned durable fence.
   // A lost acknowledgement is safe to retry with the same move ID.
-  async preFreezeRelocation(secret, route, moveId) {
+  async advanceRelocationTextPreflight(secret, route, moveId, checkpoint) {
+    if (this.env.MAPI_RELOCATION_ENABLED !== "1" || this.env.MAPI_FENCE_WRITERS_DRAINED !== "1" || !this.env.MAPI_RELOCATION_CONTROL_TOKEN || !sameKey(secret, this.env.MAPI_RELOCATION_CONTROL_TOKEN)) throw new Error("Fence adoption is not enabled");
+    if (!route || canonicalOrigin(route.origin) !== route.origin || this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Invalid source route");
+    const registry = this.env.PROJECT_REGISTRY.getByName("projects");
+    const status = await registry.relocationStatus(secret, route.projectId);
+    const saved = await registry.relocationTextPreflightStatus(secret, route.projectId, moveId);
+    if (JSON.stringify(saved) !== JSON.stringify(checkpoint) || !status.route || status.route.state !== "active" || status.route.project_id !== route.projectId || status.route.origin !== route.origin || status.route.object_name !== route.objectName || status.route.generation !== route.generation || status.intent?.move_id !== moveId) throw new Error("Stale TEXT preflight");
+    return this.ctx.storage.transactionSync(() => {
+      this.#assertRecoveryObjectEpoch();
+      const sql = this.ctx.storage.sql;
+      const fence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length ? sql.exec("SELECT * FROM mapi_owner_fence LIMIT 2").toArray() : [];
+      if (fence.length > 1 || fence.length === 1 && (fence[0].state !== 'active' || fence[0].project_id !== route.projectId || fence[0].origin !== route.origin || fence[0].object_name !== route.objectName || fence[0].generation !== route.generation)) throw new Error("Source is not active");
+      if (sql.exec("SELECT 1 FROM sqlite_schema WHERE name = 'mapi_relocation_text_preflight_seal' COLLATE NOCASE LIMIT 1").toArray().length) throw new Error("Unexpected TEXT preflight seal");
+      const tables = validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true });
+      let marker = readTextPreflightMarker(this.ctx.storage);
+      let cursor = checkpoint?.cursor ?? null;
+      if (!checkpoint || marker !== checkpoint.marker) {
+        if (marker) invalidateTextPreflightMarker(this.ctx.storage);
+        marker = crypto.randomUUID().replaceAll('-', '');
+        createTextPreflightMarker(this.ctx.storage, marker);
+        cursor = null;
+      }
+      const result = advanceRelocationTextPreflight(this.ctx.storage, tables, cursor);
+      return { marker, checkpoint: result.checkpoint, done: result.done };
+    });
+  }
+
+  async preFreezeRelocation(secret, route, moveId, marker) {
     if (this.env.MAPI_RELOCATION_ENABLED !== "1" || this.env.MAPI_FENCE_WRITERS_DRAINED !== "1" || !this.env.MAPI_RELOCATION_CONTROL_TOKEN || !sameKey(secret, this.env.MAPI_RELOCATION_CONTROL_TOKEN)) throw new Error("Fence adoption is not enabled");
     if (!route || canonicalOrigin(route.origin) !== route.origin || typeof moveId !== "string" || !moveId) throw new Error("Invalid source route");
     const registry = this.env.PROJECT_REGISTRY.getByName("projects");
     const { route: current, move, intent } = await registry.relocationStatus(secret, route.projectId);
+    const checkpoint = await registry.relocationTextPreflightStatus(secret, route.projectId, moveId);
     if (!current || current.state !== "active" || current.project_id !== route.projectId || current.origin !== route.origin || current.object_name !== route.objectName || current.generation !== route.generation ||
         !intent || intent.project_id !== route.projectId || intent.origin !== route.origin || intent.source_object !== route.objectName || intent.generation !== route.generation || intent.move_id !== moveId ||
         (move?.phase === "moving" && (move.move_id !== moveId || move.source_object !== route.objectName || move.generation !== route.generation)) ||
         this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Source route is not active");
-    this.#assertRecoveryObjectEpoch();
-    const sql = this.ctx.storage.sql;
-    if (!sourceIdentityMatches(this.ctx.storage, 'owner', route.projectId) || !sourceIdentityMatches(this.ctx.storage, 'origin', route.origin)) throw new Error("Source identity mismatch");
-    const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
-    const existing = hasFence ? sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0] : null;
-    validateRelocationSourceSchema(this.ctx.storage, route);
-    if (!(existing?.state === "frozen" && existing.project_id === route.projectId && existing.origin === route.origin && existing.object_name === route.objectName && existing.generation === route.generation && existing.move_id === moveId)) {
+    if (!checkpoint?.done || checkpoint.marker !== marker) throw new Error("TEXT preflight is incomplete");
+    const outcome = this.ctx.storage.transactionSync(() => {
+      this.#assertRecoveryObjectEpoch();
+      const sql = this.ctx.storage.sql;
+      const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
+      const existing = hasFence ? sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0] : null;
+      if (existing?.state === "frozen" && existing.project_id === route.projectId && existing.origin === route.origin && existing.object_name === route.objectName && existing.generation === route.generation && existing.move_id === moveId) {
+        if (assertTextPreflightSeal(this.ctx.storage, route, moveId) !== marker) throw new Error('TEXT preflight seal mismatch');
+        return 'frozen';
+      }
+      if (readTextPreflightMarker(this.ctx.storage) !== marker) return 'stale';
+      validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true });
       initializeOwnerFence(this.ctx.storage, route);
-      this.#fenceArmed = true;
+      writeTextPreflightSeal(this.ctx.storage, route, moveId, marker);
       freezeOwnerFence(this.ctx.storage, route, moveId);
-    }
+      return 'frozen';
+    });
+    if (outcome === 'stale') return { state: 'stale' };
     this.#fenceArmed = true;
     return { projectId: route.projectId, origin: route.origin, objectName: route.objectName, generation: route.generation, moveId, state: "frozen", objectId: this.ctx.id.toString() };
   }
@@ -265,7 +307,7 @@ export class NextgenApplication extends DurableObject {
         move.source_object !== route.objectName || move.generation !== route.generation) throw new Error("Source move is not reserved by registry");
     if (this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Source object identity mismatch");
     this.#assertRecoveryObjectEpoch();
-    return freezeOwnerFence(this.ctx.storage, route, moveId);
+    return freezeOwnerFence(this.ctx.storage, route, moveId, true);
   }
 
   async armRecovery(secret, projectId, recoveryId) {
@@ -286,7 +328,7 @@ export class NextgenApplication extends DurableObject {
       const fence = sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
       if (fence?.state === "frozen" && fence.project_id === projectId && fence.origin === recovery.origin && fence.object_name === recovery.object_name && fence.generation === recovery.generation && fence.move_id === `recovery:${recoveryId}`) { this.#fenceArmed = true; return; }
     }
-    initializeOwnerFence(this.ctx.storage, { projectId, origin: recovery.origin, objectName: recovery.object_name, generation: recovery.generation });
+    initializeOwnerFence(this.ctx.storage, { projectId, origin: recovery.origin, objectName: recovery.object_name, generation: recovery.generation }, true);
     this.#fenceArmed = true;
   }
 
@@ -298,7 +340,7 @@ export class NextgenApplication extends DurableObject {
     this.#assertRecoveryObjectEpoch();
     const epochs = this.ctx.storage.sql.exec('SELECT epoch FROM mapi_recovery_epoch').toArray();
     if (epochs.length !== 1 || epochs[0].epoch === recovery.epoch) throw new Error('Recovery epoch is not fresh');
-    return freezeOwnerFence(this.ctx.storage, { projectId, origin: recovery.origin, objectName: recovery.object_name, generation: recovery.generation }, `recovery:${recoveryId}`);
+    return freezeOwnerFence(this.ctx.storage, { projectId, origin: recovery.origin, objectName: recovery.object_name, generation: recovery.generation }, `recovery:${recoveryId}`, true);
   }
 
   async recoveryClockAttestation(secret, projectId, recoveryId) {
@@ -353,6 +395,7 @@ export class NextgenApplication extends DurableObject {
     if (snapshot.recovery.object_id !== recovery.object_id || snapshot.recovery.epoch !== recovery.epoch || snapshot.recovery.generation !== recovery.generation || snapshot.recovery.clock_highwater !== recovery.clock_highwater || !validRecoveryStamp(recovery.clock_highwater)) throw new Error('Recovery anchor changed');
     const nextDigest = prior?.done ? prior.running_digest : await recoveryPageDigest(prior?.running_digest ?? '', projectId, recoveryId, snapshot.page);
     const result = this.ctx.storage.transactionSync(() => {
+      invalidateTextPreflightMarker(this.ctx.storage);
       const project = sql.exec('SELECT project_id FROM mapi_project').toArray();
       const origins = sql.exec('SELECT origin FROM mapi_project_origin').toArray();
       const epochs = sql.exec('SELECT epoch FROM mapi_recovery_epoch').toArray();
@@ -434,7 +477,11 @@ export class NextgenApplication extends DurableObject {
     if (source?.state !== "frozen" || source.move_id !== moveId || source.generation !== move.generation || source.object_name !== move.source_object) throw new Error("Source is not frozen for this move");
     const cached = this.#relocationManifestCache;
     if (cached && cached.projectId === projectId && cached.origin === route.origin && cached.objectName === move.source_object && cached.generation === move.generation && cached.moveId === moveId) return cached;
-    const manifest = inspectRelocationSource(this.ctx.storage, { projectId, origin: route.origin, objectName: move.source_object, generation: move.generation }, moveId);
+    const sourceRoute = { projectId, origin: route.origin, objectName: move.source_object, generation: move.generation };
+    const manifest = this.ctx.storage.transactionSync(() => {
+      assertTextPreflightSeal(this.ctx.storage, sourceRoute, moveId);
+      return inspectRelocationSource(this.ctx.storage, sourceRoute, moveId, { textGuard: true });
+    });
     this.#relocationManifestCache = manifest;
     return manifest;
   }
@@ -631,18 +678,29 @@ export class NextgenApplication extends DurableObject {
                 this.#failAudit--;
                 if (this.#failAudit === 0) throw new Error("Injected mutation audit write failure");
               }
-              if (this.#recoveryAuthority && this.#insideTransaction) { this.#assertRecoveryInvalidation(); result = execute(this.ctx.storage, query); }
-              else if (this.#recoveryAuthority) result = this.ctx.storage.transactionSync(() => { this.#assertRecoveryInvalidation(); return execute(this.ctx.storage, query); });
-              else if (this.#pendingAuthority && this.#insideTransaction) { this.#assertPendingAuthority(); result = execute(this.ctx.storage, query); }
-              else if (this.#pendingAuthority) result = this.ctx.storage.transactionSync(() => { this.#assertPendingAuthority(); return execute(this.ctx.storage, query); });
-              else if (!this.#fenceArmed && this.#recoveryObjectEpoch === null) result = execute(this.ctx.storage, query);
-              else if (!this.#fenceArmed) result = this.ctx.storage.transactionSync(() => { this.#assertRecoveryObjectEpoch(); return execute(this.ctx.storage, query); });
+              assertNoTextPreflightMarkerAccess(query.statement);
+              // Query-mode SELECTs are constrained to a single statement by
+              // the bridge. Treat all other SQL as potentially mutating.
+              const readOnly = query.query === true && /^\s*SELECT\b/i.test(query.statement);
+              const run = () => {
+                if (!readOnly) invalidateTextPreflightMarker(this.ctx.storage);
+                return execute(this.ctx.storage, query);
+              };
+              if (this.#recoveryAuthority && this.#insideTransaction) { this.#assertRecoveryInvalidation(); result = run(); }
+              else if (this.#recoveryAuthority) result = this.ctx.storage.transactionSync(() => { this.#assertRecoveryInvalidation(); return run(); });
+              else if (this.#pendingAuthority && this.#insideTransaction) { this.#assertPendingAuthority(); result = run(); }
+              else if (this.#pendingAuthority) result = this.ctx.storage.transactionSync(() => { this.#assertPendingAuthority(); return run(); });
+              else if (!this.#fenceArmed && this.#recoveryObjectEpoch === null) {
+                if (this.#insideTransaction || readOnly || !hasTextPreflightMarker(this.ctx.storage)) result = run();
+                else result = this.ctx.storage.transactionSync(run);
+              }
+              else if (!this.#fenceArmed) result = this.ctx.storage.transactionSync(() => { this.#assertRecoveryObjectEpoch(); return run(); });
               else if (this.#insideTransaction) {
                 this.#assertRecoveryObjectEpoch();
                 assertOwnerFence(this.ctx.storage, this.#authority);
-                result = execute(this.ctx.storage, query);
+                result = run();
               } else {
-                result = withOwnerFence(this.ctx.storage, this.#authority, () => { this.#assertRecoveryObjectEpoch(); return execute(this.ctx.storage, query); });
+                result = withOwnerFence(this.ctx.storage, this.#authority, () => { this.#assertRecoveryObjectEpoch(); return run(); });
               }
             } catch (error) {
               if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
@@ -778,10 +836,15 @@ export class NextgenApplication extends DurableObject {
     try { this.#initialize(); return true; } catch { return false; }
   }
 
+  #recoveryReady() {
+    try { return validateSourceRecoveryEpoch(this.ctx.storage) === (this.env.MAPI_RECOVERY_EPOCH ?? "0"); }
+    catch { return false; }
+  }
+
   #admitRoute(route) {
     return Boolean(route?.projectId && route.origin && this.env.MAPI_MAINTENANCE !== "1" &&
       this.projectId() === route.projectId && this.projectOrigin() === route.origin &&
-      this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch === (this.env.MAPI_RECOVERY_EPOCH ?? "0") &&
+      this.#recoveryReady() &&
       this.#configurationReady());
   }
 
@@ -948,7 +1011,10 @@ export class NextgenApplication extends DurableObject {
       }
       const fence = sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
       if (!fence || !["pending", "active"].includes(fence.state) || fence.project_id !== route.projectId || fence.origin !== route.origin || fence.object_name !== route.objectName || fence.generation !== route.generation) throw new Error("Provisioning fence mismatch");
-      if (fence.state === "pending") sql.exec("UPDATE mapi_owner_fence SET state = 'active' WHERE singleton = 1");
+      if (fence.state === "pending") {
+        invalidateTextPreflightMarker(this.ctx.storage);
+        sql.exec("UPDATE mapi_owner_fence SET state = 'active' WHERE singleton = 1");
+      }
       this.#fenceArmed = true;
     });
   }
@@ -993,6 +1059,7 @@ export class NextgenApplication extends DurableObject {
         if (!matching || history.length !== 1 || history[0].version !== 2) throw new Error('Schema migration checkpoint mismatch');
         return;
       }
+      invalidateTextPreflightMarker(this.ctx.storage);
       if (source.hasFence) assertOwnerFence(this.ctx.storage, route);
       else { createOwnerFenceTable(this.ctx.storage); sql.exec("INSERT INTO mapi_owner_fence VALUES (1, ?, ?, ?, ?, 'active', NULL, NULL)", projectId, route.origin, route.objectName, route.generation); }
       if (sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_history'").toArray().length) throw new Error('Schema migration history already exists');
@@ -1017,7 +1084,10 @@ export class NextgenApplication extends DurableObject {
       const sql = this.ctx.storage.sql, source = this.#schemaMigrationSource(route, intent.epoch), fence = source.fence;
       const history = sql.exec('SELECT version, applied_at FROM mapi_schema_history').toArray();
       if (source.version !== 2 || history.length !== 1 || history[0].version !== 2 || !fence || fence.project_id !== projectId || fence.origin !== route.origin || fence.object_name !== route.objectName || fence.move_id !== `schema:${migrationId}` || !((fence.state === 'frozen' && fence.generation === route.generation) || (fence.state === 'active' && fence.generation === route.generation + 1))) throw new Error('Schema activation checkpoint mismatch');
-      if (fence.state === 'frozen') sql.exec("UPDATE mapi_owner_fence SET state = 'active', generation = ? WHERE singleton = 1", route.generation + 1);
+      if (fence.state === 'frozen') {
+        invalidateTextPreflightMarker(this.ctx.storage);
+        sql.exec("UPDATE mapi_owner_fence SET state = 'active', generation = ? WHERE singleton = 1", route.generation + 1);
+      }
     });
     this.#fenceArmed = true;
     return { ...route, generation: route.generation + 1, epoch: intent.epoch, objectId: this.ctx.id.toString(), migrationId, version: 2, state: 'active' };
@@ -1054,9 +1124,9 @@ export class NextgenApplication extends DurableObject {
     const hasFence = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length;
     const fence = hasFence ? sql.exec("SELECT * FROM mapi_owner_fence WHERE singleton = 1").toArray()[0] : null;
     if (!(fence?.state === "frozen" && fence.project_id === route.projectId && fence.origin === route.origin && fence.object_name === route.objectName && fence.generation === route.generation && fence.move_id === `recovery:${recoveryId}`)) {
-      initializeOwnerFence(this.ctx.storage, route);
+      initializeOwnerFence(this.ctx.storage, route, true);
       this.#fenceArmed = true;
-      freezeOwnerFence(this.ctx.storage, route, `recovery:${recoveryId}`);
+      freezeOwnerFence(this.ctx.storage, route, `recovery:${recoveryId}`, true);
     }
     this.#fenceArmed = true;
     return { ...route, recoveryId, epoch, objectId: this.ctx.id.toString(), state: "frozen" };
@@ -1072,7 +1142,10 @@ export class NextgenApplication extends DurableObject {
       return { projectId: this.projectId() };
     }
     if (!savedOrigin) {
-      const insertOrigin = () => this.ctx.storage.sql.exec("INSERT INTO mapi_project_origin VALUES (?)", origin);
+      const insertOrigin = () => {
+        invalidateTextPreflightMarker(this.ctx.storage);
+        return this.ctx.storage.sql.exec("INSERT INTO mapi_project_origin VALUES (?)", origin);
+      };
       if (this.#fenceArmed) withOwnerFence(this.ctx.storage, this.#authority, insertOrigin);
       else if (this.#pendingAuthority) this.ctx.storage.transactionSync(() => { this.#assertPendingAuthority(); insertOrigin(); });
       else insertOrigin();
@@ -1170,6 +1243,7 @@ export class NextgenApplication extends DurableObject {
     const allowed = this.ctx.storage.transactionSync(() => {
       this.#assertRecoveryObjectEpoch();
       if (this.#fenceArmed) assertOwnerFence(this.ctx.storage, this.#authority);
+      invalidateTextPreflightMarker(this.ctx.storage);
       return admitLogin(this.ctx.storage.sql, ip, scope, Date.now());
     });
     return allowed;
@@ -1240,7 +1314,7 @@ export class NextgenApplication extends DurableObject {
       bootId: this.#bootId,
       reactorInitializations: this.#reactorInitializations,
       maintenance: this.env.MAPI_MAINTENANCE === "1",
-      recoveryReady: this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch === (this.env.MAPI_RECOVERY_EPOCH ?? "0"),
+      recoveryReady: this.#recoveryReady(),
     };
   }
 }

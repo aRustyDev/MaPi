@@ -83,6 +83,9 @@ export class ManifestProject extends NextgenApplication {
     else if (kind === 'principal') sql.exec("UPDATE authz_assignments SET principal_type = 'user', principal_id = 'missing' WHERE project_id = ?", projectId);
     else if (kind === 'global') sql.exec("INSERT INTO event_sinks (id,type,scope,enabled) VALUES ('sink','http','global',0)");
     else if (kind === 'origin') sql.exec("UPDATE mapi_project_origin SET origin='https://wrong.example'");
+    else if (kind === 'epoch-invalid') sql.exec("UPDATE mapi_recovery_epoch SET epoch=CAST(X'80' AS TEXT)");
+    else if (kind === 'epoch-oversized') sql.exec("UPDATE mapi_recovery_epoch SET epoch=?", 'x'.repeat(129));
+    else if (kind === 'epoch-blob') sql.exec("UPDATE mapi_recovery_epoch SET epoch=X'30'");
     else if (kind === 'issuer-foreign') sql.exec("UPDATE mapi_oauth_codes SET project_id='foreign'");
     else if (kind === 'issuer-index') sql.exec('DROP INDEX mapi_fapi_reload_expiry');
     else if (kind === 'issuer-schema') sql.exec('ALTER TABLE mapi_oauth_codes ADD COLUMN extra TEXT');
@@ -191,6 +194,7 @@ export default {
         ['unknown', 'Unreviewed schema object'], ['hidden', 'Unreviewed schema object'], ['sqlite-prefix', 'Unreviewed schema object'],
         ['schema', 'Unreviewed schema object'], ['principal', 'Unresolved or unsupported assignment'],
         ['global', 'Foreign or global row'], ['origin', 'Project origin differs'],
+        ['epoch-invalid', 'Invalid recovery epoch'], ['epoch-oversized', 'Invalid recovery epoch'], ['epoch-blob', 'Invalid recovery epoch'],
         ['issuer-foreign', 'Foreign or global row'], ['issuer-index', 'Missing issuer index'],
         ['issuer-schema', 'Issuer schema differs'], ['issuer-prompt', 'Unresolved FAPI prompt'],
         ['clock-empty', 'Invalid revision clock'], ['clock-text', 'Invalid revision clock'], ['clock-multiple', 'Invalid revision clock'],

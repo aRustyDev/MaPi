@@ -16,6 +16,7 @@ export class RelocationCoordinator extends DurableObject {
     authorize(this.env, secret);
     const registry = this.env.PROJECT_REGISTRY.getByName("projects");
     const move = await registry.beginRelocation(secret, origin, projectId, moveId);
+    if (move.phase === "preflighting") return { done: false, phase: "preflighting" };
     const namespace = this.env.NEXTGEN_APPLICATION;
     const source = namespace.getByName(move.source_object), destination = namespace.getByName(move.destination_object);
     if (move.phase === "committed") {
