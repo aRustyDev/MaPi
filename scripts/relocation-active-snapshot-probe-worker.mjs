@@ -70,6 +70,14 @@ export class Source extends DurableObject {
   held() { return this.#held; }
   release() { if (!this.#release) throw Error('not held'); this.#release(); this.#release = null; }
   mutate() { return this.ctx.storage.transactionSync(() => { invalidateTextPreflightMarker(this.ctx.storage); this.ctx.storage.sql.exec("UPDATE data SET value = 'changed' WHERE id=1"); }); }
+  // Negative control: simulate a writer outside the application protocol. This
+  // bypass exists only in this isolated toy and deliberately does not alter
+  // the marker, illustrating why writer drain must be independently enforced.
+  mutateWithoutInvalidating(size) {
+    return this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('UPDATE data SET value = ? WHERE id = 1', 'y'.repeat(size - 3) + '\u0000é');
+    });
+  }
   freeze() {
     return this.ctx.storage.transactionSync(() => {
       const s = this.ctx.storage.sql, p = s.exec('SELECT * FROM progress WHERE id=1').one();
@@ -81,6 +89,14 @@ export class Source extends DurableObject {
     });
   }
   partHex(offset) { return toHex(this.ctx.storage.sql.exec('SELECT bytes FROM pieces WHERE offset=?', offset).one().bytes); }
+  partMatches(offset, byte) {
+    const expected = new Uint8Array(partSize).fill(byte).buffer;
+    return this.ctx.storage.sql.exec('SELECT bytes = ? AS matches FROM pieces WHERE offset = ?', expected, offset).one().matches === 1;
+  }
+  currentPartMatches(offset, byte) {
+    const expected = new Uint8Array(partSize).fill(byte).buffer;
+    return this.ctx.storage.sql.exec('SELECT substr(CAST(value AS BLOB), ?, ?) = ? AS matches FROM data WHERE id = 1', offset + 1, partSize, expected).one().matches === 1;
+  }
   evict() { this.ctx.abort('synthetic eviction'); }
 }
 const reject = async (p, message) => { try { await p; } catch (e) { check(String(e).includes(message), `unexpected rejection: ${e}`); return; } throw Error(`expected rejection: ${message}`); };
@@ -124,8 +140,22 @@ export default { async fetch(request, env) {
   await fullyStale.mutate(); await reject(fullyStale.freeze(), 'stale freeze');
   const fullyStaleState = await fullyStale.state();
   check(fullyStaleState.phase === 'active' && fullyStaleState.progress.next_offset === 64 && fullyStaleState.size === 7, 'completed stale snapshot changed source');
+  // An out-of-band write of the same byte length is invisible to the marker.
+  // The toy mechanism then accepts pages from different source versions; this
+  // negative control must not be interpreted as a safe production snapshot.
+  const mixed = env.SOURCE.getByName(crypto.randomUUID()), mixedSize = 2 * partSize + 3;
+  await mixed.seed(mixedSize);
+  await mixed.advance();
+  await mixed.mutateWithoutInvalidating(mixedSize);
+  check((await mixed.state()).marker === token, 'negative control unexpectedly invalidated marker');
+  while ((await mixed.state()).progress.next_offset < mixedSize) await mixed.advance();
+  check(await mixed.partMatches(0, 0x78), 'first page did not retain the original value');
+  check(await mixed.partMatches(partSize, 0x79), 'later page did not read the changed value');
+  check(await mixed.currentPartMatches(0, 0x79) && await mixed.currentPartMatches(partSize, 0x79), 'current source does not match the changed version');
+  check(await mixed.freeze(), 'negative control did not demonstrate marker-only acceptance');
+  check((await mixed.state()).phase === 'frozen', 'negative control did not preserve the toy frozen state');
   const malformed = env.SOURCE.getByName(crypto.randomUUID()); await malformed.seedMalformed(); await malformed.advance();
   check(await malformed.partHex(0) === '80ff00', 'malformed bytes changed');
-  return Response.json({ok:true,nearLimitBytes:8300000,pages:state.parts,eviction:true,pendingReservationResume:true,staleFinalization:true,atomicFreeze:true,malformedBytesPreserved:true});
+  return Response.json({ok:true,nearLimitBytes:8300000,pages:state.parts,eviction:true,pendingReservationResume:true,staleFinalization:true,atomicFreeze:true,uncoordinatedWriterMixAccepted:true,malformedBytesPreserved:true});
  } catch(e) { return Response.json({ok:false,error:String(e),stack:e.stack},{status:500}); }
 }};

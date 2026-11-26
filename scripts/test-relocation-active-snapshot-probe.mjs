@@ -36,7 +36,7 @@ try {
   const response = await fetch(`http://127.0.0.1:${address}/`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(120000) });
   const body = await response.json();
   assert.equal(response.status, 200, JSON.stringify(body));
-  assert.deepEqual(body, { ok: true, nearLimitBytes: 8300000, pages: 127, eviction: true, pendingReservationResume: true, staleFinalization: true, atomicFreeze: true, malformedBytesPreserved: true });
+  assert.deepEqual(body, { ok: true, nearLimitBytes: 8300000, pages: 127, eviction: true, pendingReservationResume: true, staleFinalization: true, atomicFreeze: true, uncoordinatedWriterMixAccepted: true, malformedBytesPreserved: true });
   console.log('Synthetic active-source marker probe passed; production relocation and peak memory were not tested.');
 } catch (error) {
   if (diagnostic) process.stderr.write(diagnostic);
