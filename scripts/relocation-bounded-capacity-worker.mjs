@@ -7,8 +7,8 @@ import { initializeOwnerFence } from '../worker/owner-fence.js';
 
 export { CapacityRegistry };
 const LARGE_BYTES = 8_300_000;
-const BLOB_BYTES = 8_388_000;
-const NEAR_TEXT_BYTES = 8_388_000;
+const BLOB_BYTES = 8_380_000;
+const NEAR_TEXT_BYTES = 8_380_000;
 const VALUE_BYTES = 1024;
 const VERIFY_SLICE = 64 * 1024;
 const boundedKey = 'capacity-' + 'k'.repeat(991);
@@ -63,7 +63,7 @@ export class CapacityOwner extends OriginalCapacityOwner {
       // SQLite may still materialize the value and its intermediate expressions.
       sql.exec("INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, 'capacity-large', 'z' || replace(hex(zeroblob(2074999)), '00', '😀') || 'xyz')", projectId, userId);
       sql.exec('INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, ?, ?)', projectId, userId, boundedKey, 'x'.repeat(VALUE_BYTES));
-      sql.exec(`INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, 'near_limit', '"z' || replace(hex(zeroblob(2096998)), '00', '😀') || 'xyzab"')`, projectId, nearUserId);
+      sql.exec(`INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, 'near_limit', '"z' || replace(hex(zeroblob(2094998)), '00', '😀') || 'xyzab"')`, projectId, nearUserId);
       sql.exec("INSERT INTO user_totp (project_id, id, user_id, secret, created_at, updated_at) VALUES (?, 'totp-synthetic-large', ?, CAST(X'0080FF' || zeroblob(?) AS BLOB), 1, 1)", projectId, userId, BLOB_BYTES - 3);
     });
   }

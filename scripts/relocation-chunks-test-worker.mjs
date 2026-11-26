@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { initializeProjectFence, assertProjectWritable, freezeProject, activateProject, retireProject, initializeRouteGeneration, registerRouteGeneration, readRouteGeneration, beginRelocation, commitRelocation, projectFenceStatus } from '../worker/relocation.js';
-import { beginChunkExport, exportChunk, beginChunkImport, importChunk, chunkExportStatus, chunkImportStatus } from '../worker/relocation-chunks.js';
+import { beginChunkExport, exportChunk, beginChunkImport, importChunk, chunkExportStatus, chunkImportStatus, MAX_ROW_VALUE_BYTES } from '../worker/relocation-chunks.js';
 import { execute } from '../worker/sql.js';
 import { initializeOwnerFence } from '../worker/owner-fence.js';
 const tables = ['users', 'sessions', 'events'];
@@ -624,9 +624,14 @@ export default { async fetch(request, env) {
   const tooLarge = env.PROJECT.getByName(`too-large-${n}`);
   await tooLarge.init('too-large', `too-large-${n}`); await tooLarge.beyondRowLimit('too-large'); await tooLarge.freeze('too-large', 1, 'too-large-move');
   await tooLarge.beginExport('too-large', 1, 'too-large-move', ['users']);
-  const formerlyOversized = await tooLarge.chunk('too-large', 1, 'too-large-move', 0, false);
-  check(JSON.parse(formerlyOversized.content).stream?.types.some(type => type.kind === 'blob' && type.length === 8_385_000), 'platform-valid row did not enter streamed export');
-  check((await tooLarge.exportStatus('too-large')).next_chunk === 1, 'streamed row did not advance export checkpoint');
+  if (MAX_ROW_VALUE_BYTES < 8_385_013) {
+   await rejects(() => tooLarge.chunk('too-large', 1, 'too-large-move', 0, false), 'row beyond configured limit accepted');
+   check((await tooLarge.exportStatus('too-large')).next_chunk === 0, 'rejected row advanced export checkpoint');
+  } else {
+   const formerlyOversized = await tooLarge.chunk('too-large', 1, 'too-large-move', 0, false);
+   check(JSON.parse(formerlyOversized.content).stream?.types.some(type => type.kind === 'blob' && type.length === 8_385_000), 'platform-valid row did not enter streamed export');
+   check((await tooLarge.exportStatus('too-large')).next_chunk === 1, 'streamed row did not advance export checkpoint');
+  }
   const badSource = env.PROJECT.getByName(`bad-source-${n}`), badTarget = env.PROJECT.getByName(`bad-target-${n}`); await badSource.init('bad', `bad-source-${n}`); await badSource.seed('bad'); await badSource.freeze('bad', 1, 'bad-move');
   const reverse = ['events', 'sessions', 'users']; await badSource.beginExport('bad', 1, 'bad-move', reverse); await badTarget.beginImport('bad', 1, 'bad-move', `bad-target-${n}`, reverse);
   const invalidOrder = await badSource.chunk('bad', 1, 'bad-move', 0, false); await rejects(() => badTarget.receive('bad', invalidOrder, 0), 'foreign-key dependency violation accepted');

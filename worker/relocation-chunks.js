@@ -12,7 +12,7 @@ const MAX_ROWS = 64;
 const FRAGMENT_BYTES = 80 * 1024;
 // The value-byte limit is shared by preflight, streaming export and import.
 // Preflight independently accounts for SQLite record header and payload bytes.
-export const MAX_ROW_VALUE_BYTES = 8_388_608 + 800;
+export const MAX_ROW_VALUE_BYTES = 8_388_608 - 4096;
 const MAX_ROW_JSON_BYTES = 12 * 1024 * 1024;
 const bytes = text => new TextEncoder().encode(text).length;
 const quote = value => '"' + value.replaceAll('"', '""') + '"';
