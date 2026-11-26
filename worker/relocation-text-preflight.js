@@ -173,6 +173,7 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
       const keyValues = key
         ? `CASE WHEN typeof(${column}) = 'integer' THEN printf('%lld', ${column}) END AS integer_value, CASE WHEN typeof(${column}) = 'real' AND ${column} <= 1.7976931348623157e308 AND ${column} >= -1.7976931348623157e308 THEN ${column} END AS real_value`
         : `CASE WHEN typeof(${column}) = 'integer' THEN printf('%lld', ${column}) END AS integer_value, NULL AS real_value`;
+      // SQLite can obtain the byte length from stored record metadata.
       const result = query(`SELECT typeof(${column}) AS kind, CASE WHEN typeof(${column}) IN ('text', 'blob') THEN octet_length(${column}) END AS size, CASE WHEN typeof(${column}) = 'real' AND (${column} > 1.7976931348623157e308 OR ${column} < -1.7976931348623157e308) THEN 1 ELSE 0 END AS nonfinite, ${keyValues} FROM ${table} WHERE ${rowid} = CAST(? AS INTEGER)`, checkpoint.row).toArray();
       if (result.length !== 1) throw Error('TEXT preflight source changed');
       if (result[0].nonfinite) throw Error('Non-finite REAL is not supported by relocation');

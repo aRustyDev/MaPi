@@ -14,6 +14,12 @@ const check = (condition, message) => { if (!condition) throw Error(message); };
 const rejects = async (fn) => { try { await fn(); } catch { return; } throw Error("Expected rejection"); };
 const rejectsWith = async (fn, message) => { try { await fn(); } catch (error) { if (String(error).includes(message)) return; throw error; } throw Error(`Expected rejection: ${message}`); };
 export class RealRegistry extends ProjectRegistry {
+  seedExistingIntentForTest(origin, projectId, moveId) {
+    if (this.env.MAPI_LOCAL_TEST !== '1') throw Error('Local relocation test required');
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, route.object_name, `project:${crypto.randomUUID()}`, route.generation);
+  }
   begin(project, source, target, generation, move) { return beginRegistryMove(this.ctx.storage, project, source, target, generation, move); }
   move(project) { return this.ctx.storage.sql.exec("SELECT * FROM mapi_route_moves WHERE project_id = ?", project).toArray()[0] ?? null; }
   history(project) { return this.ctx.storage.sql.exec("SELECT move_id, source_object, destination_object, generation FROM mapi_move_history WHERE project_id = ? ORDER BY generation", project).toArray(); }
@@ -98,6 +104,16 @@ export class RealOwner extends NextgenApplication {
     return ["mapi_project", "mapi_login_limits", ...clockTables, ...ordered];
   }
   sourceStatus() { return this.ctx.storage.sql.exec("SELECT project_id, object_name, generation, state, move_id, digest FROM mapi_owner_fence WHERE singleton=1").one(); }
+  sourceFenceRows() {
+    if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mapi_owner_fence'").toArray().length) return [];
+    return this.ctx.storage.sql.exec('SELECT * FROM mapi_owner_fence').toArray();
+  }
+  seedAdmissionFixture(projectId, userId) {
+    this.ctx.storage.sql.exec("INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, 'admission-fixture', ?)", projectId, userId, JSON.stringify('synthetic-é😀'));
+  }
+  admissionFixture(projectId, userId) {
+    return this.ctx.storage.sql.exec("SELECT typeof(value) AS kind, hex(CAST(value AS BLOB)) AS bytes FROM user_attributes WHERE project_id = ? AND user_id = ? AND key = 'admission-fixture'", projectId, userId).one();
+  }
   stagedStatus(project) { return projectFenceStatus(this.ctx.storage, project); }
   savedOrigin() { return this.ctx.storage.sql.exec("SELECT origin FROM mapi_project_origin").one().origin; }
   async evidence(tables) {
@@ -211,7 +227,23 @@ export default {
       await rejectsWith(() => target.reserveMoveDestination("move-secret", reservedRoute, "move-1"), "Destination is not reserved by registry");
       const login = await source.login("source@example.test", "Example-password-123!", "192.0.2.1", route);
       check(login.status === 200 && login.cookie, "Source login failed");
+      const liveRuntime = await source.status(true, route);
+      check(liveRuntime.ready && liveRuntime.wasmMemoryBytes > 0 && liveRuntime.reactorInitializations > 0 && liveRuntime.reactorAttempts >= liveRuntime.reactorInitializations, 'Active Go/Wasm reactor was not initialized');
+      await source.seedAdmissionFixture(projectId, user.userId);
       const sourceCounts = await source.testCounts(), tables = await source.manifest();
+      const fixtureBeforeAdmission = await source.admissionFixture(projectId, user.userId);
+      const routeBeforeAdmission = await registry.relocationStatus('move-secret', projectId);
+      const fenceBeforeAdmission = await source.sourceFenceRows();
+      await rejectsWith(() => registry.beginRelocation('move-secret', origin, projectId, 'move-1'), 'Relocation admission unavailable');
+      await rejectsWith(() => coordinator.advance('move-secret', origin, projectId, 'move-1'), 'Relocation admission unavailable');
+      check(JSON.stringify(await registry.relocationStatus('move-secret', projectId)) === JSON.stringify(routeBeforeAdmission), 'Rejected admission changed route or intent');
+      check(JSON.stringify(await source.sourceFenceRows()) === JSON.stringify(fenceBeforeAdmission), 'Rejected admission changed owner fence');
+      check(JSON.stringify(await source.testCounts()) === JSON.stringify(sourceCounts), 'Rejected admission changed application data');
+      check(JSON.stringify(await source.admissionFixture(projectId, user.userId)) === JSON.stringify(fixtureBeforeAdmission), 'Rejected admission changed synthetic value');
+      // The remaining end-to-end rehearsal covers a pre-existing intent, as
+      // would be present after deployment interrupted an earlier attempt.
+      await registry.seedExistingIntentForTest(origin, projectId, 'move-1');
+      await rejectsWith(() => registry.beginRelocation('move-secret', origin, projectId, 'different-move'), 'Conflicting relocation intent');
       const restoreAttempt = source.holdRestoreForTest("old-bookmark").then(() => false, error => String(error).includes("Coordinated recovery is required"));
       while (!await source.restoreHeldForTest()) await new Promise(resolve => setTimeout(resolve, 0));
       let move;
@@ -220,13 +252,17 @@ export default {
         if (move.phase !== "preflighting") break;
       }
       check(move?.phase === "moving", "Bounded preflight did not finish");
-      const frozenRuntime = await source.status(false, route);
-      check(frozenRuntime.wasmMemoryBytes === 0 && frozenRuntime.wasmHighWaterBytes >= beforeRejectedFreeze.wasmMemoryBytes && frozenRuntime.reactorInitializations === beforeRejectedFreeze.reactorInitializations, 'Source reactor was not released after freeze');
-      await rejectsWith(() => source.addUser('frozen@example.test', 'Synthetic-password-123!', route), 'Owner is fenced or route is stale');
-      const staleResult = await source.handleRequest({ method: 'GET', url: `${origin}/users/${user.userId}`, headers: {}, body: '', peer: '127.0.0.1' }, route);
-      check(staleResult.status === 503, 'Frozen handler was admitted');
-      const afterStaleRequest = await source.status(false, route);
-      check(afterStaleRequest.wasmMemoryBytes === 0 && afterStaleRequest.reactorInitializations === frozenRuntime.reactorInitializations, 'Stale requests restarted the frozen reactor');
+      const frozenRuntime = await source.status(true, route);
+      check(frozenRuntime.wasmHighWaterBytes >= beforeRejectedFreeze.wasmMemoryBytes, 'Frozen source lost its Wasm high-water observation');
+      check(!frozenRuntime.ready && !frozenRuntime.fenceReady && frozenRuntime.wasmMemoryBytes === 0 && frozenRuntime.reactorInitializations === liveRuntime.reactorInitializations && frozenRuntime.reactorAttempts === liveRuntime.reactorAttempts, 'Frozen source retained or recreated its Go/Wasm reactor');
+      const staleRequest = await source.handleRequest({ method: 'GET', url: `${origin}/readyz`, headers: {}, body: '', peer: '192.0.2.9' }, route);
+      check(staleRequest.status === 503, 'Frozen source accepted stale ingress');
+      await rejects(() => source.addUser('frozen-stale@example.test', 'Stale-password-123!', route));
+      const afterStale = await source.status(true, route);
+      check(afterStale.wasmMemoryBytes === 0 && afterStale.reactorInitializations === frozenRuntime.reactorInitializations && afterStale.reactorAttempts === frozenRuntime.reactorAttempts, 'Stale ingress attempted to recreate the frozen Go/Wasm reactor');
+      await source.freezeRelocation('move-secret', route, 'move-1');
+      const afterFreezeRetry = await source.status(true, route);
+      check(afterFreezeRetry.wasmMemoryBytes === 0 && afterFreezeRetry.reactorInitializations === frozenRuntime.reactorInitializations && afterFreezeRetry.reactorAttempts === frozenRuntime.reactorAttempts, 'Idempotent freeze retry attempted to recreate the reactor');
       const targetName = move.destination_object;
       target = env.OWNER.getByName(targetName);
       reservedRoute = { ...route, objectName: targetName, generation: 2 };
@@ -454,6 +490,7 @@ export default {
       check((await target.session(login.cookie, "read", "", next)).status === 200, "Active session was not preserved");
       check((await target.login("source@example.test", "Example-password-123!", "192.0.2.2", next)).status === 200, "Migrated user cannot sign in");
       check((await other.login("concurrent@example.test", "Concurrent-password-123!", "192.0.2.3", otherRoute)).status === 200, "Other project was affected");
+      await registry.seedExistingIntentForTest(origin, projectId, 'move-2');
       await rejectsWith(async () => {
         for (let attempt = 0; attempt < 256; attempt++) {
           const progress = await coordinator.advance("move-secret", origin, projectId, "move-2");

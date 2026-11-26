@@ -3,7 +3,7 @@
   "main": "recovery-batch-proof-worker.mjs",
   "compatibility_date": "2026-11-18",
   "workers_dev": false,
-  "durable_objects": {"bindings": [{"name":"OWNER","class_name":"RecoveryBatchOwner"}]},
-  "migrations": [{"tag":"v1","new_sqlite_classes":["RecoveryBatchOwner"]}],
+  "durable_objects": {"bindings": [{"name":"OWNER","class_name":"RecoveryBatchOwner"},{"name":"NEXTGEN_APPLICATION","class_name":"RecoveryBatchOwner"},{"name":"PROJECT_REGISTRY","class_name":"ProjectRegistry"}]},
+  "migrations": [{"tag":"v1","new_sqlite_classes":["RecoveryBatchOwner","ProjectRegistry"]}],
   "vars":{"MAPI_LOCAL_TEST":"1"}
 }

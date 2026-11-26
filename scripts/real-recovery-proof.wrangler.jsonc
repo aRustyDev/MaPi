@@ -5,7 +5,8 @@
   "workers_dev": false,
   "durable_objects": { "bindings": [
     { "name": "NEXTGEN_APPLICATION", "class_name": "NextgenApplication" },
+    { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" },
     { "name": "RECOVERY_REGISTRY", "class_name": "RecoveryRegistry" }
   ] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "RecoveryRegistry"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NextgenApplication", "RecoveryRegistry", "ProjectRegistry"] }]
 }

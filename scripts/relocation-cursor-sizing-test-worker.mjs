@@ -12,6 +12,13 @@ export class CursorSizingProbe extends DurableObject {
     const storage = this.ctx.storage, sql = storage.sql;
     sql.exec('CREATE TABLE records (a, b, c, padding, PRIMARY KEY(a, b, c))');
 
+    // Byte sizing must include embedded NULs and must not repair malformed
+    // stored TEXT. These cases exercise the runtime's SQLite byte-length API.
+    sql.exec('CREATE TABLE byte_lengths (value)');
+    sql.exec("INSERT INTO byte_lengths VALUES (NULL), (CAST(X'' AS TEXT)), (CAST(X'6100F09F9880' AS TEXT)), (CAST(X'80' AS TEXT)), (X'00FF01')");
+    const sizes = sql.exec('SELECT octet_length(value) AS current, length(CAST(value AS BLOB)) AS previous FROM byte_lengths ORDER BY rowid').toArray();
+    check(JSON.stringify(sizes.map(row => row.current)) === JSON.stringify([null, 0, 6, 1, 3]) && sizes.every(row => row.current === row.previous), 'SQLite byte sizing changed');
+
     const cases = [
       ['ascii', 'a'.repeat(900), 17, new Uint8Array([0, 1, 255])],
       ['quotes', '"\\'.repeat(150), -42, new Uint8Array(13)],

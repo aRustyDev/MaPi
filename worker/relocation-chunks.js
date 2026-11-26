@@ -26,7 +26,7 @@ const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 function boundedControlRow(storage, table, columns, textLimits, where, args, nullable = []) {
  const projection = columns.map(name => {
   const limit = textLimits[name];
-  return limit === undefined ? quote(name) : `CASE WHEN ${quote(name)} IS NULL THEN NULL WHEN typeof(${quote(name)}) = 'text' AND length(CAST(${quote(name)} AS BLOB)) <= ${limit} THEN CAST(${quote(name)} AS BLOB) ELSE 0 END AS ${quote(name)}`;
+  return limit === undefined ? quote(name) : `CASE WHEN ${quote(name)} IS NULL THEN NULL WHEN typeof(${quote(name)}) = 'text' AND octet_length(${quote(name)}) <= ${limit} THEN CAST(${quote(name)} AS BLOB) ELSE 0 END AS ${quote(name)}`;
  }).join(', ');
  const row = one(storage, `SELECT ${projection} FROM ${quote(table)} WHERE ${where} LIMIT 1`, ...args);
  if (!row) return null;

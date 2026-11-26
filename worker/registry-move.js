@@ -1,4 +1,5 @@
 import { completedHistoryCheckpoint } from './registry-history.js';
+import { initializeEvidencePaging } from './registry-evidence.js';
 
 // These functions are for a trusted coordinator. Source and destination
 // attestations must be read from their authoritative objects by that coordinator.
@@ -22,6 +23,7 @@ export function initializeMoveRegistry(storage) {
   if (!storage.sql.exec("PRAGMA table_info(mapi_move_reconciliation)").toArray().some(column => column.name === 'journal_version')) storage.sql.exec('ALTER TABLE mapi_move_reconciliation ADD COLUMN journal_version INTEGER NOT NULL DEFAULT 0');
   storage.sql.exec("CREATE TABLE IF NOT EXISTS mapi_move_journals (move_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, complete INTEGER NOT NULL)");
   storage.sql.exec("CREATE TABLE IF NOT EXISTS mapi_move_evidence (move_id TEXT NOT NULL, project_id TEXT NOT NULL, table_index INTEGER NOT NULL, table_name TEXT NOT NULL, cursor_in TEXT NOT NULL, cursor_out TEXT, row_count INTEGER NOT NULL, digest TEXT NOT NULL, table_done INTEGER NOT NULL, UNIQUE (move_id, table_index, cursor_in))");
+  initializeEvidencePaging(storage);
   storage.sql.exec("CREATE TABLE IF NOT EXISTS mapi_move_completion (project_id TEXT NOT NULL, move_id TEXT NOT NULL, PRIMARY KEY(project_id, move_id))");
   storage.sql.exec("CREATE TABLE IF NOT EXISTS mapi_move_history (move_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, source_object TEXT NOT NULL, destination_object TEXT NOT NULL, generation INTEGER NOT NULL, digest TEXT NOT NULL)");
   storage.sql.exec("INSERT OR IGNORE INTO mapi_route_move_objects SELECT object_name FROM project_routes");

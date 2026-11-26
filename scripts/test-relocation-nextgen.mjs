@@ -110,6 +110,7 @@ try {
   let transferredBytes = 0;
   let interruptedWrite = false;
   let fragments = 0;
+  let largeAttributeSlices = 0;
   let maxChunkBytes = 0;
   for (;;) {
     const part = await call("source", "chunk", { index: count });
@@ -117,7 +118,8 @@ try {
     const length = Buffer.byteLength(part.content);
     assert.ok(length <= 128 * 1024);
     maxChunkBytes = Math.max(maxChunkBytes, length);
-    if (payload.fragment) fragments++;
+    if (payload.fragment || payload.stream) fragments++;
+    if (payload.table === "user_attributes" && payload.stream?.kind === "text" && payload.stream.total === 180002) largeAttributeSlices++;
     transferredBytes += length;
     if (!interruptedWrite && payload.rows.length > 0) {
       await call("target", "receive", { part, fail: 1 }, true);
@@ -138,7 +140,7 @@ try {
   }
   const elapsedSeconds = (performance.now() - started) / 1000;
   assert.ok(interruptedWrite, 'fixture must inject an interrupted row write');
-  assert.ok(fragments > 1, 'fixture must fragment the oversized user attribute');
+  assert.ok(largeAttributeSlices > 1, 'fixture must stream the oversized user attribute in multiple slices');
   const target = await snapshot("target");
   assert.deepEqual(target, source);
   assert.equal(await call("source", "fk"), 0);

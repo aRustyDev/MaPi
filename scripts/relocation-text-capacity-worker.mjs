@@ -20,6 +20,13 @@ const rejectsWith = async (action, message) => {
 };
 
 export class CapacityRegistry extends BaseRegistry {
+  // This isolated synthetic worker models a relocation intent persisted by an
+  // earlier version. The production registry has no such fixture method.
+  seedExistingIntentForTest(origin, projectId, moveId) {
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, route.object_name, `project:${crypto.randomUUID()}`, route.generation);
+  }
   proofState() { return this.ctx.storage.kv.get('synthetic-capacity-proof') ?? null; }
   saveProofState(value) { this.ctx.storage.kv.put('synthetic-capacity-proof', value); }
   testCheckpoint(projectId, moveId) {
@@ -185,6 +192,12 @@ export default {
           check(runtime.wasmMemoryBytes > 0 && runtime.reactorInitializations > 0, 'Synthetic source Go reactor is not initialized');
           state.sourceRuntimeInitializations = runtime.reactorInitializations;
           state.sourceWasmBeforeFreeze = runtime.wasmMemoryBytes;
+          const beforeStatus = await registry.relocationStatus(secret, projectId), beforeFence = await owner.fence();
+          await rejectsWith(() => registry.beginRelocation(secret, origin, projectId, moveId), 'Relocation admission unavailable');
+          check(JSON.stringify(beforeStatus) === JSON.stringify(await registry.relocationStatus(secret, projectId)) &&
+            JSON.stringify(beforeFence) === JSON.stringify(await owner.fence()) &&
+            JSON.stringify(snapshot) === JSON.stringify(await owner.snapshot(projectId, userId, state.nearUserId)), 'Rejected admission changed synthetic source');
+          await registry.seedExistingIntentForTest(origin, projectId, moveId);
           state.stage = 'preflight';
         } else if (stage === 'preflight') {
           check(++state.pages <= 20000, 'Capacity page budget exceeded');
@@ -291,9 +304,11 @@ export default {
           }
           check(await extra.oversizedMatches(item.projectId, item.userId), 'Oversized fixture differs');
           state.oversize.fence = await extra.fence();
+          await registry.seedExistingIntentForTest(item.origin, item.projectId, item.moveId);
           state.stage = 'oversize-preflight';
         } else if (stage === 'legacy-init') {
           const item = state.oversize;
+          await registry.seedExistingIntentForTest(item.origin, item.projectId, item.moveId);
           const status = await registry.beginRelocation(secret, item.origin, item.projectId, item.moveId);
           check(status.phase === 'preflighting', 'Legacy fixture froze source');
           state.stage = 'legacy-checkpoint';
@@ -306,7 +321,7 @@ export default {
             const result = await registry.beginRelocation(secret, item.origin, item.projectId, item.moveId);
             check(result.phase === 'preflighting', 'Oversized source froze');
           } catch (error) {
-            if (!String(error).includes('Row exceeds conservative SQLite size limit')) throw error;
+            if (!['Row exceeds conservative SQLite size limit', 'TEXT preflight value exceeds SQLite limit', 'Row exceeds SQLite record size limit'].some(message => String(error).includes(message))) throw error;
             rejected = true;
           }
           if (rejected) {
@@ -368,6 +383,7 @@ export default {
           await registry.activate(legacyOrigin, legacyName, legacyId);
           const route = { projectId: legacyId, origin: legacyOrigin, objectName: legacyName, generation: 1 };
           await legacyOwner.addUser('legacy@example.test', 'Synthetic-password-123!', route);
+          await registry.seedExistingIntentForTest(legacyOrigin, legacyId, legacyMove);
           state.legacyActive = { origin: legacyOrigin, objectName: legacyName, moveId: legacyMove, projectId: legacyId, step: 0, tableCount: await legacyOwner.textPreflightTableCount(route), fence: await legacyOwner.fence(), business: await legacyOwner.syntheticBusinessState() };
           state.stage = 'legacy-active-scan';
         } else if (stage === 'legacy-active-scan') {

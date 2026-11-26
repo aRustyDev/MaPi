@@ -77,6 +77,7 @@ try {
   const seedSeconds = (performance.now() - startedSeed) / 1000;
   const moveStarted = performance.now();
   let advances = 0;
+  await call('seedExistingIntent', fixture);
   let progress = await call('advance', fixture); advances++;
   while (progress.phase === 'preflighting') {
     if (advances > 100000) throw Error('Preflight exceeded bounded coordinator calls');
