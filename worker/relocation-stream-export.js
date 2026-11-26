@@ -1,11 +1,11 @@
 import { readRelocationRow } from './sql.js';
+import { MAX_ROW_VALUE_BYTES } from './relocation-chunks.js';
 
 // SQLite itself may materialize a cell for CAST/substr. The bridge receives at
 // most one slice at a time, and the checkpoint is kept by the caller.
 export const STREAM_SLICE_BYTES = 64 * 1024;
 export const STREAM_SMALL_ROW_BYTES = 64 * 1024;
 export const STREAM_OFFSET_BASE = 8_388_609;
-const MAX_ROW_BYTES = 8_388_608 - 4096;
 const quote = value => '"' + value.replaceAll('"', '""') + '"';
 const byteLength = value => new TextEncoder().encode(value).length;
 
@@ -70,14 +70,14 @@ export function inspectStreamRow(storage, table, names, keys, cursor, explicitCo
  for (let i = 0; i < names.length; i++) {
   const [kind, length, integer, real] = metadata.slice(i * 4, (i + 1) * 4);
   if (kind === 'text' || kind === 'blob') {
-   if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ROW_BYTES) throw Error('Row exceeds conservative SQLite size limit');
+   if (!Number.isSafeInteger(length) || length < 0 || length > 8_388_608) throw Error('Row exceeds conservative SQLite size limit');
    types.push({ kind, length }); lengths.push(length); size += length;
   } else if (kind === 'integer') { types.push({ kind, value: integer }); lengths.push(8); size += 8; }
   else if (kind === 'real' && Number.isFinite(real)) { types.push({ kind, value: real }); lengths.push(8); size += 8; }
   else if (kind === 'null') { types.push({ kind }); lengths.push(0); }
   else throw Error('Non-finite REAL is not supported by relocation');
  }
- if (size > MAX_ROW_BYTES) throw Error('Row exceeds conservative SQLite size limit');
+ if (size > MAX_ROW_VALUE_BYTES) throw Error('Row exceeds conservative SQLite size limit');
  // The serialized key is separately bounded by preflight. Check the raw
  // lengths before invoking the normal bridge so no unbounded key is returned.
  if (keys.reduce((sum, key) => sum + lengths[names.indexOf(key)], 0) > 4096) throw Error('Relocation primary key exceeds cursor limit');

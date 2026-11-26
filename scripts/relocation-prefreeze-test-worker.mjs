@@ -244,7 +244,7 @@ export default {
       check(afterMutation && afterMutation.marker !== afterEviction.marker, 'Go mutation did not invalidate preflight');
       const beforeLegacyFence = await progressOwner.ownerFence(), beforeLegacyBusiness = await progressOwner.businessSnapshot();
       const progressTableCount = await progressOwner.textPreflightTableCount(progressRoute);
-      for (const [version, done] of [[1, false], [1, true], [2, false], [2, true], [3, false], [3, true]]) {
+      for (const [version, done] of [[1, false], [1, true], [2, false], [2, true], [3, false], [3, true], [4, false], [4, true]]) {
         const prior = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
         await registry.setLegacyPreflight(progressId, version, done, progressTableCount);
         const results = await Promise.allSettled([
@@ -256,7 +256,7 @@ export default {
         check(JSON.stringify(await progressOwner.ownerFence()) === JSON.stringify(beforeLegacyFence) && JSON.stringify(await progressOwner.businessSnapshot()) === JSON.stringify(beforeLegacyBusiness), 'Legacy recovery changed source state');
         await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move');
         const restarted = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
-        check(restarted && restarted.cursor.version === 4 && restarted.marker !== prior.marker, 'Legacy recovery did not start a fresh scan');
+        check(restarted && restarted.cursor.version === 5 && restarted.marker !== prior.marker, 'Legacy recovery did not start a fresh scan');
       }
       await registry.setLegacyPreflight(progressId, 1, true, progressTableCount);
       const legacyBefore = await registry.legacyRelocationTextPreflightStatus('move-secret', progressId, 'progress-move');

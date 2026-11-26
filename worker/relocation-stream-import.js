@@ -60,7 +60,7 @@ function validTypes(types, names) {
  let total = 0;
  for (const item of types) {
   if (item?.kind === 'text' || item?.kind === 'blob') {
-   if (!own(item, ['kind', 'length']) || !Number.isSafeInteger(item.length) || item.length < 0 || item.length > MAX_ROW_VALUE_BYTES) throw Error('Invalid stream row descriptors');
+   if (!own(item, ['kind', 'length']) || !Number.isSafeInteger(item.length) || item.length < 0 || item.length > 8_388_608) throw Error('Invalid stream row descriptors');
    total += item.length;
   } else if (item?.kind === 'null') {
    if (!own(item, ['kind'])) throw Error('Invalid stream row descriptors');

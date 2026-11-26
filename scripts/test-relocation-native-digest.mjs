@@ -7,7 +7,7 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 const db = new DatabaseSync(':memory:');
 db.exec('CREATE TABLE large_fixture (id TEXT PRIMARY KEY, value TEXT, data BLOB, number INTEGER, absent TEXT)');
 const bytes = Uint8Array.from({ length: 70000 }, (_, index) => index % 251);
-db.prepare('INSERT INTO large_fixture VALUES (?, ?, ?, 9223372036854775807, NULL)').run('key', 'a'.repeat(65535) + 'é😀' + 'z'.repeat(90000), bytes);
+db.prepare('INSERT INTO large_fixture VALUES (?, ?, ?, 9223372036854775807, NULL)').run('key', 'a'.repeat(65535) + 'é😀' + 'z'.repeat(8234459), bytes);
 db.exec("CREATE TABLE small_fixture (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO small_fixture VALUES (1, 'small')");
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');

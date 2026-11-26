@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { advanceRelocationTextPreflight } from '../worker/relocation-text-preflight.js';
 import { ensureStreamImportSchema, validateStreamImportSchema, streamImportStatus, importStream } from '../worker/relocation-stream-import.js';
 const check = (value, message) => { if (!value) throw Error(message); };
 const textBytes = 8_300_000, blobBytes = 257, slice = 64 * 1024;
@@ -7,7 +8,11 @@ const pattern = new Uint8Array([0, 0xc3, 0xa9, 0xf0, 0x9f, 0x98, 0x80]);
 function makeText(offset, length) { const out = new Uint8Array(length); for (let i = 0; i < length; i++) out[i] = offset + i < textBytes - 2 ? pattern[(offset + i) % pattern.length] : 0x41; return out; }
 function makeBlob(offset, length) { const out = new Uint8Array(length); for (let i = 0; i < length; i++) out[i] = (offset + i) % 256; return out; }
 export class StreamOwner extends DurableObject {
- constructor(ctx, env) { super(ctx, env); this.ctx = ctx; this.s = ctx.storage; this.s.sql.exec('CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, value TEXT NOT NULL, raw BLOB NOT NULL, precise INTEGER NOT NULL, amount REAL NOT NULL, optional TEXT, CHECK(precise > 0))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS events (count INTEGER NOT NULL)'); this.s.sql.exec('CREATE TRIGGER IF NOT EXISTS on_item AFTER INSERT ON items BEGIN INSERT INTO events VALUES (1); END'); ensureStreamImportSchema(this.s); }
+ constructor(ctx, env) { super(ctx, env); this.ctx = ctx; this.s = ctx.storage; this.s.sql.exec('CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, value TEXT NOT NULL, raw BLOB NOT NULL, precise INTEGER NOT NULL, amount REAL NOT NULL, optional TEXT, CHECK(precise > 0))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS events (count INTEGER NOT NULL)'); this.s.sql.exec('CREATE TRIGGER IF NOT EXISTS on_item AFTER INSERT ON items BEGIN INSERT INTO events VALUES (1); END'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS indexed_items (id INTEGER PRIMARY KEY, value TEXT NOT NULL, value_length INTEGER GENERATED ALWAYS AS (length(value)) STORED)'); this.s.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS indexed_length ON indexed_items(value_length)'); this.s.sql.exec("CREATE TRIGGER IF NOT EXISTS reject_short AFTER INSERT ON indexed_items WHEN NEW.value_length < 3 BEGIN SELECT RAISE(ABORT, 'short value'); END"); ensureStreamImportSchema(this.s); }
+ receiveIndexed(index, stream) { return this.s.transactionSync(() => importStream(this.s, { projectId: 'p', table: 'indexed_items', names: ['id', 'value'], rowOffset: 0, index, stream })); }
+ indexedState() { return { state: streamImportStatus(this.s, 'p'), rows: this.s.sql.exec('SELECT id, value, value_length FROM indexed_items ORDER BY id').toArray() }; }
+ allowShort() { this.s.sql.exec('DROP TRIGGER reject_short'); }
+ preflightIndexed() { return this.s.transactionSync(() => advanceRelocationTextPreflight(this.s, ['indexed_items'], null, {projectId:'p', moveId:'m'})); }
  receive(index, stream, fail = false) { return this.s.transactionSync(() => { validateStreamImportSchema(this.s, 'p'); return importStream(this.s, { projectId: 'p', table: 'items', names: ['id', 'value', 'raw', 'precise', 'amount', 'optional'], rowOffset: 0, index, stream, failAfterRows: fail ? 1 : 0 }); }); }
  state() { const state = streamImportStatus(this.s, 'p'); return { state, count: this.s.sql.exec('SELECT COUNT(*) AS n FROM items').one().n, events: this.s.sql.exec('SELECT COUNT(*) AS n FROM events').one().n }; }
  corrupt(kind) {
@@ -74,6 +79,22 @@ export default { async fetch(request, env) {
   await violates.receive(0,{...key,types:negativeTypes}); await violates.receive(1,emptyText);
   try { await violates.receive(2,emptyBlob); throw Error('constraint violation accepted'); } catch(error) { if (String(error).includes('constraint violation accepted')) throw error; }
   const violatedState = await violates.state(); check(violatedState.state?.last_chunk === 1 && violatedState.count === 0 && violatedState.events === 0, 'constraint failure changed state');
+  const oversized = env.OWNER.getByName(`${tag}-oversized`);
+  const oversizedPacket = {v:2,column:1,offset:0,total:8388609,kind:'text',data:new Uint8Array(slice).fill(65).toBase64(),cursor:[{integer:'23'}],rowDone:false,nextColumn:1,nextOffset:slice,types:[{kind:'integer',value:'23'},{kind:'text',length:8388609}]};
+  try { await oversized.receiveIndexed(0,oversizedPacket); throw Error('oversized value accepted'); } catch (error) { if (String(error).includes('oversized value accepted')) throw error; }
+  const oversizedState = await oversized.indexedState();
+  check(oversizedState.rows.length === 0 && oversizedState.state === null, 'oversized value changed destination state');
+  const indexed = env.OWNER.getByName(`${tag}-indexed`);
+  const indexedPacket = {v:2,column:1,offset:0,total:2,kind:'text',data:'YWI=',cursor:[{integer:'23'}],rowDone:true,nextColumn:null,nextOffset:null,types:[{kind:'integer',value:'23'},{kind:'text',length:2}]};
+  try { await indexed.receiveIndexed(0,indexedPacket); throw Error('trigger accepted short value'); } catch (error) { if (String(error).includes('trigger accepted short value')) throw error; }
+  let indexedState = await indexed.indexedState();
+  check(indexedState.rows.length === 0 && indexedState.state === null, 'trigger rejection changed staged rows');
+  await indexed.allowShort();
+  check(await indexed.receiveIndexed(0,indexedPacket), 'INTEGER PRIMARY KEY retry failed');
+  indexedState = await indexed.indexedState();
+  check(indexedState.rows.length === 1 && indexedState.rows[0].id === 23 && indexedState.rows[0].value === 'ab' && indexedState.rows[0].value_length === 2, 'stored generated column or index differs');
+  const indexedPreflight = await indexed.preflightIndexed();
+  check(indexedPreflight.done && indexedPreflight.checkpoint.version === 5, 'generated column preflight failed');
   return Response.json({ok:true});
  } catch (error) { return Response.json({ok:false,error:String(error)}, {status:500}); }
 } };

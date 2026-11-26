@@ -12,10 +12,9 @@ export class DigestFixture extends DurableObject {
     sql.exec('CREATE TABLE mapi_relocation_project (project_id TEXT PRIMARY KEY, object_name TEXT, generation INTEGER, state TEXT, move_id TEXT)');
     sql.exec("INSERT INTO mapi_relocation_project VALUES (?, 'target', 2, 'staged', 'move')", route.projectId);
     sql.exec('CREATE TABLE large_fixture (id TEXT PRIMARY KEY, value TEXT, data BLOB, number INTEGER, absent TEXT)');
-    const value = 'a'.repeat(65535) + 'é😀' + 'z'.repeat(90000);
     const data = new Uint8Array(70000);
     for (let i = 0; i < data.length; i++) data[i] = i % 251;
-    sql.exec('INSERT INTO large_fixture VALUES (?, ?, ?, 9223372036854775807, NULL)', 'key', value, data.buffer);
+    sql.exec("INSERT INTO large_fixture VALUES (?, ? || 'é😀' || replace(hex(zeroblob(?)), '00', 'zz') || 'z', ?, 9223372036854775807, NULL)", 'key', 'a'.repeat(65535), 4117229, data.buffer);
     sql.exec('CREATE TABLE small_fixture (id INTEGER PRIMARY KEY, value TEXT)');
     sql.exec("INSERT INTO small_fixture VALUES (1, 'small')");
   }
@@ -38,7 +37,7 @@ export default {
         if (JSON.stringify(left) !== JSON.stringify(right)) throw Error('Owner digest differs');
         pages.push(left);
         if (left.done) break;
-        if (pages.length > 100) throw Error('Digest did not finish');
+        if (pages.length > 300) throw Error('Digest did not finish');
         cursor = left.cursor;
       }
       result[table] = pages;

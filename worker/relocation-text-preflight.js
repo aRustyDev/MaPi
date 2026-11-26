@@ -1,4 +1,5 @@
 import { MAX_ROW_VALUE_BYTES } from './relocation-chunks.js';
+import { serialTypeBytes, recordValueBytes } from './relocation-record-size.js';
 
 const MAX_ROWS = 64;
 const MAX_BYTES = 256 * 1024;
@@ -11,7 +12,7 @@ const MAX_CHUNK_BYTES = 128 * 1024;
 const MAX_INT64 = 9223372036854775807n;
 const MIN_INT64 = -9223372036854775808n;
 const quote = name => '"' + name.replaceAll('"', '""') + '"';
-export const RELOCATION_TEXT_PREFLIGHT_VERSION = 4;
+export const RELOCATION_TEXT_PREFLIGHT_VERSION = 5;
 
 function validRowid(value) {
   if (typeof value !== 'string' || !/^(0|-?[1-9][0-9]*)$/.test(value)) return false;
@@ -20,16 +21,18 @@ function validRowid(value) {
 }
 
 function initial() {
-  return { version: RELOCATION_TEXT_PREFLIGHT_VERSION, table: 0, after: null, row: null, column: 0, rowBytes: 0, cursorBytes: 2, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done: false };
+  return { version: RELOCATION_TEXT_PREFLIGHT_VERSION, table: 0, after: null, row: null, column: 0, rowBytes: 0, recordBytes: 0, recordHeader: 0, cursorBytes: 2, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done: false };
 }
 
 function validCheckpoint(value, tables) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).sort().join(',') !== 'after,column,cursorBytes,done,length,maximum,minimum,offset,remaining,row,rowBytes,table,version' ||
+      Object.keys(value).sort().join(',') !== 'after,column,cursorBytes,done,length,maximum,minimum,offset,recordBytes,recordHeader,remaining,row,rowBytes,table,version' ||
       value.version !== RELOCATION_TEXT_PREFLIGHT_VERSION || !Number.isSafeInteger(value.table) || value.table < 0 || value.table > tables.length ||
       !(value.after === null || validRowid(value.after)) || !(value.row === null || validRowid(value.row)) ||
       !Number.isSafeInteger(value.column) || value.column < 0 || value.column > 100 ||
       !Number.isSafeInteger(value.rowBytes) || value.rowBytes < 0 || value.rowBytes > MAX_ROW_VALUE_BYTES ||
+      !Number.isSafeInteger(value.recordBytes) || value.recordBytes < 0 || value.recordBytes > 8_388_608 ||
+      !Number.isSafeInteger(value.recordHeader) || value.recordHeader < 0 || value.recordHeader > 400 ||
       !Number.isSafeInteger(value.cursorBytes) || value.cursorBytes < 2 || value.cursorBytes > MAX_CURSOR_BYTES ||
       !(value.length === null || Number.isSafeInteger(value.length) && value.length >= 0 && value.length <= 8_388_608) ||
       !Number.isSafeInteger(value.offset) || value.offset < 0 ||
@@ -37,7 +40,7 @@ function validCheckpoint(value, tables) {
       !Number.isInteger(value.minimum) || value.minimum < 128 || value.minimum > 191 ||
       !Number.isInteger(value.maximum) || value.maximum < value.minimum || value.maximum > 191 ||
       typeof value.done !== 'boolean' || value.done !== (value.table === tables.length)) return false;
-  if (value.row === null && (value.column !== 0 || value.rowBytes !== 0 || value.cursorBytes !== 2 || value.length !== null || value.offset !== 0 || value.remaining !== 0)) return false;
+  if (value.row === null && (value.column !== 0 || value.rowBytes !== 0 || value.recordBytes !== 0 || value.recordHeader !== 0 || value.cursorBytes !== 2 || value.length !== null || value.offset !== 0 || value.remaining !== 0)) return false;
   if (value.length === null && (value.offset !== 0 || value.remaining !== 0)) return false;
   if (value.length !== null && (value.row === null || value.offset > value.length || value.offset === 0 && value.remaining !== 0)) return false;
   if (value.row !== null && value.after !== null && BigInt(value.row) <= BigInt(value.after)) return false;
@@ -57,20 +60,22 @@ function tableDetails(query, name, identity) {
   const names = new Set(info.map(column => column.name.toLowerCase()));
   const rowid = ['rowid', '_rowid_', 'oid'].find(name => !names.has(name));
   if (!rowid) throw Error('Unsupported TEXT preflight rowid');
-  const columns = info.filter(column => column.hidden === 0);
+  const columns = info.filter(column => column.hidden === 0 || column.hidden === 3);
+  const primary = info.filter(column => column.pk > 0);
+  const alias = primary.length === 1 && String(primary[0].type).toUpperCase() === 'INTEGER' && !query(`PRAGMA index_list(${table})`).toArray().some(index => index.origin === 'pk') ? primary[0].name : null;
   // These singleton values are represented in the manifest, not transferred
   // as rows, so they legitimately have no primary key.
   if (!columns.some(column => column.pk > 0) && !['mapi_project_origin', 'mapi_recovery_epoch'].includes(name)) throw Error('Export primary key changed');
   const header = {
     projectId: identity.projectId, generation: Number.MAX_SAFE_INTEGER, moveId: identity.moveId,
     index: Number.MAX_SAFE_INTEGER, prev: 'f'.repeat(64), table: name,
-    columns: columns.map(column => column.name), offset: Number.MAX_SAFE_INTEGER,
+    columns: columns.filter(column => column.hidden === 0).map(column => column.name), offset: Number.MAX_SAFE_INTEGER,
     rows: [], last: false, done: false, cursor: null,
     fragment: { offset: Number.MAX_SAFE_INTEGER, total: Number.MAX_SAFE_INTEGER, data: 'A'.repeat(FRAGMENT_BASE64_BYTES), cursor: null },
   };
   const headerBytes = new TextEncoder().encode(JSON.stringify(header)).length;
   if (headerBytes - 8 + 2 * MAX_CURSOR_BYTES > MAX_CHUNK_BYTES) throw Error('Relocation fragment metadata exceeds limit');
-  return { table, rowid, columns: columns.map(column => ({ name: quote(column.name), key: column.pk > 0 })) };
+  return { table, rowid, columns: columns.map(column => ({ name: quote(column.name), key: column.pk > 0, rowidAlias: column.name === alias, writable: column.hidden === 0 })) };
 }
 
 function consumeUtf8(checkpoint, bytes, key) {
@@ -128,7 +133,7 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
   while (!checkpoint.done && queries < MAX_QUERIES && bytes < MAX_BYTES) {
     const name = tables[checkpoint.table];
     if (!cache.has(name)) {
-      if (queries + 2 >= MAX_QUERIES) break;
+      if (queries + 3 > MAX_QUERIES) break;
       cache.set(name, tableDetails(query, name, identity));
     }
     const { table, rowid, columns } = cache.get(name);
@@ -154,16 +159,19 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
       checkpoint.row = null;
       checkpoint.column = 0;
       checkpoint.rowBytes = 0;
+      checkpoint.recordBytes = 0;
+      checkpoint.recordHeader = 0;
       checkpoint.cursorBytes = 2;
       continue;
     }
     const column = columns[checkpoint.column].name;
     const key = columns[checkpoint.column].key;
+    const rowidAlias = columns[checkpoint.column].rowidAlias;
     if (checkpoint.length === null) {
       if (queries >= MAX_QUERIES) break;
       const keyValues = key
         ? `CASE WHEN typeof(${column}) = 'integer' THEN printf('%lld', ${column}) END AS integer_value, CASE WHEN typeof(${column}) = 'real' AND ${column} <= 1.7976931348623157e308 AND ${column} >= -1.7976931348623157e308 THEN ${column} END AS real_value`
-        : 'NULL AS integer_value, NULL AS real_value';
+        : `CASE WHEN typeof(${column}) = 'integer' THEN printf('%lld', ${column}) END AS integer_value, NULL AS real_value`;
       const result = query(`SELECT typeof(${column}) AS kind, CASE WHEN typeof(${column}) IN ('text', 'blob') THEN length(CAST(${column} AS BLOB)) END AS size, CASE WHEN typeof(${column}) = 'real' AND (${column} > 1.7976931348623157e308 OR ${column} < -1.7976931348623157e308) THEN 1 ELSE 0 END AS nonfinite, ${keyValues} FROM ${table} WHERE ${rowid} = CAST(? AS INTEGER)`, checkpoint.row).toArray();
       if (result.length !== 1) throw Error('TEXT preflight source changed');
       if (result[0].nonfinite) throw Error('Non-finite REAL is not supported by relocation');
@@ -172,7 +180,10 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
       // exporter's 12 MiB fragment-envelope limit at this value-byte cap.
       const size = ['text', 'blob'].includes(result[0].kind) ? result[0].size : result[0].kind === 'null' ? 0 : 8;
       if (!Number.isSafeInteger(size) || size < 0 || size > 8_388_608) throw Error('TEXT preflight value exceeds SQLite limit');
-      checkpoint.rowBytes += size;
+      if (columns[checkpoint.column].writable) checkpoint.rowBytes += size;
+      checkpoint.recordHeader += serialTypeBytes(result[0].kind, size);
+      checkpoint.recordBytes += recordValueBytes(result[0].kind, size, result[0].integer_value, rowidAlias);
+      if (checkpoint.recordBytes + checkpoint.recordHeader + (checkpoint.recordHeader + 1 < 128 ? 1 : 2) > 8_388_608) throw Error('Row exceeds SQLite record size limit');
       if (checkpoint.rowBytes > MAX_ROW_VALUE_BYTES) throw Error('Row exceeds conservative SQLite size limit');
       if (key) {
         if (result[0].kind === 'null') throw Error('Export primary key contains NULL');
