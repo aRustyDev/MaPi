@@ -1,0 +1,8 @@
+{
+  "name": "synthetic-active-snapshot-probe",
+  "main": "relocation-active-snapshot-probe-worker.mjs",
+  "compatibility_date": "2026-09-01",
+  "vars": { "MAPI_LOCAL_TEST": "1" },
+  "durable_objects": { "bindings": [{ "name": "SOURCE", "class_name": "Source" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Source"] }]
+}
