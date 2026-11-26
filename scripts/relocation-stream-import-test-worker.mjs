@@ -9,6 +9,7 @@ function makeText(offset, length) { const out = new Uint8Array(length); for (let
 function makeBlob(offset, length) { const out = new Uint8Array(length); for (let i = 0; i < length; i++) out[i] = (offset + i) % 256; return out; }
 export class StreamOwner extends DurableObject {
  constructor(ctx, env) { super(ctx, env); this.ctx = ctx; this.s = ctx.storage; this.s.sql.exec('CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, value TEXT NOT NULL, raw BLOB NOT NULL, precise INTEGER NOT NULL, amount REAL NOT NULL, optional TEXT, CHECK(precise > 0))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS events (count INTEGER NOT NULL)'); this.s.sql.exec('CREATE TRIGGER IF NOT EXISTS on_item AFTER INSERT ON items BEGIN INSERT INTO events VALUES (1); END'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS indexed_items (id INTEGER PRIMARY KEY, value TEXT NOT NULL, value_length INTEGER GENERATED ALWAYS AS (length(value)) STORED)'); this.s.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS indexed_length ON indexed_items(value_length)'); this.s.sql.exec("CREATE TRIGGER IF NOT EXISTS reject_short AFTER INSERT ON indexed_items WHEN NEW.value_length < 3 BEGIN SELECT RAISE(ABORT, 'short value'); END"); ensureStreamImportSchema(this.s); }
+ byteLengthCases() { return this.s.sql.exec("SELECT octet_length(CAST(X'61C3A900F09F9880' AS TEXT)) AS text_bytes, octet_length(X'0080FF') AS blob_bytes, octet_length(CAST(X'80' AS TEXT)) AS malformed_bytes").one(); }
  receiveIndexed(index, stream) { return this.s.transactionSync(() => importStream(this.s, { projectId: 'p', table: 'indexed_items', names: ['id', 'value'], rowOffset: 0, index, stream })); }
  indexedState() { return { state: streamImportStatus(this.s, 'p'), rows: this.s.sql.exec('SELECT id, value, value_length FROM indexed_items ORDER BY id').toArray() }; }
  allowShort() { this.s.sql.exec('DROP TRIGGER reject_short'); }
@@ -27,6 +28,8 @@ export class StreamOwner extends DurableObject {
 export default { async fetch(request, env) {
  try {
   const tag = crypto.randomUUID(); let owner = env.OWNER.getByName(tag), index = 0;
+  const lengths = await owner.byteLengthCases();
+  check(lengths.text_bytes === 8 && lengths.blob_bytes === 3 && lengths.malformed_bytes === 1, 'SQLite byte-length semantics changed');
   const types = [{kind:'text',length:3},{kind:'text',length:textBytes},{kind:'blob',length:blobBytes},{kind:'integer',value:'9223372036854775807'},{kind:'real',value:1.25},{kind:'null'}];
   const cursor = ['key'];
   let stream = {v:2,column:0,offset:0,total:3,kind:'text',data:new TextEncoder().encode('key').toBase64(),cursor,rowDone:false,nextColumn:1,nextOffset:0,types};
