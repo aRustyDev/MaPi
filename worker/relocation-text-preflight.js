@@ -79,7 +79,8 @@ function tableDetails(query, name, identity) {
 }
 
 function consumeUtf8(checkpoint, bytes, key) {
-  for (const byte of bytes) {
+  for (let index = 0; index < bytes.length; index++) {
+    const byte = bytes[index];
     if (checkpoint.remaining) {
       if (byte < checkpoint.minimum || byte > checkpoint.maximum) throw Error('Invalid UTF-8 TEXT in relocation row');
       checkpoint.remaining--;

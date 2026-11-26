@@ -82,7 +82,8 @@ function validTypes(types, names) {
 // Strict UTF-8 state is checkpointed, including an incomplete code point at an
 // eviction boundary. No untrusted TEXT bytes pass through a Workerd string.
 function consumeUtf8(state, data, done) {
- for (const byte of data) {
+ for (let index = 0; index < data.length; index++) {
+  const byte = data[index];
   if (state.remaining) {
    if (byte < state.minimum || byte > state.maximum) throw Error('Invalid UTF-8 TEXT in stream row');
    state.remaining--; state.minimum = 128; state.maximum = 191;
