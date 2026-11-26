@@ -406,6 +406,17 @@ export function readRelocationRow(storage, names, source, args) {
   return execute(storage, { statement: `SELECT ${columns.join(', ')} ${source}`, args, query: true }).rows[0];
 }
 
+// Read a bounded BLOB slice with the same typed parameter binding as the SQL
+// bridge. The caller chooses the projection and validates its expected size.
+export function readRelocationBlobSlice(storage, statement, args) {
+  const { sql, values } = bind(statement, args);
+  const rows = storage.sql.exec(sql, ...values).raw().toArray();
+  if (rows.length !== 1 || rows[0].length !== 1 || !(rows[0][0] instanceof ArrayBuffer)) {
+    throw new Error("Invalid reconciliation slice");
+  }
+  return new Uint8Array(rows[0][0]);
+}
+
 export function sqliteError(error) {
   const message = error instanceof Error ? error.message : String(error);
   const codes = [

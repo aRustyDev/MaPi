@@ -333,6 +333,10 @@ export class NextgenApplication extends DurableObject {
     });
     if (outcome === 'stale') return { state: 'stale' };
     this.#fenceArmed = true;
+    // Frozen sources no longer serve Go requests. The synchronous reactor and
+    // its memory can be reclaimed while relocation reads SQLite directly.
+    this.#reactor = undefined;
+    this.#memory = undefined;
     return { projectId: route.projectId, origin: route.origin, objectName: route.objectName, generation: route.generation, moveId, state: "frozen", objectId: this.ctx.id.toString() };
   }
 
@@ -348,7 +352,10 @@ export class NextgenApplication extends DurableObject {
         move.source_object !== route.objectName || move.generation !== route.generation) throw new Error("Source move is not reserved by registry");
     if (this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Source object identity mismatch");
     this.#assertRecoveryObjectEpoch();
-    return freezeOwnerFence(this.ctx.storage, route, moveId, true);
+    const result = freezeOwnerFence(this.ctx.storage, route, moveId, true);
+    this.#reactor = undefined;
+    this.#memory = undefined;
+    return result;
   }
 
   async armRecovery(secret, projectId, recoveryId) {
@@ -700,6 +707,14 @@ export class NextgenApplication extends DurableObject {
   }
 
   #initialize() {
+    // Reject stale or frozen route calls before instantiating Go, including
+    // after relocation has released the frozen owner's prior reactor.
+    if (this.#fenceArmed && !this.#recoveryAuthority && !this.#pendingAuthority) {
+      this.ctx.storage.transactionSync(() => {
+        this.#assertRecoveryObjectEpoch();
+        assertOwnerFence(this.ctx.storage, this.#authority);
+      });
+    }
     if (this.#reactor) return;
     const attempt = ++this.#reactorAttempts;
     const diagnostics = this.env.MAPI_RUNTIME_DIAGNOSTICS === "1";

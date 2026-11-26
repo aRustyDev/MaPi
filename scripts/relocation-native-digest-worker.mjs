@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { digestRelocationPage } from '../worker/relocation-manifest.js';
+import { readRelocationBlobSlice } from '../worker/sql.js';
 
 const route = { projectId: 'native-digest', origin: 'https://native.example', objectName: 'source', generation: 1 };
 const manifest = { version: 1, ...route, moveId: 'move', tables: ['large_fixture', 'small_fixture'] };
@@ -17,8 +18,26 @@ export class DigestFixture extends DurableObject {
     sql.exec("INSERT INTO large_fixture VALUES (?, ? || 'é😀' || replace(hex(zeroblob(?)), '00', 'zz') || 'z', ?, 9223372036854775807, NULL)", 'key', 'a'.repeat(65535), 4117229, data.buffer);
     sql.exec('CREATE TABLE small_fixture (id INTEGER PRIMARY KEY, value TEXT)');
     sql.exec("INSERT INTO small_fixture VALUES (1, 'small')");
+    sql.exec('CREATE TABLE key_probe (id INTEGER PRIMARY KEY, value BLOB)');
+    sql.exec("INSERT INTO key_probe VALUES (9223372036854775807, X'0080FF')");
+    sql.exec('CREATE TABLE blob_key_probe (id BLOB PRIMARY KEY, value BLOB)');
+    sql.exec("INSERT INTO blob_key_probe VALUES (X'0080FF', X'AA00')");
+    sql.exec('CREATE TABLE malformed_fixture (id TEXT PRIMARY KEY, value TEXT)');
+    sql.exec("INSERT INTO malformed_fixture VALUES ('bad', CAST(zeroblob(65535) || X'80' AS TEXT))");
   }
   digest(role, table, cursor) { return digestRelocationPage(this.ctx.storage, manifest, role, table, cursor); }
+  keySlices() {
+    const integer = readRelocationBlobSlice(this.ctx.storage, 'SELECT value FROM key_probe WHERE id = ?', [{kind:'int',value:'9223372036854775807'}]);
+    const blob = readRelocationBlobSlice(this.ctx.storage, 'SELECT value FROM blob_key_probe WHERE id = ?', [{kind:'blob',value:'AID/'}]);
+    return { integer: integer.toBase64(), blob: blob.toBase64() };
+  }
+  async rejectMalformed() {
+    const badManifest = { ...manifest, tables: ['malformed_fixture'] };
+    const first = await digestRelocationPage(this.ctx.storage, badManifest, 'source', 'malformed_fixture', null);
+    try { await digestRelocationPage(this.ctx.storage, badManifest, 'source', 'malformed_fixture', first.cursor); }
+    catch (error) { if (String(error).includes('Invalid UTF-8 TEXT in relocation row')) return true; throw error; }
+    return false;
+  }
 }
 
 export default {
@@ -27,6 +46,9 @@ export default {
     const destination = env.PROJECT.getByName('destination');
     await source.setup();
     await destination.setup();
+    const keySlices = await source.keySlices();
+    if (keySlices.integer !== 'AID/' || keySlices.blob !== 'qgA=') throw Error('Typed slice binding differs');
+    if (!(await source.rejectMalformed())) throw Error('Malformed TEXT was accepted');
     const result = {};
     for (const table of manifest.tables) {
       let cursor = null;

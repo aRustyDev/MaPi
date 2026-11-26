@@ -41,6 +41,7 @@ try {
     assert.equal(response.status, 200, `Capacity proof failed during ${value.stage}`);
     if (value.done) {
       assert.equal(value.seeded, 2000);
+      assert.equal(value.sourceRuntimeReleased, true, 'Frozen source must release its Go reactor');
       assert.equal(value.blobDigest, expectedBlobDigest, 'Large BLOB source and destination must match the native digest');
       assert.equal(value.nearTextDigest, expectedTextDigest, 'Large TEXT source and destination must match the native digest');
       assert.equal(value.importedHandler?.status, 200, 'Imported synthetic user must be readable through the Go handler');

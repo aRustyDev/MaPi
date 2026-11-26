@@ -181,6 +181,10 @@ export default {
           const snapshot = await owner.snapshot(projectId, userId, state.nearUserId);
           check(snapshot.count === ROWS + 2 && snapshot.bytes === (ROWS + 1) * VALUE_BYTES + LARGE_BYTES && snapshot.large_matches === 1 && snapshot.bounded_key_matches === 1 && snapshot.small_matches === ROWS + 1, 'Synthetic seed differs');
           state.before = snapshot;
+          const runtime = await owner.status(false, { projectId, origin, objectName, generation: 1 });
+          check(runtime.wasmMemoryBytes > 0 && runtime.reactorInitializations > 0, 'Synthetic source Go reactor is not initialized');
+          state.sourceRuntimeInitializations = runtime.reactorInitializations;
+          state.sourceWasmBeforeFreeze = runtime.wasmMemoryBytes;
           state.stage = 'preflight';
         } else if (stage === 'preflight') {
           check(++state.pages <= 20000, 'Capacity page budget exceeded');
@@ -198,6 +202,9 @@ export default {
             check(move.phase === 'moving' && state.largePages >= 2, 'Large TEXT did not span scan pages');
             const fence = await owner.fence();
             check(fence.length === 1 && fence[0].state === 'frozen' && fence[0].move_id === moveId, 'Source fence differs');
+            const runtime = await owner.status(false, { projectId, origin, objectName, generation: 1 });
+            check(runtime.wasmMemoryBytes === 0 && runtime.reactorInitializations === state.sourceRuntimeInitializations, 'Frozen source retained or restarted Go reactor');
+            state.sourceRuntimeReleased = true;
             state.destination = move.destination_object;
             state.stage = 'manifest';
           }
@@ -395,7 +402,7 @@ export default {
         } else if (stage !== 'complete') throw Error('Unknown synthetic capacity stage');
       }
       await registry.saveProofState(state);
-      return Response.json({ stage: state.stage, done: state.stage === 'complete', seeded: state.seeded, pages: state.pages, largePages: state.largePages, oversizedRejected: state.oversizedRejected === true, legacyRejected: state.legacyRejected === true, frozenLegacyRejected: state.frozenLegacyRejected === true, legacyActiveRecovered: state.legacyActiveRecovered === true, longKeyRejected: state.longKeyRejected === true, nonfiniteRejected: state.nonfiniteRejected === true });
+      return Response.json({ stage: state.stage, done: state.stage === 'complete', seeded: state.seeded, pages: state.pages, largePages: state.largePages, sourceWasmBeforeFreeze: state.sourceWasmBeforeFreeze ?? 0, sourceRuntimeReleased: state.sourceRuntimeReleased === true, oversizedRejected: state.oversizedRejected === true, legacyRejected: state.legacyRejected === true, frozenLegacyRejected: state.frozenLegacyRejected === true, legacyActiveRecovered: state.legacyActiveRecovered === true, longKeyRejected: state.longKeyRejected === true, nonfiniteRejected: state.nonfiniteRejected === true });
     } catch (error) {
       console.error('Synthetic capacity proof failed', stage, error?.message);
       return Response.json({ done: false, stage }, { status: 500 });
