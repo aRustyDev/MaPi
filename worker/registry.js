@@ -487,17 +487,10 @@ export class ProjectRegistry extends DurableObject {
       }
       if (!validNewRelocationMoveId(moveId)) throw new Error("Invalid move ID");
       if (sql.exec("SELECT 1 FROM mapi_route_move_ids WHERE move_id = ?", moveId).toArray().length) throw new Error("Move ID already used");
-      let destination;
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const candidate = this.moveDestinationCandidate();
-        if (typeof candidate !== "string" || !candidate.startsWith("project:") || candidate.length > 256) throw new Error("Invalid relocation destination");
-        if (!sql.exec("SELECT 1 FROM project_routes WHERE object_name = ?", candidate).toArray().length &&
-            !sql.exec("SELECT 1 FROM mapi_move_intents WHERE destination_object = ?", candidate).toArray().length &&
-            !sql.exec("SELECT 1 FROM mapi_route_move_objects WHERE object_name = ?", candidate).toArray().length) { destination = candidate; break; }
-      }
-      if (!destination) throw new Error("Could not allocate relocation destination");
-      sql.exec("INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)", projectId, moveId, origin, route.object_name, destination, route.generation);
-      return sql.exec("SELECT * FROM mapi_move_intents WHERE project_id = ?", projectId).one();
+      // New cutovers cannot complete until an independent archive authority is
+      // integrated. Refuse before recording an intent or freezing the source;
+      // an existing matching intent must remain resumable after a lost reply.
+      throw new Error("Relocation admission unavailable: independent archive proof is not configured");
     });
     const sourceRoute = { projectId, origin, objectName: route.object_name, generation: route.generation };
     const namespace = this.env.NEXTGEN_APPLICATION;

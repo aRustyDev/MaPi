@@ -19,6 +19,13 @@ const rejectsWith = async (action, message) => {
 };
 
 export class CapacityRegistry extends BaseRegistry {
+  // This isolated synthetic worker models a relocation intent persisted by an
+  // earlier version. The production registry has no such fixture method.
+  seedExistingIntentForTest(origin, projectId, moveId) {
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, route.object_name, `project:${crypto.randomUUID()}`, route.generation);
+  }
   proofState() { return this.ctx.storage.kv.get('synthetic-capacity-proof') ?? null; }
   saveProofState(value) { this.ctx.storage.kv.put('synthetic-capacity-proof', value); }
   testCheckpoint(projectId, moveId) {
@@ -176,6 +183,12 @@ export default {
           const snapshot = await owner.snapshot(projectId, userId);
           check(snapshot.count === ROWS + 2 && snapshot.bytes === (ROWS + 1) * VALUE_BYTES + LARGE_BYTES && snapshot.large_matches === 1 && snapshot.bounded_key_matches === 1 && snapshot.small_matches === ROWS + 1, 'Synthetic seed differs');
           state.before = snapshot;
+          const beforeStatus = await registry.relocationStatus(secret, projectId), beforeFence = await owner.fence();
+          await rejectsWith(() => registry.beginRelocation(secret, origin, projectId, moveId), 'Relocation admission unavailable');
+          check(JSON.stringify(beforeStatus) === JSON.stringify(await registry.relocationStatus(secret, projectId)) &&
+            JSON.stringify(beforeFence) === JSON.stringify(await owner.fence()) &&
+            JSON.stringify(snapshot) === JSON.stringify(await owner.snapshot(projectId, userId)), 'Rejected admission changed synthetic source');
+          await registry.seedExistingIntentForTest(origin, projectId, moveId);
           state.stage = 'preflight';
         } else if (stage === 'preflight') {
           check(++state.pages <= 20000, 'Capacity page budget exceeded');
@@ -268,6 +281,7 @@ export default {
           await extra.seedOversized(item.projectId, item.userId);
           check(await extra.oversizedMatches(item.projectId, item.userId), 'Oversized fixture differs');
           state.oversize.fence = await extra.fence();
+          await registry.seedExistingIntentForTest(item.origin, item.projectId, item.moveId);
           state.stage = 'oversize-preflight';
         } else if (stage === 'oversize-preflight') {
           const item = state.oversize, extra = env.NEXTGEN_APPLICATION.getByName(item.objectName);
@@ -340,6 +354,7 @@ export default {
           await registry.activate(legacyOrigin, legacyName, legacyId);
           const route = { projectId: legacyId, origin: legacyOrigin, objectName: legacyName, generation: 1 };
           await legacyOwner.addUser('legacy@example.test', 'Synthetic-password-123!', route);
+          await registry.seedExistingIntentForTest(legacyOrigin, legacyId, legacyMove);
           state.legacyActive = { origin: legacyOrigin, objectName: legacyName, moveId: legacyMove, projectId: legacyId, step: 0, tableCount: await legacyOwner.textPreflightTableCount(route), fence: await legacyOwner.fence(), business: await legacyOwner.syntheticBusinessState() };
           state.stage = 'legacy-active-scan';
         } else if (stage === 'legacy-active-scan') {

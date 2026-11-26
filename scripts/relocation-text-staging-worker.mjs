@@ -4,6 +4,11 @@ import { NextgenApplication, ProjectRegistry as BaseRegistry } from '../worker/p
 import { invalidateTextPreflightMarker, readTextPreflightMarker } from '../worker/relocation-text-marker.js';
 
 export class ProjectRegistry extends BaseRegistry {
+  seedExistingIntentForTest(origin, projectId, moveId) {
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, route.object_name, `project:${crypto.randomUUID()}`, route.generation);
+  }
   proofState() { return this.ctx.storage.kv.get('synthetic-text-proof') ?? null; }
   saveProofState(value) { this.ctx.storage.kv.put('synthetic-text-proof', value); }
 }
@@ -63,6 +68,7 @@ export default {
         await registry.activate(origin, objectName, projectId);
         const route = { projectId, origin, objectName, generation: 1 };
         const { userId } = await owner.addUser('fixture@example.test', 'Synthetic-password-123!', route);
+        await registry.seedExistingIntentForTest(origin, projectId, moveId);
         state = { stage: 'first-page', origin, objectName, moveId, projectId, userId, steps: 0 };
       } else {
         check(++state.steps <= 20000, 'Synthetic proof exceeded step budget');

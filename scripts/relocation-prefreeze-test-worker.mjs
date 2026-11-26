@@ -3,6 +3,11 @@ import { ProjectRegistry } from "../worker/registry.js";
 import { validateRelocationSourceSchema } from "../worker/relocation-manifest.js";
 
 export class TestRegistry extends ProjectRegistry {
+  seedExistingIntentForTest(origin, projectId, moveId) {
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, route.object_name, `project:${crypto.randomUUID()}`, route.generation);
+  }
   evict() { this.ctx.abort("registry restart"); }
   setLegacyPreflight(projectId, version, done, tableCount) {
     const sql = this.ctx.storage.sql;
@@ -229,6 +234,7 @@ export default {
       const progressId = (await progressOwner.provision('Progress', progressOrigin, { projectId: null, origin: progressOrigin, objectName: progressName, generation: 1 })).projectId;
       await registry.activate(progressOrigin, progressName, progressId);
       const progressRoute = { projectId: progressId, origin: progressOrigin, objectName: progressName, generation: 1 };
+      await registry.seedExistingIntentForTest(progressOrigin, progressId, 'progress-move');
       check((await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move')).phase === 'preflighting', 'First page did not preserve active route');
       const beforeEviction = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
       check(beforeEviction && !beforeEviction.done, 'Initial progress missing');
@@ -277,6 +283,7 @@ export default {
       await registry.reserve(lostOrigin, lostName);
       const lostId = (await lostOwner.provision('Legacy frozen', lostOrigin, { projectId: null, origin: lostOrigin, objectName: lostName, generation: 1 })).projectId;
       await registry.activate(lostOrigin, lostName, lostId);
+      await registry.seedExistingIntentForTest(lostOrigin, lostId, lostMove);
       for (let page = 0; page < 10000; page++) {
         const current = await registry.relocationTextPreflightStatus('move-secret', lostId, lostMove).catch(() => null);
         if (current?.done) break;
@@ -318,6 +325,7 @@ export default {
       await registry.activate(nearOrigin, nearName, nearId);
       await registry.setTestGeneration(nearId, '9007199254740990');
       await nearOwner.setTestOwnerGeneration('9007199254740990');
+      await registry.seedExistingIntentForTest(nearOrigin, nearId, 'near-max-generation-move');
       const nearMove = await beginRelocation('move-secret', nearOrigin, nearId, 'near-max-generation-move');
       check(nearMove.phase === 'moving' && nearMove.generation === Number.MAX_SAFE_INTEGER - 1, 'Last representable generation could not begin a move');
       check((await beginRelocation('move-secret', nearOrigin, nearId, 'near-max-generation-move')).generation === nearMove.generation, 'Near-maximum move retry changed generation');
@@ -333,6 +341,7 @@ export default {
       const epochRoute = { projectId: epochId, origin: epochOrigin, objectName: epochName, generation: 1 };
       await epochOwner.addUser('configured-epoch@example.test', 'Synthetic-password-123!', epochRoute);
       const epochFence = await epochOwner.ownerFence(), epochBusiness = await epochOwner.businessSnapshot();
+      await registry.seedExistingIntentForTest(epochOrigin, epochId, 'configured-epoch-move');
       const rejectEpochMove = async label => {
         let error = '';
         try { await beginRelocation('move-secret', epochOrigin, epochId, 'configured-epoch-move'); } catch (caught) { error = String(caught); }
@@ -363,6 +372,7 @@ export default {
       const schemaId = (await schemaOwner.provision("Schema", schemaOrigin, { projectId: null, origin: schemaOrigin, objectName: schemaName, generation: 1 })).projectId;
       await registry.activate(schemaOrigin, schemaName, schemaId);
       const schemaRoute = { projectId: schemaId, origin: schemaOrigin, objectName: schemaName, generation: 1 };
+      await registry.seedExistingIntentForTest(schemaOrigin, schemaId, 'schema-move');
       await schemaOwner.addUnsupportedSchema();
       let schemaError = "";
       try { await beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (error) { schemaError = String(error); }
@@ -470,6 +480,7 @@ export default {
       await registry.reserve(negativeOrigin, negativeName);
       const negativeId = (await negativeOwner.provision("Negative clock", negativeOrigin, { projectId: null, origin: negativeOrigin, objectName: negativeName, generation: 1 })).projectId;
       await registry.activate(negativeOrigin, negativeName, negativeId);
+      await registry.seedExistingIntentForTest(negativeOrigin, negativeId, 'negative-clock-move');
       const negativeCounts = await negativeOwner.testCounts(), negativeFence = await negativeOwner.ownerFence(), otherCounts = await other.testCounts();
       const negativeRoute = { projectId: negativeId, origin: negativeOrigin, objectName: negativeName, generation: 1 };
       const originalStamp = await negativeOwner.removeTestRevisionClock();
@@ -510,6 +521,7 @@ export default {
       await registry.reserve(brokenClockOrigin, brokenClockName);
       const brokenClockId = (await brokenClockOwner.provision("Broken clock", brokenClockOrigin, { projectId: null, origin: brokenClockOrigin, objectName: brokenClockName, generation: 1 })).projectId;
       await registry.activate(brokenClockOrigin, brokenClockName, brokenClockId);
+      await registry.seedExistingIntentForTest(brokenClockOrigin, brokenClockId, 'broken-clock-move');
       const clockStamp = await brokenClockOwner.removeTestRevisionClock();
       let clockError = "";
       try { await beginRelocation("move-secret", brokenClockOrigin, brokenClockId, "broken-clock-move"); } catch (caught) { clockError = String(caught); }
@@ -526,6 +538,7 @@ export default {
       const before = await owner.testCounts();
       await rejects(() => owner.preFreezeRelocation("move-secret", route, "move-1"));
       await rejects(() => other.preFreezeRelocation("move-secret", route, "move-1"));
+      await registry.seedExistingIntentForTest(origin, projectId, 'move-1');
       await owner.holdNextProof();
       const first = beginRelocation("move-secret", origin, projectId, "move-1").then(() => false, () => true);
       while (!await owner.proofHeld()) await new Promise(resolve => setTimeout(resolve, 5));
@@ -587,6 +600,7 @@ export default {
       const pendingFlow = postAdmin(raceOrigin, "/_mapi/admin/oidc/flow/status");
       for (let attempts = 0; !(await race.addHeld()); attempts++) { if (attempts > 1000) throw Error("Admin request did not reach mutation"); await new Promise(resolve => setTimeout(resolve, 5)); }
       for (let attempts = 0; !(await race.adminHeld("oauth")) || !(await race.adminHeld("flow")); attempts++) { if (attempts > 1000) throw Error("OIDC admin requests did not reach mutation"); await new Promise(resolve => setTimeout(resolve, 5)); }
+      await registry.seedExistingIntentForTest(raceOrigin, raceId, 'race-move');
       await race.holdNextProof();
       const raceMove = beginRelocation("move-secret", raceOrigin, raceId, "race-move").then(() => false, () => true);
       for (let attempts = 0; !(await race.proofHeld()); attempts++) { if (attempts > 1000) throw Error("Race source did not freeze"); await new Promise(resolve => setTimeout(resolve, 5)); }
@@ -639,6 +653,7 @@ export default {
       const pendingLogout = logout(sessionOrigin, cookie, csrf);
       for (let attempts = 0; !(await sessionOwner.sessionHeld("logout")); attempts++) { if (attempts > 1000) throw Error("Logout did not reach owner"); await new Promise(resolve => setTimeout(resolve, 5)); }
       const beforeSessionRace = await sessionOwner.businessSnapshot();
+      await registry.seedExistingIntentForTest(sessionOrigin, sessionId, 'session-race-move');
       await sessionOwner.holdNextProof();
       const sessionMove = beginRelocation("move-secret", sessionOrigin, sessionId, "session-race-move").then(() => false, () => true);
       for (let attempts = 0; !(await sessionOwner.proofHeld()); attempts++) { if (attempts > 1000) throw Error("Session race owner did not freeze"); await new Promise(resolve => setTimeout(resolve, 5)); }
