@@ -512,10 +512,12 @@ export default { async fetch(request, env) {
      firstFragment = part;
      const future = await huge.chunk('huge', 1, 'big-move', 1, false);
      await rejects(() => hugeTarget.receive('huge', future, 0), 'out-of-order stream accepted');
-     const changed = { ...payload, stream: { ...payload.stream, total: 12 * 1024 * 1024 + 1 } };
+     const descriptors = payload.stream.types.map(type => type.kind === 'blob' ? { ...type, length: 8_388_609 } : type);
+     const changed = { ...payload, stream: { ...payload.stream, types: descriptors } };
      const content = JSON.stringify(changed);
+     const beforeOversized = { status: await hugeTarget.importStatus('huge'), rows: await hugeTarget.evidence(), controls: await hugeTarget.importControlCounts() };
      await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'oversized stream accepted');
-     check((await hugeTarget.importStatus('huge')).next_chunk === 0, 'oversized stream advanced checkpoint');
+     check(JSON.stringify(beforeOversized) === JSON.stringify({ status: await hugeTarget.importStatus('huge'), rows: await hugeTarget.evidence(), controls: await hugeTarget.importControlCounts() }), 'oversized stream changed state');
     }
     if (fragments === 1) {
      const changed = { ...payload, stream: { ...payload.stream, cursor: ['wrong-key'] } };
@@ -622,8 +624,9 @@ export default { async fetch(request, env) {
   const tooLarge = env.PROJECT.getByName(`too-large-${n}`);
   await tooLarge.init('too-large', `too-large-${n}`); await tooLarge.beyondRowLimit('too-large'); await tooLarge.freeze('too-large', 1, 'too-large-move');
   await tooLarge.beginExport('too-large', 1, 'too-large-move', ['users']);
-  await rejects(() => tooLarge.chunk('too-large', 1, 'too-large-move', 0, false), 'row exceeding conservative limit accepted');
-  check((await tooLarge.exportStatus('too-large')).next_chunk === 0, 'oversized row advanced export checkpoint');
+  const formerlyOversized = await tooLarge.chunk('too-large', 1, 'too-large-move', 0, false);
+  check(JSON.parse(formerlyOversized.content).stream?.types.some(type => type.kind === 'blob' && type.length === 8_385_000), 'platform-valid row did not enter streamed export');
+  check((await tooLarge.exportStatus('too-large')).next_chunk === 1, 'streamed row did not advance export checkpoint');
   const badSource = env.PROJECT.getByName(`bad-source-${n}`), badTarget = env.PROJECT.getByName(`bad-target-${n}`); await badSource.init('bad', `bad-source-${n}`); await badSource.seed('bad'); await badSource.freeze('bad', 1, 'bad-move');
   const reverse = ['events', 'sessions', 'users']; await badSource.beginExport('bad', 1, 'bad-move', reverse); await badTarget.beginImport('bad', 1, 'bad-move', `bad-target-${n}`, reverse);
   const invalidOrder = await badSource.chunk('bad', 1, 'bad-move', 0, false); await rejects(() => badTarget.receive('bad', invalidOrder, 0), 'foreign-key dependency violation accepted');
