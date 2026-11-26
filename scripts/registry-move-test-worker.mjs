@@ -21,6 +21,7 @@ export class RegistryMoveOwner extends DurableObject {
     return { projectId, origin, objectName, generation, objectId: this.ctx.id.toString() };
   }
   activateProvisioning() {}
+  advanceRelocationTextPreflight() { return { marker: 'a'.repeat(32), checkpoint: { version: 4, table: 0, after: null, row: null, column: 0, rowBytes: 0, cursorBytes: 2, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done: true }, done: true }; }
   preFreezeRelocation(_secret, route, moveId) { this.#freezeCalls++; return { ...route, moveId, state: "frozen", objectId: this.ctx.id.toString() }; }
   freezeCalls() { return this.#freezeCalls; }
 }
@@ -42,6 +43,12 @@ export class RegistryMoveTest extends ProjectRegistry {
     sql.exec('INSERT INTO mapi_move_journals (move_id, project_id, complete) VALUES (?, ?, 1)', moveId, projectId);
   }
   inconsistentIntent(project, origin, source, move) { this.ctx.storage.sql.exec("INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, 1)", project, move, origin, source, "wrong-destination"); }
+  seedExistingIntentForTest(origin, project, move) {
+    if (this.env.MAPI_LOCAL_TEST !== '1') throw Error('Local relocation test required');
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== project) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', project, move, origin, route.object_name, `project:${crypto.randomUUID()}`, route.generation);
+  }
   seedLegacyIntent(project, origin, source, move) { this.ctx.storage.sql.exec("INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, 1)", project, move, origin, source, "project:legacy-intent-destination"); }
   intentSnapshot(project) {
     const sql = this.ctx.storage.sql;
@@ -58,6 +65,14 @@ export default {
     try {
       let registry = env.REGISTRY.getByName(crypto.randomUUID());
       const uuid = crypto.randomUUID();
+      const startExisting = async (origin, project, move) => {
+        let result;
+        for (let i = 0; i < 4; i++) {
+          result = await registry.beginRelocation('move-secret', origin, project, move);
+          if (result.phase !== 'preflighting') return result;
+        }
+        throw Error('Synthetic preflight did not finish');
+      };
       for (const invalid of ['', 'x'.repeat(129), '€'.repeat(43), '😀'.repeat(33), '\ud800', '\udc00', 'a\ud800b', null, 1]) {
         if (validNewRelocationMoveId(invalid)) throw Error('Invalid new move ID accepted by validator');
       }
@@ -72,7 +87,10 @@ export default {
         await reject(() => registry.beginRelocation('move-secret', idOrigin, 'proj_id_uuid', invalid));
         if (JSON.stringify(await registry.intentSnapshot('proj_id_uuid')) !== beforeInvalid || await idOwner.freezeCalls() !== 0) throw Error('Invalid move ID changed registry or froze source');
       }
-      if ((await registry.beginRelocation('move-secret', idOrigin, 'proj_id_uuid', uuid)).move_id !== uuid) throw Error('UUID move ID rejected');
+      await reject(() => registry.beginRelocation('move-secret', idOrigin, 'proj_id_uuid', uuid));
+      if (JSON.stringify(await registry.intentSnapshot('proj_id_uuid')) !== beforeInvalid || await idOwner.freezeCalls() !== 0) throw Error('Denied admission changed registry or froze source');
+      await registry.seedExistingIntentForTest(idOrigin, 'proj_id_uuid', uuid);
+      if ((await startExisting(idOrigin, 'proj_id_uuid', uuid)).move_id !== uuid) throw Error('UUID existing intent rejected');
       if ((await registry.beginRelocation('move-secret', idOrigin, 'proj_id_uuid', uuid)).move_id !== uuid) throw Error('UUID retry rejected');
       for (const [origin, object, project, move] of [
         ['https://id-ascii.example', 'id-ascii-source', 'proj_id_ascii', 'x'.repeat(128)],
@@ -84,12 +102,13 @@ export default {
           await reject(() => registry.beginRelocation('move-secret', origin, project, uuid));
           if (JSON.stringify(await registry.intentSnapshot(project)) !== beforeReuse || await env.NEXTGEN_APPLICATION.getByName(object).freezeCalls() !== 0) throw Error('Reused move ID changed registry or froze source');
         }
-        if ((await registry.beginRelocation('move-secret', origin, project, move)).move_id !== move) throw Error('128-byte move ID rejected');
+        await registry.seedExistingIntentForTest(origin, project, move);
+        if ((await startExisting(origin, project, move)).move_id !== move) throw Error('128-byte existing move ID rejected');
       }
       const legacyIdOrigin = 'https://id-legacy.example', longLegacyId = 'L'.repeat(129);
       await registry.reserve(legacyIdOrigin, 'id-legacy-source'); await registry.activate(legacyIdOrigin, 'id-legacy-source', 'proj_id_legacy');
       await registry.seedLegacyIntent('proj_id_legacy', legacyIdOrigin, 'id-legacy-source', longLegacyId);
-      const resumedLegacy = await registry.beginRelocation('move-secret', legacyIdOrigin, 'proj_id_legacy', longLegacyId);
+      const resumedLegacy = await startExisting(legacyIdOrigin, 'proj_id_legacy', longLegacyId);
       if (resumedLegacy.move_id !== longLegacyId || (await registry.beginRelocation('move-secret', legacyIdOrigin, 'proj_id_legacy', longLegacyId)).move_id !== longLegacyId) throw Error('Legacy intent retry rejected');
       const legacySource = { project_id: 'proj_id_legacy', object_name: 'id-legacy-source', generation: 1, state: 'frozen', move_id: longLegacyId, digest: 'd'.repeat(64) };
       const legacyDestination = { project_id: 'proj_id_legacy', object_name: resumedLegacy.destination_object, generation: 2, state: 'staged', move_id: longLegacyId, digest: 'd'.repeat(64) };
@@ -147,8 +166,10 @@ export default {
       await registry.reserve(third, "third-source"); await registry.activate(third, "third-source", "proj_third");
       await reject(() => registry.beginRelocation("wrong", third, "proj_third", "move-3"));
       await reject(() => registry.beginRelocation("move-secret", third, "proj_first", "move-3"));
-      const allocated = await registry.beginRelocation("move-secret", third, "proj_third", "move-3");
-      if (!allocated.destination_object.startsWith("project:") || allocated.source_object !== "third-source") throw Error("Destination not allocated by registry");
+      await reject(() => registry.beginRelocation("move-secret", third, "proj_third", "move-3"));
+      await registry.seedExistingIntentForTest(third, "proj_third", "move-3");
+      const allocated = await startExisting(third, "proj_third", "move-3");
+      if (!allocated.destination_object.startsWith("project:") || allocated.source_object !== "third-source") throw Error("Historical intent destination or source changed");
       const repeated = await registry.beginRelocation("move-secret", third, "proj_third", "move-3");
       if (repeated.destination_object !== allocated.destination_object) throw Error("Relocation retry changed destination");
       await reject(() => registry.beginRelocation("move-secret", third, "proj_third", "move-4"));
@@ -189,7 +210,8 @@ export default {
       const boundary = 'https://boundary.example', boundaryGeneration = Number.MAX_SAFE_INTEGER - 1;
       await registry.reserve(boundary, 'boundary-source'); await registry.activate(boundary, 'boundary-source', 'proj_boundary');
       await registry.setGeneration('proj_boundary', '9007199254740990');
-      const boundaryMove = await registry.beginRelocation('move-secret', boundary, 'proj_boundary', 'boundary-move');
+      await registry.seedExistingIntentForTest(boundary, 'proj_boundary', 'boundary-move');
+      const boundaryMove = await startExisting(boundary, 'proj_boundary', 'boundary-move');
       const boundarySource = { project_id: 'proj_boundary', object_name: 'boundary-source', generation: boundaryGeneration, state: 'frozen', move_id: 'boundary-move', digest: 'c'.repeat(64) };
       const boundaryDestination = { project_id: 'proj_boundary', object_name: boundaryMove.destination_object, generation: Number.MAX_SAFE_INTEGER, state: 'staged', move_id: 'boundary-move', digest: 'c'.repeat(64) };
       await registry.syntheticCompletedHistory('proj_boundary', 'boundary-move', 'boundary-source', boundaryMove.destination_object, boundaryGeneration, boundarySource.digest);

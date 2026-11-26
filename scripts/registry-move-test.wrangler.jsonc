@@ -3,7 +3,7 @@
   "main": "registry-move-test-worker.mjs",
   "compatibility_date": "2026-11-18",
   "workers_dev": false,
-  "vars": { "MAPI_RELOCATION_ENABLED": "1", "MAPI_RELOCATION_CONTROL_TOKEN": "move-secret" },
+  "vars": { "MAPI_LOCAL_TEST": "1", "MAPI_RELOCATION_ENABLED": "1", "MAPI_RELOCATION_CONTROL_TOKEN": "move-secret" },
   "durable_objects": { "bindings": [{ "name": "REGISTRY", "class_name": "RegistryMoveTest" }, { "name": "NEXTGEN_APPLICATION", "class_name": "RegistryMoveOwner" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RegistryMoveTest", "RegistryMoveOwner"] }]
 }

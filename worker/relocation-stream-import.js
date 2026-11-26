@@ -33,7 +33,7 @@ export function validateStreamImportSchema(storage, projectId) {
 export function streamImportStatus(storage, projectId) {
  // Validate byte lengths in SQLite before reading any persisted TEXT into JS.
  // A corrupted checkpoint may otherwise materialize an arbitrarily large value.
- const safe = first(storage, `SELECT CASE WHEN typeof(table_name) = 'text' AND length(CAST(table_name AS BLOB)) <= 32768 AND typeof(columns) = 'text' AND length(CAST(columns AS BLOB)) <= 32768 AND typeof(types) = 'text' AND length(CAST(types AS BLOB)) <= 32768 AND typeof(cursor) = 'text' AND length(CAST(cursor AS BLOB)) <= 4096 THEN 1 ELSE 0 END AS ok FROM mapi_chunk_import_stream WHERE project_id = ? LIMIT 1`, projectId);
+ const safe = first(storage, `SELECT CASE WHEN typeof(table_name) = 'text' AND octet_length(table_name) <= 32768 AND typeof(columns) = 'text' AND octet_length(columns) <= 32768 AND typeof(types) = 'text' AND octet_length(types) <= 32768 AND typeof(cursor) = 'text' AND octet_length(cursor) <= 4096 THEN 1 ELSE 0 END AS ok FROM mapi_chunk_import_stream WHERE project_id = ? LIMIT 1`, projectId);
  if (!safe) return null;
  if (safe.ok !== 1) throw Error('Invalid stream import checkpoint');
  const rows = storage.sql.exec('SELECT CAST(table_name AS BLOB), row_offset, CAST(columns AS BLOB), CAST(types AS BLOB), CAST(cursor AS BLOB), column_index, next_offset, last_chunk, utf8_remaining, utf8_min, utf8_max FROM mapi_chunk_import_stream WHERE project_id = ? LIMIT 1', projectId).raw().toArray();

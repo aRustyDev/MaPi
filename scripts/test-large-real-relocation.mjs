@@ -27,8 +27,8 @@ let acknowledgedAdvances = 0, lastAcknowledgedPhase = 'not-started';
 let timeoutTestAttempts = 0;
 for (const stream of [server.stdout, server.stderr]) stream?.on('data', chunk => { diagnostic = (diagnostic + chunk.toString()).slice(-8000); });
 async function call(action, body = {}, expectedFailure = false, timeoutMs = 120000) {
-  const delayedAdvance = timeoutRegression && action === 'advance' && acknowledgedAdvances === 1;
-  if (timeoutRegression && action === 'advance') console.error(JSON.stringify({ event: 'local.timeout.test.attempt', attempt: ++timeoutTestAttempts }));
+  const delayedAdvance = timeoutRegression && action === 'advance' && lastAcknowledgedPhase === 'importing';
+  if (timeoutRegression && action === 'advance' && (lastAcknowledgedPhase === 'importing' || delayedAdvance)) console.error(JSON.stringify({ event: 'local.timeout.test.attempt', attempt: ++timeoutTestAttempts }));
   if (delayedAdvance) { body = { ...body, testDelayAfterAdvance: true }; timeoutMs = 3000; }
   const started = performance.now();
   const timeout = AbortSignal.timeout(timeoutMs);
@@ -48,7 +48,10 @@ async function call(action, body = {}, expectedFailure = false, timeoutMs = 1200
   }
   assert.equal(response.status, 200, `${action}: ${value.error ?? response.status}`);
   if (action === 'advance') { acknowledgedAdvances++; lastAcknowledgedPhase = typeof value.phase === 'string' ? value.phase : 'unknown'; }
-  if (timeoutRegression && action === 'advance') console.error(JSON.stringify({ event: 'local.timeout.test.ack', nextChunk: value.nextChunk }));
+  if (timeoutRegression && action === 'advance' && value.phase === 'importing') {
+    if (timeoutTestAttempts === 0) console.error(JSON.stringify({ event: 'local.timeout.test.attempt', attempt: ++timeoutTestAttempts }));
+    console.error(JSON.stringify({ event: 'local.timeout.test.ack', nextChunk: value.nextChunk }));
+  }
   return value;
 }
 let diagnosticFixture;
@@ -76,7 +79,12 @@ try {
   const seedSeconds = (performance.now() - startedSeed) / 1000;
   const moveStarted = performance.now();
   let advances = 0;
-  let progress = await call('advance', fixture); advances++;
+  await call('seedExistingIntent', fixture);
+  let progress;
+  do {
+    progress = await call('advance', fixture); advances++;
+    if (advances > 10000) throw Error('Preflight exceeded bounded coordinator calls');
+  } while (progress.phase === 'preflighting');
   assert.equal(progress.phase, 'importing');
   const beforeExport = await call('exportStatus', fixture);
   const beforeImport = await call('importStatus', fixture);
