@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 // Create an ignored test object from the real app without modifying its ingress.
 let app = await readFile('worker/app.js', 'utf8');
 app = app.replace('"./generated/baseline.json"', '"./baseline.json"')
-  .replace('"./wasm-module.js"', '"./nextgen.wasm"')
+  .replace('"./wasm-module.js"', '"./phase1-owner.wasm"')
   .replace(/from "\.\/([^"/]+\.js)"/g, 'from "../$1"');
 const member = '  #wasmDiagnostic = "";';
 const transaction = '              if (this.#reactor.mapi_transaction_body() !== 0) throw rejected;';
@@ -30,11 +30,11 @@ app = app.replace(hook, `
     this.#proofAssert(route);
     this.#proofRoute = route;
     try {
-      if (operation === 'add') return this.addUser(value.email, value.password);
-      if (operation === 'login') return this.login(value.email, value.password, value.ip ?? '127.0.0.1');
-      if (operation === 'mint') return this.#mintHandoff(value.email, value.password);
-      if (operation === 'exchange') return this.#exchangeHandoff(value.handoff);
-      if (operation === 'session') return this.session(value.cookie, value.action ?? 'read', value.csrf ?? '');
+      if (operation === 'add') return this.addUser(value.email, value.password, route.ownerRoute);
+      if (operation === 'login') return this.login(value.email, value.password, value.ip ?? '127.0.0.1', route.ownerRoute);
+      if (operation === 'mint') return this.#withRoute(route.ownerRoute, () => this.#mintHandoff(value.email, value.password));
+      if (operation === 'exchange') return this.#withRoute(route.ownerRoute, () => { this.#initialize(); return this.#exchangeHandoff(value.handoff); });
+      if (operation === 'session') return this.session(value.cookie, value.action ?? 'read', value.csrf ?? '', route.ownerRoute);
       throw Error('unsupported operation');
     } finally { this.#proofRoute = undefined; }
   }
@@ -81,7 +81,7 @@ app = app.replace(hook, `
     const sql=this.ctx.storage.sql;
     if(sql.exec('SELECT epoch FROM mapi_recovery_epoch').one().epoch !== route.era) {
       if(fail)this.#failAudit=1;
-      this.#initialize(); this.#call('mapi_recover',{projectId:route.projectId,epoch:route.era});
+      this.#withRoute(route.ownerRoute, () => { this.#initialize(); this.#call('mapi_recover',{projectId:route.projectId,epoch:route.era}); });
       if(crashAfterCommit){await this.ctx.storage.sync();this.ctx.abort('test recovery checkpoint');}
     }
     this.ctx.storage.transactionSync(() => {
