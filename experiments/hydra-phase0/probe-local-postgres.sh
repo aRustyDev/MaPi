@@ -78,4 +78,11 @@ if [ "$ready" != true ] || ! kill -0 "$server_pid" 2>/dev/null ||
 fi
 
 "$hydra" create oauth2-client -e "http://127.0.0.1:$admin_port" --id mapi-phase0-local-cc --secret "$client_secret" --grant-type client_credentials --scope probe --token-endpoint-auth-method client_secret_basic --format json > "$fixture/client.json"
-node experiments/hydra-phase0/probe-local.mjs "$build" "$fixture" "$port" workerd
+if [ "${MAPI_HYDRA_SKIP_BASIC_PROBE:-0}" != 1 ]; then
+  node experiments/hydra-phase0/probe-local.mjs "$build" "$fixture" "$port" workerd
+fi
+if [ "${MAPI_HYDRA_BOUND_PROBE:-0}" = 1 ]; then
+  docker exec -i "$container_id" psql -v ON_ERROR_STOP=1 -U postgres -d mapi_spike < experiments/hydra-phase0/bound-schema.sql >/dev/null
+  "$hydra" create oauth2-client -e "http://127.0.0.1:$admin_port" --id mapi-bound-rp --secret "$client_secret" --grant-type authorization_code,refresh_token --response-type code --redirect-uri https://rp.example/callback --scope openid,offline_access --token-endpoint-auth-method client_secret_basic --format json > "$fixture/bound-client.json"
+  node experiments/hydra-phase0/probe-bound-local.mjs "$build" "$fixture" "$port"
+fi

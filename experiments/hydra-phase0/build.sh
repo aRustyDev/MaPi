@@ -79,7 +79,12 @@ changes = {
     "\tvar accessResponse fosite.AccessResponder\n\tif err := h.r.Transaction(ctx, func(ctx context.Context) (err error) {\n\t\taccessResponse, err = h.r.OAuth2Provider().NewAccessResponse(ctx, accessRequest)":
     """	fence := phase0RefreshFence(ctx, accessRequest)
 	if fence != nil {
-		if err := phase0FenceError(fence.Begin(ctx, accessRequest.GetID(), accessRequest.GetRequestForm().Get("refresh_token"))); err != nil {
+		grantType := accessRequest.GetRequestForm().Get("grant_type")
+		credential := accessRequest.GetRequestForm().Get("refresh_token")
+		if grantType == "authorization_code" {
+			credential = accessRequest.GetRequestForm().Get("code")
+		}
+		if err := phase0FenceError(fence.Begin(ctx, accessRequest.GetID(), credential, grantType)); err != nil {
 			h.r.OAuth2Provider().WriteAccessError(ctx, w, accessRequest, err)
 			return
 		}
@@ -112,7 +117,7 @@ handler.write_text(content)
 PY
 
 mkdir -p "$source_dir/cmd/mapi-phase0"
-cp "$spike_dir/"{main,fence,code}.go "$source_dir/cmd/mapi-phase0/"
+cp "$spike_dir/"{main,fence,code,bound-code}.go "$source_dir/cmd/mapi-phase0/"
 cp "$spike_dir/routes.go.in" "$source_dir/oauth2/mapi_phase0_routes.go"
 cp "$spike_dir/authorization.go.in" "$source_dir/oauth2/mapi_phase0_authorization.go"
 cp "$spike_dir/consent.go.in" "$source_dir/consent/mapi_phase0_consent.go"

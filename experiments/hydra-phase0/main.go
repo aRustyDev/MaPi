@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -131,6 +132,7 @@ func run(host js.Value) (reply, error) {
 	case input.Method == http.MethodPost && path == "/oauth2/token":
 	case input.Method == http.MethodPost && path == "/phase0/fence":
 	case input.Method == http.MethodPost && path == "/phase0/code":
+	case input.Method == http.MethodPost && path == "/mapi/bind-code":
 	case input.Method == http.MethodPost && path == "/phase0/access":
 	case (input.Method == http.MethodGet || input.Method == http.MethodPut) && strings.HasPrefix(path, "/admin/oauth2/auth/requests/"):
 	default:
@@ -215,6 +217,9 @@ func run(host js.Value) (reply, error) {
 	if path == "/phase0/code" {
 		return bindAuthorizationCode(ctx, registry, input.Body)
 	}
+	if path == "/mapi/bind-code" {
+		return bindVerifiedAuthorizationCode(ctx, registry, input.Body, issuer)
+	}
 	if path == "/phase0/access" {
 		var accessInput struct {
 			Token string `json:"token"`
@@ -243,7 +248,13 @@ func run(host js.Value) (reply, error) {
 	} else if strings.HasPrefix(path, "/admin/oauth2/auth/requests/") {
 		router = consent.Phase0Admin(registry)
 	}
-	request := httptest.NewRequestWithContext(ctx, input.Method, issuer+input.Path, strings.NewReader(input.Body))
+	// The private mux owns root-relative handler paths even when the public
+	// issuer is mounted beneath a project-specific path.
+	issuerURL, err := url.Parse(issuer)
+	if err != nil || issuerURL.Host == "" {
+		return reply{}, errors.New("invalid issuer origin")
+	}
+	request := httptest.NewRequestWithContext(ctx, input.Method, issuerURL.Scheme+"://"+issuerURL.Host+input.Path, strings.NewReader(input.Body))
 	for name, values := range input.Headers {
 		for _, value := range values {
 			request.Header.Add(name, value)
