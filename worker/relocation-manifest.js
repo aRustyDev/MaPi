@@ -2,7 +2,7 @@
 // baseline. Control calls that use it must be private and authenticated.
 import baseline from './generated/baseline.json';
 import issuerSchema from './relocation-issuer-schema.json';
-import { assertRelocationTableText, execute, readRelocationRow, readRelocationBlobSlice } from './sql.js';
+import { assertRelocationTableText, execute, readRelocationRow, readRelocationBlobSlice, readRelocationDescriptors } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { sourceIdentityMatches } from './relocation-source-identity.js';
 import { assertRelocationValuesRepresentable, RELOCATION_RECONCILIATION_VERSION } from './relocation-values.js';
@@ -413,7 +413,7 @@ export async function digestRelocationPage(storage, manifest, role, table, curso
       // One bounded descriptor per column; avoid pulling any complete TEXT or
       // BLOB across the JS bridge merely to decide whether the row is large.
       const descriptor = names.map(name => `json_array(typeof(${quote(name)}),CASE WHEN typeof(${quote(name)}) IN ('text','blob') THEN octet_length(${quote(name)}) ELSE 8 END)`).join(', ');
-      const result = execute(storage, { statement: `SELECT ${descriptor} ${source}`, args, query: true }).rows;
+      const result = readRelocationDescriptors(storage, `SELECT ${descriptor} ${source}`, args);
       if (!result.length) { if (isSlice) throw Error('Reconciliation row changed'); done = true; break; }
       const kinds = result[0].map(value => {
         let data; try { data = JSON.parse(value); } catch { throw Error('Invalid reconciliation descriptor'); }

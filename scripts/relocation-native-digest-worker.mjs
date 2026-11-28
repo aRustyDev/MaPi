@@ -3,7 +3,7 @@ import { digestRelocationPage } from '../worker/relocation-manifest.js';
 import { readRelocationBlobSlice } from '../worker/sql.js';
 
 const route = { projectId: 'native-digest', origin: 'https://native.example', objectName: 'source', generation: 1 };
-const manifest = { version: 1, ...route, moveId: 'move', tables: ['large_fixture', 'small_fixture'] };
+const manifest = { version: 1, ...route, moveId: 'move', tables: ['large_fixture', 'small_fixture', 'typed_fixture', 'empty_fixture', 'wide_fixture'] };
 
 export class DigestFixture extends DurableObject {
   setup() {
@@ -18,6 +18,11 @@ export class DigestFixture extends DurableObject {
     sql.exec("INSERT INTO large_fixture VALUES (?, ? || 'é😀' || replace(hex(zeroblob(?)), '00', 'zz') || 'z', ?, 9223372036854775807, NULL)", 'key', 'a'.repeat(65535), 4117229, data.buffer);
     sql.exec('CREATE TABLE small_fixture (id INTEGER PRIMARY KEY, value TEXT)');
     sql.exec("INSERT INTO small_fixture VALUES (1, 'small')");
+    sql.exec('CREATE TABLE typed_fixture (number INTEGER NOT NULL, binary_key BLOB NOT NULL, value TEXT NOT NULL, PRIMARY KEY(number, binary_key))');
+    sql.exec("INSERT INTO typed_fixture VALUES (-9223372036854775808, X'0080', 'small'), (9223372036854775807, X'00FF', replace(hex(zeroblob(32769)), '00', 'zz'))");
+    sql.exec('CREATE TABLE empty_fixture (id TEXT PRIMARY KEY, value TEXT)');
+    sql.exec('CREATE TABLE wide_fixture (id INTEGER PRIMARY KEY, ' + Array.from({length: 99}, (_, i) => 'c' + i).join(', ') + ')');
+    sql.exec('INSERT INTO wide_fixture VALUES (' + ['1', ...Array.from({length: 99}, (_, i) => i % 4 === 0 ? "'text'" : i % 4 === 1 ? "X'00FF'" : i % 4 === 2 ? '1.25' : '9223372036854775807')].join(', ') + ')');
     sql.exec('CREATE TABLE key_probe (id INTEGER PRIMARY KEY, value BLOB)');
     sql.exec("INSERT INTO key_probe VALUES (9223372036854775807, X'0080FF')");
     sql.exec('CREATE TABLE blob_key_probe (id BLOB PRIMARY KEY, value BLOB)');
