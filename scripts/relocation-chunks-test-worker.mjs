@@ -150,6 +150,10 @@ export class ChunkProject extends DurableObject {
   if (!['table_name', 'row_offset', 'total', 'next_offset', 'cursor'].includes(field)) throw Error('Invalid local fragment field');
   this.s.sql.exec(`UPDATE mapi_chunk_import_fragment SET ${field} = ? WHERE project_id = ?`, value, id);
  }
+ setFragmentBytesForTest(id, index, value) {
+  const data = typeof value === 'number' ? new Uint8Array(value) : Uint8Array.fromBase64(value);
+  this.s.sql.exec('UPDATE mapi_chunk_import_fragment_data SET data = ? WHERE project_id = ? AND chunk_index = ?', data.buffer, id, index);
+ }
  moveFragmentPieceForTest(id, from, to) { this.s.sql.exec('UPDATE mapi_chunk_import_fragment_data SET chunk_index = ? WHERE project_id = ? AND chunk_index = ?', to, id, from); }
  removeRelocationRow(id) { this.s.sql.exec('DELETE FROM mapi_relocation_project WHERE project_id = ?', id); }
  setRelocationField(id, field, value) {
@@ -452,6 +456,18 @@ export default { async fetch(request, env) {
     }
     const end = payload.fragment.offset + Uint8Array.fromBase64(payload.fragment.data).length;
     if (end === payload.fragment.total) {
+     const saved = JSON.parse(firstFragment.content).fragment.data;
+     const checkpoint = await hugeTarget.importStatus('huge');
+     const controlCounts = await hugeTarget.importControlCounts();
+     await hugeTarget.setFragmentBytesForTest('huge', 0, 80 * 1024 + 1);
+     try {
+      await rejectsWith(() => hugeTarget.receive('huge', part, 0), 'Invalid stored row fragment');
+      check(JSON.stringify(await hugeTarget.importStatus('huge')) === JSON.stringify(checkpoint), 'oversized stored fragment advanced the checkpoint');
+      check(JSON.stringify(await hugeTarget.importControlCounts()) === JSON.stringify(controlCounts), 'oversized stored fragment changed durable pieces');
+      check((await hugeTarget.evidence()).users.length === 0, 'oversized stored fragment advanced business data');
+     } finally {
+      await hugeTarget.setFragmentBytesForTest('huge', 0, saved);
+     }
      await rejects(() => hugeTarget.receive('huge', part, 1), 'final fragment rollback was not injected');
      check((await hugeTarget.importStatus('huge')).next_chunk === fragments && (await hugeTarget.evidence()).users.length === 0, 'failed final fragment persisted row or checkpoint');
     }
