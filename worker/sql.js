@@ -25,6 +25,8 @@ function decodePacked(encoded) {
   return { blob: new Uint8Array(encoded).toBase64() };
 }
 
+const sparseZeroNodeLimit = 2048;
+
 // RETURNING cannot use a materialized CTE, and adding a type column per value
 // can push a platform-valid returned row over SQLite's record-size limit.
 // Integers use a minimal-width signed big-endian BLOB (zero uses an empty
@@ -43,14 +45,46 @@ function compactValueExpression(column, length, marker) {
   const byte = index => `ifnull(unicode(('"\\u00'||hex(substr(${column},${index},1))||'"')->>'$'),0)`;
   const run = n => `unhex(replace(hex(zeroblob(${n})),'00',hex(${marker})))`;
   const count = `${length}/9`, rem = `${length}%9`;
+  // Sparse non-marker bytes (at most eight on this branch) leave at least
+  // one of nine ASCII sentinels unused. Replace each marker by that byte;
+  // the decoder expands it and copies every other byte verbatim.
+  const stripped = `CAST(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'') AS BLOB)`;
+  const sentinels = 'ABCDEFGHI';
+  const sentinel = `(CASE ${[...sentinels].map(c => `WHEN instr(${stripped},X'${c.charCodeAt(0).toString(16)}')=0 THEN '${c}'`).join(' ')} END)`;
+  const sparse = `CAST(${marker}||'@MaPiRun1'||${sentinel}||replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),${sentinel}) AS BLOB)`;
+  // Reserve the sparse tag after any leading marker run (and literal Qs).
+  // Its escaped form gets one extra marker; decodeReturning removes it.
+  const sparseCollision = `substr(ltrim(replace(CAST(${column} AS TEXT),CAST(${marker} AS TEXT),'Q'),'Q'),1,9)='@MaPiRun1'`;
+  // A reserved-tag source may itself be near the row-size limit. When the
+  // span after its tag is zero-filled, preserve an arbitrary 64-byte tail and
+  // encode the zero count instead of adding an escape marker to the full row.
+  const headerEnd = `(instr(${column},X'404d61506952756e31')+8)`;
+  const zeroCount = `(${length}-${headerEnd}-64)`;
+  const zeroRun = `CAST(${marker}||'@MaPiRun1J'||unhex(printf('%08x',${zeroCount}))||substr(${column},1,${headerEnd})||substr(${column},-64) AS BLOB)`;
+  // Traverse nonzero subranges, smallest first. Accept patches only from a
+  // complete scan within the node budget and when they save space over escape.
+  // The scan also bounds the number of leaves and the patch list size.
+  // SQLite may evaluate this correlated subquery more than once per value.
+  const partStart = `p+iif(side=0,0,n/2)`;
+  const partLength = `iif(side=0,n/2,n-n/2)`;
+  const sparseZero = `(WITH RECURSIVE mapi_zero_scan(p,n) AS MATERIALIZED (` +
+    `SELECT 0,${zeroCount} UNION ALL SELECT ${partStart},${partLength} FROM mapi_zero_scan JOIN (SELECT 0 AS side UNION ALL SELECT 1) ` +
+    `WHERE n>1 AND substr(${column},${headerEnd}+1+${partStart},${partLength})<>zeroblob(${partLength}) ORDER BY 2 ASC LIMIT ${sparseZeroNodeLimit}), ` +
+    `mapi_zero_patches AS (SELECT p FROM mapi_zero_scan WHERE n=1) ` +
+    `SELECT iif(count(*)>0 AND (SELECT count(*) FROM mapi_zero_scan)<${sparseZeroNodeLimit} AND ${zeroCount}>10*count(*)+18,CAST(${marker}||'@MaPiRun1K'||unhex(printf('%08x',${zeroCount}))||printf('%04X',count(*))||` +
+    `group_concat(printf('%08X',p)||hex(substr(${column},${headerEnd}+1+p,1)),'')||substr(${column},1,${headerEnd})||substr(${column},-64) AS BLOB),` +
+    `CAST(${marker}||${column} AS BLOB)) FROM mapi_zero_patches)`;
   const tag = `CAST(${marker}||unhex(printf('%02x',${count}>>8&255))||${run(`1+512*(${count}>>16)+256*(${rem} IN(3,8))+iif(${rem}=8,${byte(-8)},0)`)}||unhex(printf('%02x',${count}&255))||${run(`1+iif(${rem}=8,${byte(-7)},0)`)}||substr(${column},-min(${rem},6),${rem})||substr(X'53',1,${rem}=3) AS BLOB)`;
   // Count the hex digits needed for the signed value plus its sign bit,
   // then map byte widths 5 and 7 to the supported widths 6 and 8.
   const width = `substr('12346688',(length(printf('%x',(iif(${column}<0,~${column},${column})<<1)|1))+1)/2,1)`;
   return `CASE typeof(${column}) WHEN 'integer' THEN CASE WHEN ${column}=0 THEN X'' ELSE substr(unhex(printf('%016llx',${column})),9-(${width})) END` +
-    ` WHEN 'blob' THEN iif(${length} IN${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN${widths}),` +
-    `iif(${length}<75497472 AND substr(${column},-9-${length}%9,9)=${marker},${tag},CAST(${marker}||${column} AS BLOB)),` +
-    `${column}) ELSE ${column} END`;
+    ` WHEN 'blob' THEN iif(substr(${column},1,9)=${marker} AND ${sparseCollision},` +
+    `iif(${zeroCount}>=64,iif(substr(${column},${headerEnd}+1,${zeroCount})=zeroblob(${zeroCount}),${zeroRun},${sparseZero}),CAST(${marker}||${column} AS BLOB)),` +
+    `iif(${length} IN${widths} OR (substr(${column},1,9)=${marker} AND ${remainder} IN${widths}),` +
+    `iif(${length}<75497472 AND substr(${column},-9-${length}%9,9)=${marker},${tag},` +
+    `iif(${length}>100,${sparse},CAST(${marker}||${column} AS BLOB))),` +
+    `${column})) ELSE ${column} END`;
 }
 
 function legacyReturningColumn(column, allowEight = true) {
@@ -86,7 +120,41 @@ function compactReturningColumn(column) {
   return direct.length <= nested.length ? direct : nested;
 }
 
-function decodeReturning(value, unified = false) {
+// Reference one correlated encoder CTE from each result expression instead
+// of repeating the full encoder. The name avoids all identifier-like tokens
+// in the caller's SQL, including those in quoted text or comments.
+function sharedReturningRewrite(sql, tokens, returningToken, columns) {
+  const used = new Set((sql.match(/[a-zA-Z_][a-zA-Z_0-9$]*/g) || []).map(token => token.toLowerCase()));
+  let name = 'mapi_shared_value';
+  while (used.has(name)) name += '_';
+  const helper = `${name} AS NOT MATERIALIZED (SELECT ${compactValueExpression('v', 'l', 'm')} AS e FROM (SELECT v,length(v) AS l,X'FF0000000000000000' AS m))`;
+  const first = tokens.find(token => /^[A-Z_]/.test(token.word));
+  let prefix;
+  if (first?.word === 'WITH') {
+    const next = tokens[tokens.indexOf(first) + 1];
+    const position = next?.word === 'RECURSIVE' ? next.end : first.end;
+    prefix = sql.slice(0, position) + ' ' + helper + ',' + sql.slice(position, returningToken.start) + 'RETURNING ';
+  } else {
+    prefix = 'WITH ' + helper + ' ' + sql.slice(0, returningToken.start) + 'RETURNING ';
+  }
+  return prefix + columns.map(column => `(SELECT (SELECT e FROM ${name}) FROM (SELECT ${column} AS v))`).join(', ');
+}
+
+// Last-resort wide codec: keep large non-colliding BLOBs unchanged and
+// escape only values that collide with the reserved integer-width grammar.
+function terseReturningColumn(column) {
+  const marker = "X'4D615069233921403F'", widths = "(0,1,2,3,4,6,8)";
+  const remainder = "length(CAST(replace(CAST(v AS TEXT),CAST(m AS TEXT),'') AS BLOB))";
+  const width = "substr('12346688',(length(printf('%x',(iif(v<0,~v,v)<<1)|1))+1)/2,1)";
+  const value = `CASE typeof(v) WHEN 'integer' THEN iif(v=0,X'',substr(unhex(printf('%016llx',v)),9-(${width}))) WHEN 'blob' THEN iif(l IN${widths} OR (substr(v,1,9)=m AND ${remainder} IN${widths}),CAST(m||v AS BLOB),v) ELSE v END`;
+  const direct = `(SELECT ${value} FROM (SELECT ${column} AS v,length(${column}) AS l,${marker} AS m))`;
+  const nested = `(SELECT ${value} FROM (SELECT v,length(v) AS l,${marker} AS m FROM (SELECT ${column} AS v)))`;
+  return direct.length <= nested.length ? direct : nested;
+}
+
+const terseMarkerBytes = [77, 97, 80, 105, 35, 57, 33, 64, 63];
+
+function decodeReturning(value, unified = false, terse = false) {
   if (typeof value === 'string' || typeof value === 'number' || value === null) return value;
   const blob = new Uint8Array(value);
   const widths = [0, 1, 2, 3, 4, 6, 8];
@@ -97,12 +165,75 @@ function decodeReturning(value, unified = false) {
     return { integer: integer.toString() };
   }
   const markerAt = index => {
-    if (blob[index] !== 255 || index + 9 > blob.length) return false;
+    if (index + 9 > blob.length) return false;
+    if (terse) {
+      for (let i = 0; i < 9; i++) if (blob[index + i] !== terseMarkerBytes[i]) return false;
+      return true;
+    }
+    if (blob[index] !== 255) return false;
     for (let i = 1; i < 9; i++) if (blob[index + i] !== 0) return false;
     return true;
   };
   // The selected SQL rewrite and decoder use the same transient tag format.
   if (unified) {
+    if (markerAt(0)) {
+      let markers = 0, position = 0;
+      while (markerAt(position)) { markers++; position += 9; }
+      while (blob[position] === 81) position++; // literal Q bytes
+      const header = '@MaPiRun1';
+      const hasHeader = [...header].every((c, i) => blob[position + i] === c.charCodeAt(0));
+      if (hasHeader && markers > 1) return { blob: blob.subarray(9).toBase64() };
+      if (hasHeader && markers === 1 && position === 9) {
+        const sentinel = blob[position + header.length];
+        if (sentinel === 75) {
+          const start = position + header.length + 1;
+          if (blob.length < start + 8 + 10 + 18 + 64) throw new Error('Invalid sparse-zero SQLite BLOB tag');
+          const count = blob[start] * 0x1000000 + blob[start + 1] * 0x10000 + blob[start + 2] * 0x100 + blob[start + 3];
+          const patchCount = String.fromCharCode(...blob.subarray(start + 4, start + 8));
+          if (!/^[0-9A-F]{4}$/.test(patchCount)) throw new Error('Invalid sparse-zero SQLite BLOB patch count');
+          const patches = Number.parseInt(patchCount, 16);
+          if (count < 64 || patches < 1 || patches >= sparseZeroNodeLimit) throw new Error('Invalid sparse-zero SQLite BLOB length');
+          const patchStart = start + 8, payloadStart = patchStart + patches * 10;
+          if (blob.length < payloadStart + 18 + 64) throw new Error('Invalid sparse-zero SQLite BLOB payload');
+          const payload = blob.subarray(payloadStart), prefixLength = payload.length - 64;
+          const expanded = new Uint8Array(payload.length + count), seen = new Set();
+          expanded.set(payload.subarray(0, prefixLength));
+          expanded.set(payload.subarray(prefixLength), prefixLength + count);
+          for (let i = 0; i < patches; i++) {
+            const encoded = String.fromCharCode(...blob.subarray(patchStart + i * 10, patchStart + (i + 1) * 10));
+            if (!/^[0-9A-F]{10}$/.test(encoded)) throw new Error('Invalid sparse-zero SQLite BLOB patch');
+            const offset = Number.parseInt(encoded.slice(0, 8), 16), value = Number.parseInt(encoded.slice(8), 16);
+            if (offset >= count || value === 0 || seen.has(offset)) throw new Error('Invalid sparse-zero SQLite BLOB patch');
+            seen.add(offset);
+            expanded[prefixLength + offset] = value;
+          }
+          return { blob: expanded.toBase64() };
+        }
+        if (sentinel === 74) {
+          const start = position + header.length + 1;
+          if (blob.length < start + 4 + 18 + 64) throw new Error('Invalid zero-run SQLite BLOB tag');
+          const count = blob[start] * 0x1000000 + blob[start + 1] * 0x10000 + blob[start + 2] * 0x100 + blob[start + 3];
+          if (count < 64) throw new Error('Invalid zero-run SQLite BLOB length');
+          const payload = blob.subarray(start + 4);
+          const prefixLength = payload.length - 64;
+          const expanded = new Uint8Array(payload.length + count);
+          expanded.set(payload.subarray(0, prefixLength));
+          expanded.set(payload.subarray(prefixLength), prefixLength + count);
+          return { blob: expanded.toBase64() };
+        }
+        if (sentinel < 65 || sentinel > 73) throw new Error('Invalid sparse SQLite BLOB sentinel');
+        const payload = blob.subarray(position + header.length + 1);
+        let markerCount = 0;
+        for (const byte of payload) if (byte === sentinel) markerCount++;
+        const expanded = new Uint8Array(payload.length + markerCount * 8);
+        let out = 0;
+        for (const byte of payload) {
+          if (byte === sentinel) { expanded[out] = 255; out += 9; }
+          else expanded[out++] = byte;
+        }
+        return { blob: expanded.toBase64() };
+      }
+    }
     // Two bounded marker runs encode the high count, suffix bytes and flag.
     // Their separators ensure an unprefixed tag cannot begin with a marker;
     // a source BLOB shaped like a tag is escaped as ordinary data.
@@ -130,7 +261,7 @@ function decodeReturning(value, unified = false) {
         return { blob: repeated.toBase64() };
       }
     }
-  } else {
+  } else if (!terse) {
     // In this tag each count byte precedes a marker run, so the bytes after
     // the first marker cannot themselves start with a marker (FF is followed
     // by the next marker's FF). The two runs encode the high count and suffix.
@@ -339,19 +470,35 @@ export function execute(storage, { statement, args, query }) {
   let wide;
   const isReturning = !!returning;
   let unified = false;
+  let terse = false;
   if (returning) {
     columns = returning[1].split(/\s*,\s*/);
     wide = columns.length > 50;
     // Use the compact codec for wide projections. When the rewritten SQL is
-    // too large, use the prior codec only if its rewrite is actually shorter.
+    // too large, share the compact encoder before trying shorter prior codecs.
     const prefix = sql.slice(0, returningToken.start) + "RETURNING ";
     unified = wide;
     prepared = prefix + columns.map(column => wide ? compactReturningColumn(column) : legacyReturningColumn(column)).join(", ");
+    if (wide && new TextEncoder().encode(prepared).length > 100000) {
+      const candidate = sharedReturningRewrite(sql, tokens, returningToken, columns);
+      if (new TextEncoder().encode(candidate).length < new TextEncoder().encode(prepared).length) {
+        unified = true;
+        prepared = candidate;
+      }
+    }
     if (wide && new TextEncoder().encode(prepared).length > 100000) {
       const shorter = prefix + columns.map(column => legacyReturningColumn(column, false)).join(", ");
       if (new TextEncoder().encode(shorter).length < new TextEncoder().encode(prepared).length) {
         unified = false;
         prepared = shorter;
+      }
+    }
+    if (wide && new TextEncoder().encode(prepared).length > 100000) {
+      const fallback = prefix + columns.map(column => terseReturningColumn(column)).join(", ");
+      if (new TextEncoder().encode(fallback).length < new TextEncoder().encode(prepared).length) {
+        unified = false;
+        terse = true;
+        prepared = fallback;
       }
     }
   } else {
@@ -369,7 +516,7 @@ export function execute(storage, { statement, args, query }) {
       "\n) SELECT " + aliases.map(wide ? packedColumn : columnPair).join(", ") + " FROM " + rowSource;
   }
   const rows = storage.sql.exec(prepared, ...values).raw().toArray().map((row) =>
-    columns.map((_column, index) => isReturning ? decodeReturning(row[index], unified) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
+    columns.map((_column, index) => isReturning ? decodeReturning(row[index], unified, terse) : wide ? decodePacked(row[index]) : decodePair(row[index * 2], row[index * 2 + 1])));
   return { columns, rows };
 }
 

@@ -36,17 +36,52 @@ and supplies test-only WASI open/seed/nullability adapters. Each function
 runs in its own object. The JSON result includes the test logs and simulated
 timer-poll count. In recent runs five passes used simulated WASI timer waits:
 workerd cannot block in a synchronous host import, so those passes do not
-establish real scheduling or elapsed-time behavior. The original native
-connection-lock tests cannot be interpreted as workerd failures or passes.
+establish real scheduling or elapsed-time behavior. The held-lock cases
+below require separately controlled transactions on native connections.
 
 The runner now requires an exact top-level Go `RUN` and `PASS` marker as well
 as exit code zero for the selected suite, concurrent-owner, and bulk tests.
 `node scripts/test-upstream-sqlite-test-result.mjs` checks that absent, skipped,
 similarly named, failing, and nonzero-exit results do not count as passing.
-These are local result-classification tests; the owner-concurrency run with the
-new check was aborted before dispatch and has not been rerun. Earlier reported
-results above used the preceding runner and are not newly verified by this
-change.
+
+### Pinned statement rerun after the wide RETURNING fix
+
+The [per-test results](sqlite-bridge-statement-results.csv) map all 285 original
+pinned statement functions on MaPi `5d0b6dd70d26e66768f04ab35f05fa6096647c1a`
+and Nextgen `b0b74cd4a198428ea9b82910c217259ffc62b65c`. The local run used
+Go 1.26.9, Node 26.9.0, Wrangler 4.165.0 and workerd 1.20261118.1. The native
+oracle used the pinned modernc.org/sqlite v1.61.1 dependency. All 285 native
+statement functions passed, as did the native dialect and migration packages.
+The Go/Wasm bridge passed with all 39 workerd migrations.
+
+The first full workerd run recorded 282 passes, both native lock-schedule
+failures and a runner-level `TypeError: terminated` for
+`TestSignupProofSpentOnMutationFailure`. That case passed in isolation and in
+the repeat full run. The repeat recorded 283 passes and two held-lock failures,
+with exit code 1 for the suite.
+`TestIDPConnectionStatements_LockSerializesRevisions` saw B finish while A's
+lock was held. `TestUserPasswordStatements_SetWaitsForConcurrentSet` saw B
+finish while A's transaction was open. Both tests passed with separate native
+connections.
+
+The five simulated-timer results are identified in the CSV. The synchronous
+WASI harness advances its test clock on timer polls. Those passes cover the
+assertions reached under the simulated schedule. Real waiter timing and held
+locks remain outside that evidence.
+
+A separate local concurrent-owner rerun passed with the exact top-level
+`RUN` and `PASS` classifier and zero process exit codes. Two independent calls
+to the same object serialized IDP revisions, retained all three password
+versions with the last writer current, and accepted exactly one of two
+user updates with the same expected version. The separately selected
+`TestMaPiRowsRemainReadableAfterRollback` passed with zero simulated timers.
+To repeat these checks, run:
+
+```sh
+MAPI_OWNER_CONCURRENCY=1 MAPI_ESCAPED_ROWS_CONTRACT=1 \
+  MAPI_STMTTEST_FILTER='^(TestMaPiOwnerSeed|TestMaPiRowsRemainReadableAfterRollback)$' \
+  node scripts/test-upstream-sqlite-wasi.mjs
+```
 
 IDP, application and policy revisions, JSON schemas, flow definitions,
 password history, origin insertion, users, teams, projects and event cursor
@@ -91,17 +126,6 @@ SSO test with `MAPI_EXPIRY_CONTRACT=1 MAPI_FREEZE_TEST_CLOCK=1
 MAPI_STMTTEST_FILTER='^TestMaPiAuthAttemptExpiryPrecision$|^TestAuthAttemptStatements_SSOState$'`
 followed by the command above. The test checks 1 ns, just under, exactly at,
 and just over 1 ms, a five-minute TTL, nil TTL, and an uninitialized attempt.
-
-The two unsupported native lock schedules are
-`TestIDPConnectionStatements_LockSerializesRevisions` and
-`TestUserPasswordStatements_SetWaitsForConcurrentSet`. Their workerd
-observable equivalent passed with concurrent independent calls to one
-disposable SQLite owner, using the real Go transaction and statement methods.
-Both calls commit, the second IDP revision reads the first, the newest
-revision is the second, and password history retains both writes and the
-initial hash with the last writer current. Run this separately with
-`MAPI_OWNER_CONCURRENCY=1 MAPI_STMTTEST_FILTER=^TestMaPiOwnerSeed$` followed
-by the command above. This does not simulate a deliberately held native lock.
 
 Before the scoped revision change, an explicitly experimental scratch-only global logical clock gave 283/285,
 but changes expiry-sensitive clock reads and has no recovery high-water
@@ -444,26 +468,84 @@ in each identifier, including zero and FF suffixes and the BLOB in a long
 named column. For wide results a compact scalar subquery uses short local
 aliases and a unified tag in the existing escape grammar; a nested alias
 avoids repeating longer identifiers. The matching decoder is selected with
-the rewrite. The prior codec remains available when its SQL is shorter and
-the compact rewrite exceeds the statement-size limit. Local Workerd checks
+the rewrite. The shared compact rewrite is tried when the per-column rewrite exceeds the
+statement-size limit; prior codecs remain available if still needed. Local Workerd checks
 test 100,000 UTF-8 bytes and rejection at 100,001 without a trigger effect.
 
 The local suite also exercises 66-column multi-row UPDATE and DELETE with
 columns named like the local aliases and with very long identifiers, all 256
 suffix byte values, deterministic signed integers and width boundaries,
 tag-shaped and nested data, rollback and trigger counts. Separately,
-`npm run test:wide-int64-differential` drives the real wide rewrite through
-a native SQLite adapter and compares 100,011 signed values against independent
+`npm run test:wide-int64-differential` drives the production compact codec
+directly through a native SQLite adapter and compares 100,011 signed values against independent
 BigInt expectations. This is selected local evidence, not a proof for all SQL. The SQL marker check
 and result reconstruction can scan or allocate large values; the wide tag can
 itself reach 592,145 bytes. Hosted CPU and total isolate memory are unverified.
 
-`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme` is a
-**failing regression**: direct DELETE returns the BLOB and 99 NULL columns
-with identifiers extended by 512 bytes, while the rewritten statement exceeds
-SQLite's size limit. Both attempts roll back business and audit changes. Other marker-heavy
-shapes and wide SELECT materialization may also exceed the limit. General
-exact-size compatibility remains an open Phase 1 gate.
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme` and
+its `-ff`, `-zero`, `-last` and `-terse-marker` variants pass an
+8,388,530-byte BLOB with 99 NULL columns whose identifiers are extended by
+512 bytes. When the per-column compact rewrite exceeds the SQL-size limit, the
+bridge tries a shared correlated `NOT MATERIALIZED` CTE using the compact
+codec before the older and distinct-marker fallbacks. The terse-marker value no
+longer needs escaping in the shared codec. The shared rewrite also passed
+plain and recursive caller CTE variants, colliding CTE and trigger-table names,
+bound UPSERT, multi-row UPDATE and DELETE, same-row AFTER trigger semantics,
+rollback and audit counts, mixed values, and the 100,000/100,001-byte SQL
+boundary in local Workerd. `npm run test:shared-int64-differential` compares
+100,011 signed values through the shared rewrite against a native BigInt
+oracle; `npm run test:terse-int64-differential` exercises the production terse
+codec directly rather than its selection. `NOT MATERIALIZED` is a SQLite
+planner hint; these cases do not prove every query shape or bound hosted CPU
+and isolate memory.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-interspersed`
+now passes the previously failing 8,388,530-byte BLOB with an inserted byte
+and seven suffix bytes. For marker-prefixed BLOBs with at most eight bytes
+outside the marker runs, the compact codec selects an ASCII sentinel absent
+from those bytes and replaces each marker with the sentinel. The decoder
+expands the sentinel and retains the other bytes. Local Workerd tests cover
+all 256 inserted byte values, one through eight interspersed bytes at varying
+positions, sentinel exhaustion through eight candidates, tag-like source
+values, nested marker prefixes, rollback and trigger effects. The shared
+encoder can scan and copy large BLOBs multiple times; neither CPU nor total
+isolate memory is bounded by these local tests.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header`
+now passes the formerly failing reserved-tag value. For a source beginning with
+the reserved tag after marker and optional `Q` runs, the codec checks whether
+the span after the tag is zero-filled, preserves its final 64 bytes verbatim,
+and encodes the zero count. Local Workerd tests cover nested prefixes, all 256
+tail byte values, 63/64/65/127-byte zero-span boundaries, rollback and trigger
+effects. This is a specific compressible shape, not a general solution; SQL
+may copy or compare large values and hosted CPU and isolate memory are unverified.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-nonzero`,
+`-sparse-header-eight`, `-sparse-header-nine`, and `-sparse-header-sixtyfour`
+pass near-limit values with one, eight, nine and 64 separated nonzero bytes.
+The recursive SQLite search uses the existing cap of 2,048 nodes per
+materialized scan. It records sparse patches only when the scan completes
+below that cap and the patch encoding saves space over the ordinary escape.
+Local Workerd checks cover nonzero byte values, boundary and interior
+positions, arbitrary tails, rollback and audit effects.
+
+`npm run test:sparse-zero-differential` instruments the production rewrite
+against native SQLite at approximately 8 MiB. The 65 separated and 256
+clustered nonzero bytes use patch encoding. Budget exhaustion falls back
+to the ordinary escape for 256 separated or 4,096 clustered bytes. All
+cases round-trip and the test checks the patch/escape size break-even.
+The test observed up to 8,188 child checks, within its 8,192 bound for a
+correlated query evaluated twice. The node cap applies per scan. SQLite
+allocations, byte comparisons, hosted CPU and isolate memory remain unmeasured.
+
+`npm run test:sql-returning-exact-blob-repeat-tail8-wide100-extreme-sparse-header-sixtyfive`
+now passes in local workerd. `npm run test:sqlite-bridge` also exercises the
+same 100-column, 8,388,530-byte SQL shape through the pinned Go driver.
+`database/sql.Rows` preserves the complete BLOB, column order and 99 NULLs
+after rollback and commit. Rollback restores the original business row
+and avoids a persisted audit increment. The commit removes it and increments
+the audit count once. General exact-size compatibility and bounded result
+memory remain open Phase 1 gates.
 
 The checks for this change ran in a disposable checkout with a copied pinned
 upstream tree and dependencies symlinked to the original checkout's installed
@@ -540,7 +622,7 @@ was rejected. After a process stop before commit, retrying the same key
 committed one business row and one audit row. The idempotency ledger in those
 checks is not integrated with the real application or its relocation manifest.
 
-The async spill experiment handles SELECT only; DML `RETURNING` falls back to the existing bridge and therefore does not fix the exact-size `SQLITE_TOOBIG` regression. A separate local staging experiment also changed connection-local SQLite state while iterating: a multi-row query containing `changes()` and `last_insert_rowid()` returned different values after spool inserts, and those functions remained changed after opening the result. Its local staged handle also failed to preserve an uncommitted row after rollback. A bounded production design must preserve these observable semantics, not just transfer rows in small frames. The volatile-expression checks run so far cover only a narrow materialized `randomblob` case; they do not prove general single evaluation. See `phase1-status.md` for the remaining gates.
+The async spill experiment handles SELECT only and delegates DML `RETURNING` to the existing bridge. A separate local staging experiment also changed connection-local SQLite state while iterating: a multi-row query containing `changes()` and `last_insert_rowid()` returned different values after spool inserts, and those functions remained changed after opening the result. Its local staged handle also failed to preserve an uncommitted row after rollback. A bounded production design must preserve these observable semantics, not just transfer rows in small frames. The volatile-expression checks run so far cover only a narrow materialized `randomblob` case; they do not prove general single evaluation. See `phase1-status.md` for the remaining gates.
 
 A later local workerd probe showed why an escaped live cursor alone is insufficient: after consuming one of three uncommitted rows and rolling back, subsequent iteration returned only one of the remaining two rows without an error. A separate small two-object experiment kept frames outside the owner database and retained all three rows after rollback without changing owner connection state. It does not establish secure spill storage, resource bounds, cancellation, fencing, Go integration or hosted behavior; neither experiment is mounted in the application.
 

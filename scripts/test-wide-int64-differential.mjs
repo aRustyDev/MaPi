@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { readFile } from 'node:fs/promises';
 import { execute } from '../worker/sql.js';
 
 // Exercise the real wide RETURNING rewrite against native SQLite while using
@@ -29,12 +30,34 @@ for (let row = 0; row < 1961; row++) {
   insert.run(row, ...values);
 }
 db.exec('COMMIT');
+const useTerse = process.env.MAPI_TEST_TERSE === '1';
+const useShared = process.env.MAPI_TEST_SHARED === '1';
+assert.ok(!(useTerse && useShared));
+let selectedSQL;
 const storage = { sql: { exec(statement, ...args) {
+  selectedSQL = statement;
   const prepared = db.prepare(statement);
   prepared.setReturnArrays(true);
   return { raw: () => ({ toArray: () => prepared.all(...args) }) };
 } } };
-const result = execute(storage, { statement: `DELETE FROM values_to_delete RETURNING id,${names.join(',')}`, args: [], query: true });
+let result;
+if (!useShared) {
+  // Test each production codec directly even if size-based selection chooses
+  // the shared rewrite for this wide projection.
+  const source = await readFile(new URL('../worker/sql.js', import.meta.url), 'utf8');
+  const moduleUrl = 'data:text/javascript;base64,' + Buffer.from(source + '\nexport { terseReturningColumn, compactReturningColumn, decodeReturning };').toString('base64');
+  const { terseReturningColumn, compactReturningColumn, decodeReturning } = await import(moduleUrl);
+  const columns = ['id', ...names];
+  const encode = useTerse ? terseReturningColumn : compactReturningColumn;
+  const statement = `DELETE FROM values_to_delete RETURNING ${columns.map(encode).join(',')}`;
+  const raw = storage.sql.exec(statement).raw().toArray();
+  result = { columns, rows: raw.map(row => row.map(value => decodeReturning(value, !useTerse, useTerse))) };
+  if (useTerse) assert.ok(selectedSQL.includes("X'4D615069233921403F'"), 'Terse codec was not selected');
+} else {
+  const padding = `/*${'x'.repeat(60000)}*/`;
+  result = execute(storage, { statement: `DELETE FROM values_to_delete ${padding} RETURNING id,${names.join(',')}`, args: [], query: true });
+  assert.ok(selectedSQL.startsWith('WITH mapi_shared_value'), 'Unexpected wide codec selected');
+}
 assert.equal(result.columns.length, 52);
 assert.equal(result.rows.length, expected.length);
 const seen = new Set();
@@ -48,5 +71,5 @@ for (const row of result.rows) {
 }
 assert.equal(seen.size, expected.length);
 assert.equal(db.prepare('SELECT COUNT(*) AS n FROM values_to_delete').get().n, 0);
-console.log(`Native SQLite wide RETURNING int64 differential passed ${expected.length * names.length} values.`);
+console.log(`Native SQLite ${useTerse ? 'terse codec' : useShared ? 'shared' : 'compact codec'} wide RETURNING int64 differential passed ${expected.length * names.length} values.`);
 db.close();

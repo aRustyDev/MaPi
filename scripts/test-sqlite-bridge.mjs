@@ -91,6 +91,8 @@ try {
     "TestUserStatements_Create_EmptyIDAssigned/create-get",
   ]);
   console.log("Pinned upstream adapted assertion matrix:", result.upstreamCases.join(", "));
+  assert.equal(result.wideReturning, true);
+  console.log("100-column RETURNING preserved the 8,388,530-byte sparse BLOB, column order, and NULLs after rollback and commit in Go/Wasm.");
   const migrationResponse = await fetch(`http://127.0.0.1:${port}/migrations`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tables: nativeSchema, objects: nativeObjects }),
   });
