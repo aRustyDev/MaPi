@@ -140,7 +140,7 @@ export function advanceRelocationTextPreflight(storage, tables, checkpoint = nul
     const { table, rowid, columns } = cache.get(name);
     if (!columns.length) throw Error('Unsupported TEXT preflight columns');
     if (checkpoint.row === null) {
-      if (rows >= MAX_ROWS) break;
+      if (rows >= MAX_ROWS || queries >= MAX_QUERIES) break;
       const where = checkpoint.after === null ? '' : `WHERE ${rowid} > CAST(? AS INTEGER)`;
       const args = checkpoint.after === null ? [] : [checkpoint.after];
       const result = query(`SELECT printf('%lld', ${rowid}) AS row_id FROM ${table} ${where} ORDER BY ${rowid} LIMIT 1`, ...args).toArray();

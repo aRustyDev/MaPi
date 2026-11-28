@@ -14,6 +14,16 @@ export class StreamOwner extends DurableObject {
  indexedState() { return { state: streamImportStatus(this.s, 'p'), rows: this.s.sql.exec('SELECT id, value, value_length FROM indexed_items ORDER BY id').toArray() }; }
  allowShort() { this.s.sql.exec('DROP TRIGGER reject_short'); }
  preflightIndexed() { return this.s.transactionSync(() => advanceRelocationTextPreflight(this.s, ['indexed_items'], null, {projectId:'p', moveId:'m'})); }
+ preflightQueryBoundary() {
+  const tables = Array.from({length: 42}, (_, i) => `budget_${i}`);
+  return this.s.transactionSync(() => {
+   for (let i = 0; i < tables.length; i++) this.s.sql.exec(`CREATE TABLE ${tables[i]} (id ${i < 39 ? 'TEXT' : 'INTEGER'} PRIMARY KEY)`);
+   const identity = {projectId:'p', moveId:'m'};
+   const first = advanceRelocationTextPreflight(this.s, tables, null, identity);
+   const second = advanceRelocationTextPreflight(this.s, tables, first.checkpoint, identity);
+   return {first, second};
+  });
+ }
  receive(index, stream, fail = false) { return this.s.transactionSync(() => { validateStreamImportSchema(this.s, 'p'); return importStream(this.s, { projectId: 'p', table: 'items', names: ['id', 'value', 'raw', 'precise', 'amount', 'optional'], rowOffset: 0, index, stream, failAfterRows: fail ? 1 : 0 }); }); }
  state() { const state = streamImportStatus(this.s, 'p'); return { state, count: this.s.sql.exec('SELECT COUNT(*) AS n FROM items').one().n, events: this.s.sql.exec('SELECT COUNT(*) AS n FROM events').one().n }; }
  corrupt(kind) {
@@ -98,6 +108,8 @@ export default { async fetch(request, env) {
   check(indexedState.rows.length === 1 && indexedState.rows[0].id === 23 && indexedState.rows[0].value === 'ab' && indexedState.rows[0].value_length === 2, 'stored generated column or index differs');
   const indexedPreflight = await indexed.preflightIndexed();
   check(indexedPreflight.done && indexedPreflight.checkpoint.version === 5, 'generated column preflight failed');
+  const budget = await indexed.preflightQueryBoundary();
+  check(!budget.first.done && budget.first.queries === 128 && budget.first.checkpoint.table === 41 && budget.second.done, 'preflight query budget did not yield and resume');
   return Response.json({ok:true});
  } catch (error) { return Response.json({ok:false,error:String(error)}, {status:500}); }
 } };
