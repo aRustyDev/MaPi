@@ -11,7 +11,7 @@ const hash = async text => [...new Uint8Array(await crypto.subtle.digest('SHA-25
 export class ChunkProject extends DurableObject {
  constructor(ctx, env) { super(ctx, env); this.s = ctx.storage; this.s.sql.exec('CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, precise INTEGER, data BLOB)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), kind TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS compound (a INTEGER NOT NULL, b TEXT NOT NULL, PRIMARY KEY (a, b))'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS wide_text (id TEXT PRIMARY KEY, value TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS case_keys (id TEXT COLLATE NOCASE PRIMARY KEY, value TEXT)'); this.s.sql.exec('CREATE TABLE IF NOT EXISTS real_values (id TEXT PRIMARY KEY, value REAL)'); }
  init(id, name) { initializeProjectFence(this.s, id, name); }
- seed(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); for (let i = 0; i < 12; i++) { const key = `u${String(i).padStart(2, '0')}`; const data = new Uint8Array(80_000); data.fill(i); this.s.sql.exec(`INSERT INTO users VALUES (?, ${i % 2 ? '-9223372036854775808' : '9223372036854775807'}, ?)`, key, data.buffer); this.s.sql.exec('INSERT INTO sessions VALUES (?, ?)', `s${i}`, key); this.s.sql.exec('INSERT INTO events VALUES (?, ?, ?)', `e${i}`, key, 'created'); } }); }
+ seed(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); for (let i = 0; i < 12; i++) { const key = `u${String(i).padStart(2, '0')}`; const data = new Uint8Array(50_000); data.fill(i); this.s.sql.exec(`INSERT INTO users VALUES (?, ${i % 2 ? '-9223372036854775808' : '9223372036854775807'}, ?)`, key, data.buffer); this.s.sql.exec('INSERT INTO sessions VALUES (?, ?)', `s${i}`, key); this.s.sql.exec('INSERT INTO events VALUES (?, ?, ?)', `e${i}`, key, 'created'); } }); }
  seedCompound(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); for (let i = 0; i < 70; i++) this.s.sql.exec("INSERT INTO compound VALUES (9223372036854775807, ?)", `key-${String(i).padStart(4, '0')}`); }); }
  compoundCount() { return this.s.sql.exec('SELECT COUNT(*) AS n FROM compound').one().n; }
  compoundPlan() { return this.s.sql.exec("EXPLAIN QUERY PLAN SELECT a, b FROM compound WHERE (a, b) > (CAST(? AS INTEGER), ?) ORDER BY a, b LIMIT 1", "9223372036854775807", "key-0001").toArray().map(row => row.detail); }
@@ -20,8 +20,9 @@ export class ChunkProject extends DurableObject {
  casePlan() { return this.s.sql.exec("EXPLAIN QUERY PLAN SELECT id FROM case_keys WHERE (id COLLATE BINARY) > (?) ORDER BY id COLLATE BINARY LIMIT 1", "K-0001").toArray().map(row => row.detail); }
  seedMany(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); for (let i = 0; i < 130; i++) this.s.sql.exec('INSERT INTO users VALUES (?, ?, ?)', `key-${String(i).padStart(4, '0')}`, i, new Uint8Array([i % 256]).buffer); }); }
  oversized(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); const data = new Uint8Array(300_000); for (let i = 0; i < data.length; i++) data[i] = i % 251; this.s.sql.exec("INSERT INTO users VALUES ('large', 9223372036854775807, ?)", data.buffer); }); }
- beyondRowLimit(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO users VALUES ('large', 0, ?)", new Uint8Array(7_996_000).buffer); }); }
- seedWideText(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", 'é😀\n'.repeat(45_000)); }); }
+ beyondRowLimit(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO users VALUES ('large', 0, ?)", new Uint8Array(8_385_000).buffer); }); }
+ seedWideText(id) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", '\uFEFF' + 'é😀\n'.repeat(45_000)); }); }
+ seedWireRows(id, value, includeSmall) { this.s.transactionSync(() => { assertProjectWritable(this.s, id, 1); if (includeSmall) this.s.sql.exec("INSERT INTO wide_text VALUES ('a', 'small')"); this.s.sql.exec("INSERT INTO wide_text VALUES ('wide', ?)", value); }); }
  seedRelocationText(id, invalid) {
   this.s.transactionSync(() => {
    assertProjectWritable(this.s, id, 1);
@@ -43,6 +44,36 @@ export class ChunkProject extends DurableObject {
  chunk(id, gen, move, n, fail) { return exportChunk(this.s, id, gen, move, n, fail); }
  beginImport(id, gen, move, dest, order = tables) { beginChunkImport(this.s, id, gen, move, dest, order); }
  receive(id, env, fail) { return importChunk(this.s, id, env, fail); }
+ // Synthetic external recovery authority, deliberately changed while the
+ // chunk digest is pending. The actual owner uses its configured epoch.
+ setAuthorityEpoch(value) { this.s.sql.exec('CREATE TABLE IF NOT EXISTS mapi_test_authority (epoch TEXT NOT NULL)'); this.s.sql.exec('DELETE FROM mapi_test_authority'); this.s.sql.exec('INSERT INTO mapi_test_authority VALUES (?)', value); }
+ assertAuthorityEpoch() { if (this.s.sql.exec('SELECT epoch FROM mapi_test_authority').one().epoch !== 'current') throw Error('Stale synthetic recovery epoch'); }
+ beginGuardedExport(id, gen, move) { return beginChunkExport(this.s, id, gen, move, ['users'], () => this.assertAuthorityEpoch()); }
+ beginGuardedImport(id, gen, move, dest) { return beginChunkImport(this.s, id, gen, move, dest, ['users'], () => this.assertAuthorityEpoch()); }
+ beginAsyncGuardedExport(id, gen, move) { return beginChunkExport(this.s, id, gen, move, ['users'], () => Promise.resolve()); }
+ guardedExport(id, gen, move, invalidate = false) {
+  let scheduled = false;
+  return exportChunk(this.s, id, gen, move, 0, false, () => {
+   this.assertAuthorityEpoch();
+   if (invalidate && !scheduled) { scheduled = true; queueMicrotask(() => this.setAuthorityEpoch('stale')); }
+  });
+ }
+ guardedImport(id, chunk, invalidate = false) {
+  if (invalidate) queueMicrotask(() => this.setAuthorityEpoch('stale'));
+  return importChunk(this.s, id, chunk, 0, () => this.assertAuthorityEpoch());
+ }
+ guardedState(id, role) {
+  const table = role === 'source' ? 'mapi_chunk_export_data' : 'mapi_chunk_import_data';
+  const checkpoint = role === 'source' ? chunkExportStatus(this.s, id) : chunkImportStatus(this.s, id);
+  const row = this.s.sql.exec(`SELECT COUNT(*) AS n FROM ${table} WHERE project_id = ?`, id).one();
+  return { checkpoint, journalRows: row.n, users: this.s.sql.exec('SELECT COUNT(*) AS n FROM users').one().n };
+ }
+ clearTextGuardForTest(role) {
+  const table = role === 'source' ? 'mapi_chunk_export' : 'mapi_chunk_import';
+  this.s.sql.exec(`ALTER TABLE ${table} DROP COLUMN text_guard`);
+ }
+ setExportCursorForTest(id, value) { this.s.sql.exec('UPDATE mapi_chunk_export SET cursor = ? WHERE project_id = ?', value, id); }
+ setTextGuardForTest(role, id, value) { const table = role === 'source' ? 'mapi_chunk_export' : 'mapi_chunk_import'; this.s.sql.exec(`UPDATE ${table} SET text_guard = ? WHERE project_id = ?`, value, id); }
  exportStatus(id) { return chunkExportStatus(this.s, id); }
  importStatus(id) { return chunkImportStatus(this.s, id); }
  controlSchema() { return this.s.sql.exec("SELECT name, sql FROM sqlite_schema WHERE name LIKE 'mapi_%' ORDER BY name").toArray(); }
@@ -67,7 +98,7 @@ export class ChunkProject extends DurableObject {
    mapi_relocation_project: "INSERT INTO mapi_relocation_project VALUES (?, 2, 'importing', 'foreign-move', NULL, 'foreign-object')",
    mapi_chunk_export: "INSERT INTO mapi_chunk_export (project_id,generation,move_id,tables,table_index,row_offset,next_chunk,chain,done) VALUES (?, 1, 'foreign-move', '[]', 0, 0, 0, '', 0)",
    mapi_chunk_export_data: "INSERT INTO mapi_chunk_export_data VALUES (?, 999999, 'foreign', NULL)",
-   mapi_chunk_import: "INSERT INTO mapi_chunk_import VALUES (?, 1, 'foreign-move', 'foreign-object', '[]', 0, 0, 0, '', 0)",
+   mapi_chunk_import: "INSERT INTO mapi_chunk_import VALUES (?, 1, 'foreign-move', 'foreign-object', '[]', 0, 0, 0, '', 0, 1)",
    mapi_chunk_import_data: "INSERT INTO mapi_chunk_import_data VALUES (?, 999999, 'foreign')",
    mapi_chunk_import_fragment: "INSERT INTO mapi_chunk_import_fragment VALUES (?, 'users', 0, 1, 0, '[]')",
    mapi_chunk_import_fragment_data: "INSERT INTO mapi_chunk_import_fragment_data VALUES (?, 999999, X'01')",
@@ -105,12 +136,19 @@ export class ChunkProject extends DurableObject {
  removeExtraImportHistory(id) { this.s.sql.exec('DELETE FROM mapi_chunk_import_data WHERE project_id = ? AND chunk_index = 999999', id); }
  setHistoryForTest(id, index, digest) { this.s.sql.exec('INSERT INTO mapi_chunk_import_data VALUES (?, ?, ?)', id, index, digest); }
  removeHistoryForTest(id, index) { this.s.sql.exec('DELETE FROM mapi_chunk_import_data WHERE project_id = ? AND chunk_index = ?', id, index); }
+ setImportDigestForTest(id, index, value) { if (value === 'invalid-utf8') this.s.sql.exec("UPDATE mapi_chunk_import_data SET digest = CAST(X'80' AS TEXT) WHERE project_id = ? AND chunk_index = ?", id, index); else this.s.sql.exec('UPDATE mapi_chunk_import_data SET digest = ? WHERE project_id = ? AND chunk_index = ?', value, id, index); }
+ streamForTest(id) { return this.s.sql.exec('SELECT * FROM mapi_chunk_import_stream WHERE project_id = ?', id).one(); }
+ setStreamForTest(id, field, value) { if (!['table_name', 'row_offset', 'last_chunk'].includes(field)) throw Error('Invalid local stream field'); this.s.sql.exec(`UPDATE mapi_chunk_import_stream SET ${field} = ? WHERE project_id = ?`, value, id); }
  fragmentForTest(id) { return this.s.sql.exec('SELECT * FROM mapi_chunk_import_fragment WHERE project_id = ?', id).one(); }
  setFragmentForTest(id, field, value) {
   if (!['table_name', 'row_offset', 'total', 'next_offset', 'cursor'].includes(field)) throw Error('Invalid local fragment field');
   this.s.sql.exec(`UPDATE mapi_chunk_import_fragment SET ${field} = ? WHERE project_id = ?`, value, id);
  }
  moveFragmentPieceForTest(id, from, to) { this.s.sql.exec('UPDATE mapi_chunk_import_fragment_data SET chunk_index = ? WHERE project_id = ? AND chunk_index = ?', to, id, from); }
+ setFragmentPieceForTest(id, index, value) { this.s.sql.exec('UPDATE mapi_chunk_import_fragment_data SET data = ? WHERE project_id = ? AND chunk_index = ?', value, id, index); }
+ addLegacyGarbage(id) { for (let i = -50; i < 0; i++) this.s.sql.exec('INSERT INTO mapi_chunk_import_fragment_data VALUES (?, ?, zeroblob(1))', id, i); }
+ removeLegacyGarbage(id) { this.s.sql.exec('DELETE FROM mapi_chunk_import_fragment_data WHERE project_id = ? AND chunk_index < 0', id); }
+ legacyPieceSummary(id) { return this.s.sql.exec('SELECT COUNT(*) AS n, SUM(length(data)) AS bytes FROM mapi_chunk_import_fragment_data WHERE project_id = ?', id).one(); }
  removeRelocationRow(id) { this.s.sql.exec('DELETE FROM mapi_relocation_project WHERE project_id = ?', id); }
  setRelocationField(id, field, value) {
   if (!['project_id', 'generation', 'move_id', 'object_name', 'state', 'digest'].includes(field)) throw Error('Invalid local test field');
@@ -137,6 +175,42 @@ export class ChunkRegistry extends DurableObject {
 export default { async fetch(request, env) {
  try {
   const n = crypto.randomUUID(), a = `source-${n}`, b = `destination-${n}`, r = `registry-${n}`; let source = env.PROJECT.getByName(a), target = env.PROJECT.getByName(b); const registry = env.REGISTRY.getByName(r);
+  // A recovery epoch may change while asynchronous digesting yields. Verify
+  // reservations, finalization and replay all check it inside transactions.
+  let epochSource = env.PROJECT.getByName(`epoch-source-${n}`), epochTarget = env.PROJECT.getByName(`epoch-target-${n}`);
+  await epochSource.init('epoch', `epoch-source-${n}`); await epochSource.seedMany('epoch'); await epochSource.freeze('epoch', 1, 'epoch-move');
+  await epochSource.setAuthorityEpoch('stale');
+  const sourceSchema = await epochSource.controlSchema();
+  await rejectsWith(() => epochSource.beginGuardedExport('epoch', 1, 'epoch-move'), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochSource.controlSchema()) === JSON.stringify(sourceSchema), 'Rejected source initialization changed state');
+  await rejectsWith(() => epochSource.beginAsyncGuardedExport('epoch', 1, 'epoch-move'), 'Relocation authority check must be synchronous');
+  check(JSON.stringify(await epochSource.controlSchema()) === JSON.stringify(sourceSchema), 'Async authority check changed source control state');
+  await epochSource.setAuthorityEpoch('current'); await epochSource.beginGuardedExport('epoch', 1, 'epoch-move');
+  await rejectsWith(() => epochSource.guardedExport('epoch', 1, 'epoch-move', true), 'Stale synthetic recovery epoch');
+  const reserved = await epochSource.guardedState('epoch', 'source');
+  check(reserved.checkpoint.next_chunk === 0 && reserved.journalRows === 1, 'Rejected export finalized its reservation');
+  try { await epochSource.evict(); } catch {} epochSource = env.PROJECT.getByName(`epoch-source-${n}`);
+  await rejectsWith(() => epochSource.guardedExport('epoch', 1, 'epoch-move'), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochSource.guardedState('epoch', 'source')) === JSON.stringify(reserved), 'Stale source replay changed state');
+  await epochSource.setAuthorityEpoch('current'); const epochChunk = await epochSource.guardedExport('epoch', 1, 'epoch-move');
+  check(JSON.stringify(await epochSource.guardedExport('epoch', 1, 'epoch-move')) === JSON.stringify(epochChunk), 'Source reservation did not resume identically');
+  await epochTarget.setAuthorityEpoch('stale'); const targetSchema = await epochTarget.controlSchema();
+  await rejectsWith(() => epochTarget.beginGuardedImport('epoch', 1, 'epoch-move', `epoch-target-${n}`), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochTarget.controlSchema()) === JSON.stringify(targetSchema), 'Rejected destination initialization changed state');
+  await epochTarget.setAuthorityEpoch('current'); await epochTarget.beginGuardedImport('epoch', 1, 'epoch-move', `epoch-target-${n}`);
+  const emptyImport = await epochTarget.guardedState('epoch', 'destination');
+  await rejectsWith(() => epochTarget.guardedImport('epoch', epochChunk, true), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochTarget.guardedState('epoch', 'destination')) === JSON.stringify(emptyImport), 'Stale import changed checkpoint or rows');
+  try { await epochTarget.evict(); } catch {} epochTarget = env.PROJECT.getByName(`epoch-target-${n}`);
+  await rejectsWith(() => epochTarget.guardedImport('epoch', epochChunk), 'Stale synthetic recovery epoch');
+  await epochTarget.setAuthorityEpoch('current'); await epochTarget.guardedImport('epoch', epochChunk);
+  const imported = await epochTarget.guardedState('epoch', 'destination');
+  check(imported.checkpoint.next_chunk === 1 && imported.journalRows === 1 && imported.users > 0, 'Valid import did not resume');
+  await epochTarget.setAuthorityEpoch('stale');
+  await rejectsWith(() => epochTarget.guardedImport('epoch', epochChunk), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochTarget.guardedState('epoch', 'destination')) === JSON.stringify(imported), 'Stale import replay changed state');
+  await epochTarget.setAuthorityEpoch('current'); await epochTarget.guardedImport('epoch', epochChunk);
+  check(JSON.stringify(await epochTarget.guardedState('epoch', 'destination')) === JSON.stringify(imported), 'Valid import replay changed state');
   const stale = env.PROJECT.getByName(`stale-${n}`); await stale.init('stale', `stale-${n}`);
   const beforeStale = await stale.controlSchema(), beforeState = await stale.status('stale'), beforeRows = await stale.evidence();
   await rejects(() => stale.beginExport('stale', 1, 'not-frozen'), 'unfrozen export initialization succeeded');
@@ -211,10 +285,122 @@ export default { async fetch(request, env) {
     const destinationName = `text-destination-${n}`, destination = env.PROJECT.getByName(destinationName);
     await destination.beginImport(id, 1, 'text-move', destinationName, ['wide_text']);
     const chunk = await owner.chunk(id, 1, 'text-move', 0, false);
+    const unpaired = JSON.parse(chunk.content);
+    unpaired.rows[0][1] = '\uD800';
+    const content = JSON.stringify(unpaired);
+    const unpairedChunk = { content, digest: await hash(content) };
+    await rejectsWith(() => destination.receive(id, unpairedChunk, 0), 'Invalid UTF-8 TEXT');
+    check((await destination.importStatus(id)).next_chunk === 0 && (await destination.relocationTextRows()).length === 0, 'invalid TEXT advanced import');
     await destination.receive(id, chunk, 0);
     check(JSON.stringify(await destination.relocationTextRows()) === JSON.stringify(before), 'valid multibyte or replacement character changed in relocation');
    }
   }
+  const oldSourceName = `old-text-source-${n}`, oldTargetName = `old-text-target-${n}`;
+  const oldSource = env.PROJECT.getByName(oldSourceName), oldTarget = env.PROJECT.getByName(oldTargetName);
+  const oldId = 'legacy-text', oldMove = 'legacy-text-move';
+  await oldSource.init(oldId, oldSourceName);
+  await oldSource.seedRelocationText(oldId, false);
+  await oldSource.freeze(oldId, 1, oldMove);
+  await oldSource.beginExport(oldId, 1, oldMove, ['wide_text']);
+  const guardedChunk = await oldSource.chunk(oldId, 1, oldMove, 0, false);
+  await oldTarget.beginImport(oldId, 1, oldMove, oldTargetName, ['wide_text']);
+  await oldTarget.clearTextGuardForTest('destination');
+  const oldImport = await oldTarget.importStatus(oldId);
+  await rejectsWith(() => oldTarget.beginImport(oldId, 1, oldMove, oldTargetName, ['wide_text']), 'Legacy relocation transfer');
+  await rejectsWith(() => oldTarget.receive(oldId, guardedChunk, 0), 'Legacy relocation transfer');
+  check(JSON.stringify(await oldTarget.importStatus(oldId)) === JSON.stringify(oldImport), 'legacy import advanced');
+  await oldSource.clearTextGuardForTest('source');
+  const oldExport = await oldSource.exportStatus(oldId);
+  await rejectsWith(() => oldSource.beginExport(oldId, 1, oldMove, ['wide_text']), 'Legacy relocation transfer');
+  await rejectsWith(() => oldSource.chunk(oldId, 1, oldMove, 0, false), 'Legacy relocation transfer');
+  check(JSON.stringify(await oldSource.exportStatus(oldId)) === JSON.stringify(oldExport), 'legacy export advanced');
+  const pendingName = `old-pending-${n}`, pending = env.PROJECT.getByName(pendingName);
+  await pending.init(oldId, pendingName);
+  await pending.seedRelocationText(oldId, false);
+  await pending.freeze(oldId, 1, oldMove);
+  await pending.beginExport(oldId, 1, oldMove, ['wide_text']);
+  await rejectsWith(() => pending.chunk(oldId, 1, oldMove, 0, true), 'Injected export interruption');
+  await pending.clearTextGuardForTest('source');
+  const pendingExport = await pending.exportStatus(oldId);
+  await rejectsWith(() => pending.chunk(oldId, 1, oldMove, 0, false), 'Legacy relocation transfer');
+  check(JSON.stringify(await pending.exportStatus(oldId)) === JSON.stringify(pendingExport), 'legacy pending export advanced');
+  // Persisted keysets are untrusted: malformed cursors must fail before a
+  // row read, preserving source bytes and the exact stored checkpoint.
+  const cursorName = `corrupt-cursor-${n}`, cursorOwner = env.PROJECT.getByName(cursorName);
+  await cursorOwner.init('corrupt-cursor', cursorName); await cursorOwner.seedRelocationText('corrupt-cursor', false); await cursorOwner.freeze('corrupt-cursor', 1, 'move');
+  await cursorOwner.beginExport('corrupt-cursor', 1, 'move', ['wide_text']);
+  for (const value of ['', '[]', '["one","two"]', '[{"integer":"01"}]', '[{"integer":"-0"}]', '[{"integer":"9223372036854775808"}]', '[{"blob":"!"}]']) {
+   await cursorOwner.setExportCursorForTest('corrupt-cursor', value);
+   const before = { checkpoint: await cursorOwner.exportStatus('corrupt-cursor'), rows: await cursorOwner.relocationTextRows() };
+   await rejectsWith(() => cursorOwner.chunk('corrupt-cursor', 1, 'move', 0, false), 'Invalid export cursor checkpoint');
+   check(JSON.stringify(before) === JSON.stringify({ checkpoint: await cursorOwner.exportStatus('corrupt-cursor'), rows: await cursorOwner.relocationTextRows() }), 'invalid export cursor changed source or checkpoint');
+  }
+  // Historical guard-1 checkpoints must be rejected without modifying either
+  // source bytes or destination rows and checkpoints.
+  const guardSourceName = `guard1-source-${n}`, guardTargetName = `guard1-target-${n}`;
+  const guardSource = env.PROJECT.getByName(guardSourceName), guardTarget = env.PROJECT.getByName(guardTargetName);
+  await guardSource.init('guard1', guardSourceName); await guardSource.seedRelocationText('guard1', false); await guardSource.freeze('guard1', 1, 'guard1-move');
+  await guardSource.beginExport('guard1', 1, 'guard1-move', ['wide_text']);
+  const guardChunk = await guardSource.chunk('guard1', 1, 'guard1-move', 0, false);
+  await guardTarget.beginImport('guard1', 1, 'guard1-move', guardTargetName, ['wide_text']);
+  await guardTarget.setTextGuardForTest('destination', 'guard1', 1);
+  const guardDestinationBefore = { status: await guardTarget.importStatus('guard1'), rows: await guardTarget.relocationTextRows() };
+  await rejectsWith(() => guardTarget.beginImport('guard1', 1, 'guard1-move', guardTargetName, ['wide_text']), 'Legacy relocation transfer');
+  await rejectsWith(() => guardTarget.receive('guard1', guardChunk, 0), 'Legacy relocation transfer');
+  check(JSON.stringify(guardDestinationBefore) === JSON.stringify({ status: await guardTarget.importStatus('guard1'), rows: await guardTarget.relocationTextRows() }), 'guard-1 import rejection changed data');
+  await guardSource.setTextGuardForTest('source', 'guard1', 1);
+  const guardSourceBefore = { status: await guardSource.exportStatus('guard1'), rows: await guardSource.relocationTextRows() };
+  await rejectsWith(() => guardSource.beginExport('guard1', 1, 'guard1-move', ['wide_text']), 'Legacy relocation transfer');
+  await rejectsWith(() => guardSource.chunk('guard1', 1, 'guard1-move', 0, false), 'Legacy relocation transfer');
+  check(JSON.stringify(guardSourceBefore) === JSON.stringify({ status: await guardSource.exportStatus('guard1'), rows: await guardSource.relocationTextRows() }), 'guard-1 export rejection changed data');
+
+  // Guard-2 small legacy envelopes remain resumable. Corrupt persisted fields
+  // and piece indexes must fail closed without erasing the original state.
+  const smallLegacyName = `small-legacy-${n}`, smallLegacy = env.PROJECT.getByName(smallLegacyName), smallLegacyId = 'small-legacy';
+  await smallLegacy.beginImport(smallLegacyId, 1, 'move', smallLegacyName, ['wide_text']);
+  const legacyBytes = new TextEncoder().encode(JSON.stringify([{ text: new TextEncoder().encode('legacy').toBase64() }, { text: new TextEncoder().encode('x'.repeat(70_000)).toBase64() }]));
+  const split = 80 * 1024;
+  const oldPacket = { projectId: smallLegacyId, generation: 1, moveId: 'move', index: 0, prev: '', table: 'wide_text', columns: ['id', 'value'], offset: 0, rows: [], last: false, done: false, cursor: null, fragment: { offset: 0, total: legacyBytes.length, data: legacyBytes.subarray(0, split).toBase64(), cursor: ['legacy'] } };
+  const oversizedPacket = { ...oldPacket, fragment: { ...oldPacket.fragment, total: 128 * 1024 + 1 } }, oversizedContent = JSON.stringify(oversizedPacket);
+  const legacyBefore = { status: await smallLegacy.importStatus(smallLegacyId), rows: await smallLegacy.relocationTextRows(), controls: await smallLegacy.importControlCounts() };
+  await rejects(async () => smallLegacy.receive(smallLegacyId, { content: oversizedContent, digest: await hash(oversizedContent) }, 0), 'oversized v1 envelope accepted');
+  check(JSON.stringify(legacyBefore) === JSON.stringify({ status: await smallLegacy.importStatus(smallLegacyId), rows: await smallLegacy.relocationTextRows(), controls: await smallLegacy.importControlCounts() }), 'oversized v1 envelope changed state');
+  const shortPacket = { ...oldPacket, fragment: { ...oldPacket.fragment, data: legacyBytes.subarray(0, split - 1).toBase64() } }, shortContent = JSON.stringify(shortPacket);
+  await rejects(async () => smallLegacy.receive(smallLegacyId, { content: shortContent, digest: await hash(shortContent) }, 0), 'short nonfinal legacy fragment accepted');
+  check(JSON.stringify(legacyBefore) === JSON.stringify({ status: await smallLegacy.importStatus(smallLegacyId), rows: await smallLegacy.relocationTextRows(), controls: await smallLegacy.importControlCounts() }), 'short nonfinal fragment changed state');
+  const oldContent = JSON.stringify(oldPacket), oldDigest = await hash(oldContent), oldPart = { content: oldContent, digest: oldDigest };
+  await smallLegacy.receive(smallLegacyId, oldPart, 0);
+  const savedLegacy = await smallLegacy.fragmentForTest(smallLegacyId), savedStatus = await smallLegacy.importStatus(smallLegacyId);
+  for (const [field, wrong] of [['table_name', 'events'], ['row_offset', 7], ['total', 0], ['next_offset', 0], ['cursor', '[]']]) {
+   await smallLegacy.setFragmentForTest(smallLegacyId, field, wrong);
+   await rejects(() => smallLegacy.beginImport(smallLegacyId, 1, 'move', smallLegacyName, ['wide_text']), `invalid small fragment ${field} accepted`);
+   await smallLegacy.setFragmentForTest(smallLegacyId, field, savedLegacy[field]);
+  }
+  await smallLegacy.moveFragmentPieceForTest(smallLegacyId, 0, 99);
+  await rejects(() => smallLegacy.beginImport(smallLegacyId, 1, 'move', smallLegacyName, ['wide_text']), 'invalid small fragment piece index accepted');
+  await smallLegacy.moveFragmentPieceForTest(smallLegacyId, 99, 0);
+  check(JSON.stringify(await smallLegacy.fragmentForTest(smallLegacyId)) === JSON.stringify(savedLegacy) && JSON.stringify(await smallLegacy.importStatus(smallLegacyId)) === JSON.stringify(savedStatus) && (await smallLegacy.relocationTextRows()).length === 0, 'legacy corruption test changed state');
+  await smallLegacy.beginImport(smallLegacyId, 1, 'move', smallLegacyName, ['wide_text']);
+  for (const invalid of ['x'.repeat(100_000), 'invalid-utf8']) {
+   await smallLegacy.setImportDigestForTest(smallLegacyId, 0, invalid);
+   await rejects(() => smallLegacy.beginImport(smallLegacyId, 1, 'move', smallLegacyName, ['wide_text']), 'invalid stored import digest accepted');
+   check(JSON.stringify(await smallLegacy.fragmentForTest(smallLegacyId)) === JSON.stringify(savedLegacy) && JSON.stringify(await smallLegacy.importStatus(smallLegacyId)) === JSON.stringify(savedStatus) && (await smallLegacy.relocationTextRows()).length === 0, 'invalid stored digest changed data or checkpoint');
+   await smallLegacy.setImportDigestForTest(smallLegacyId, 0, oldDigest);
+  }
+  const endPacket = { ...oldPacket, index: 1, prev: oldDigest, cursor: ['legacy'], fragment: { ...oldPacket.fragment, offset: split, data: legacyBytes.subarray(split).toBase64() } }, endContent = JSON.stringify(endPacket);
+  const endPart = { content: endContent, digest: await hash(endContent) };
+  await smallLegacy.addLegacyGarbage(smallLegacyId);
+  let corruptBefore = { status: await smallLegacy.importStatus(smallLegacyId), fragment: await smallLegacy.fragmentForTest(smallLegacyId), pieces: await smallLegacy.legacyPieceSummary(smallLegacyId) };
+  await rejects(() => smallLegacy.receive(smallLegacyId, endPart, 0), 'many legacy pieces accepted');
+  check(JSON.stringify(corruptBefore) === JSON.stringify({ status: await smallLegacy.importStatus(smallLegacyId), fragment: await smallLegacy.fragmentForTest(smallLegacyId), pieces: await smallLegacy.legacyPieceSummary(smallLegacyId) }) && (await smallLegacy.relocationTextRows()).length === 0, 'many legacy pieces changed checkpoint or destination');
+  await smallLegacy.removeLegacyGarbage(smallLegacyId);
+  await smallLegacy.setFragmentPieceForTest(smallLegacyId, 0, new Uint8Array(128 * 1024 + 1).buffer);
+  corruptBefore = { status: await smallLegacy.importStatus(smallLegacyId), fragment: await smallLegacy.fragmentForTest(smallLegacyId), pieces: await smallLegacy.legacyPieceSummary(smallLegacyId) };
+  await rejects(() => smallLegacy.receive(smallLegacyId, endPart, 0), 'oversized stored legacy piece accepted');
+  check(JSON.stringify(corruptBefore) === JSON.stringify({ status: await smallLegacy.importStatus(smallLegacyId), fragment: await smallLegacy.fragmentForTest(smallLegacyId), pieces: await smallLegacy.legacyPieceSummary(smallLegacyId) }) && (await smallLegacy.relocationTextRows()).length === 0, 'oversized legacy piece changed checkpoint or destination');
+  await smallLegacy.setFragmentPieceForTest(smallLegacyId, 0, legacyBytes.subarray(0, split).buffer.slice(legacyBytes.byteOffset, legacyBytes.byteOffset + split));
+  await smallLegacy.receive(smallLegacyId, endPart, 0);
+  check(JSON.stringify(await smallLegacy.relocationTextRows()) === JSON.stringify([{ id: 'legacy', kind: 'text', bytes: '78'.repeat(70_000) }]), 'small legacy fragment changed bytes');
   for (const value of ['positive', 'negative']) {
    const owner = env.PROJECT.getByName(`nonfinite-${value}-${n}`);
    await owner.init(`nonfinite-${value}`, `nonfinite-${value}-${n}`); await owner.seedReal(`nonfinite-${value}`, value); await owner.freeze(`nonfinite-${value}`, 1, 'nonfinite-move');
@@ -332,7 +518,7 @@ export default { async fetch(request, env) {
   check(JSON.stringify(await target.status('p')) === JSON.stringify(staged), 'local tuple test did not restore staged state');
   const evidence = await target.evidence(); check(evidence.users.length === 12 && evidence.sessions === 12 && evidence.events === 12 && !evidence.fks.length, 'missing data or invalid foreign keys');
   check(evidence.users[0][1].integer === '9223372036854775807' && evidence.users[1][1].integer === '-9223372036854775808', 'int64 changed');
-  check(Uint8Array.fromBase64(evidence.users[4][2].blob).length === 80_000 && Uint8Array.fromBase64(evidence.users[4][2].blob)[0] === 4, 'blob changed');
+  check(Uint8Array.fromBase64(evidence.users[4][2].blob).length === 50_000 && Uint8Array.fromBase64(evidence.users[4][2].blob)[0] === 4, 'blob changed');
   const pagedSource = env.PROJECT.getByName(`paged-source-${n}`), pagedTarget = env.PROJECT.getByName(`paged-target-${n}`);
   await pagedSource.init('paged', `paged-source-${n}`); await pagedSource.seedMany('paged'); await pagedSource.freeze('paged', 1, 'paged-move');
   await pagedSource.beginExport('paged', 1, 'paged-move', ['users']); await pagedTarget.beginImport('paged', 1, 'paged-move', `paged-target-${n}`, ['users']);
@@ -369,55 +555,50 @@ export default { async fetch(request, env) {
   for (;;) {
    const part = await huge.chunk('huge', 1, 'big-move', fragments, false);
    const payload = JSON.parse(part.content);
-   check(new TextEncoder().encode(part.content).length <= 128 * 1024, 'fragment chunk exceeded size');
-   if (payload.fragment) {
+   check(new TextEncoder().encode(part.content).length <= 128 * 1024, 'stream chunk exceeded size');
+   check((await huge.chunk('huge', 1, 'big-move', fragments, false)).content === part.content, 'stream replay bytes changed');
+   if (payload.stream) {
     fragmentParts++;
     if (fragments === 0) {
      firstFragment = part;
      const future = await huge.chunk('huge', 1, 'big-move', 1, false);
-     await rejects(() => hugeTarget.receive('huge', future, 0), 'out-of-order fragment accepted');
-     const changed = { ...payload, fragment: { ...payload.fragment, total: 12 * 1024 * 1024 + 1 } };
+     await rejects(() => hugeTarget.receive('huge', future, 0), 'out-of-order stream accepted');
+     const changed = { ...payload, stream: { ...payload.stream, total: 12 * 1024 * 1024 + 1 } };
      const content = JSON.stringify(changed);
-     await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'oversized reassembly accepted');
-     check((await hugeTarget.importStatus('huge')).next_chunk === 0, 'oversized reassembly advanced checkpoint');
+     await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'oversized stream accepted');
+     check((await hugeTarget.importStatus('huge')).next_chunk === 0, 'oversized stream advanced checkpoint');
     }
     if (fragments === 1) {
-     const changed = { ...payload, fragment: { ...payload.fragment, cursor: ['wrong-key'] } };
+     const changed = { ...payload, stream: { ...payload.stream, cursor: ['wrong-key'] } };
      const content = JSON.stringify(changed);
-     await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'conflicting fragment cursor accepted');
+     await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'conflicting stream cursor accepted');
     }
-    const end = payload.fragment.offset + Uint8Array.fromBase64(payload.fragment.data).length;
-    if (end === payload.fragment.total) {
-     await rejects(() => hugeTarget.receive('huge', part, 1), 'final fragment rollback was not injected');
-     check((await hugeTarget.importStatus('huge')).next_chunk === fragments && (await hugeTarget.evidence()).users.length === 0, 'failed final fragment persisted row or checkpoint');
+    if (payload.stream.rowDone) {
+     await rejects(() => hugeTarget.receive('huge', part, 1), 'final stream rollback was not injected');
+     check((await hugeTarget.importStatus('huge')).next_chunk === fragments && (await hugeTarget.evidence()).users.length === 0, 'failed final stream persisted row or checkpoint');
     }
    }
    await hugeTarget.receive('huge', part, 0); await hugeTarget.receive('huge', part, 0);
    if (fragments === 0) {
     await hugeTarget.beginImport('huge', 1, 'big-move', `huge-target-${n}`, ['users']);
-    const savedFragment = await hugeTarget.fragmentForTest('huge');
-    for (const [field, wrong] of [['table_name', 'events'], ['row_offset', 7], ['total', 0], ['next_offset', 0], ['cursor', '[]']]) {
-     await hugeTarget.setFragmentForTest('huge', field, wrong);
-     await rejects(() => hugeTarget.beginImport('huge', 1, 'big-move', `huge-target-${n}`, ['users']), `invalid fragment ${field} accepted`);
-     await hugeTarget.setFragmentForTest('huge', field, savedFragment[field]);
+    const saved = await hugeTarget.streamForTest('huge');
+    for (const [field, wrong] of [['table_name', 'events'], ['row_offset', 7], ['last_chunk', 99]]) {
+     await hugeTarget.setStreamForTest('huge', field, wrong);
+     await rejects(() => hugeTarget.beginImport('huge', 1, 'big-move', `huge-target-${n}`, ['users']), `invalid stream ${field} accepted`);
+     await hugeTarget.setStreamForTest('huge', field, saved[field]);
     }
-    await hugeTarget.moveFragmentPieceForTest('huge', 0, 99);
-    await rejects(() => hugeTarget.beginImport('huge', 1, 'big-move', `huge-target-${n}`, ['users']), 'invalid fragment piece index accepted');
-    await hugeTarget.moveFragmentPieceForTest('huge', 99, 0);
     await hugeTarget.beginImport('huge', 1, 'big-move', `huge-target-${n}`, ['users']);
-   }
-   if (fragments === 0) {
     const content = part.content + ' ';
-    await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'conflicting fragment replay accepted');
+    await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'conflicting stream replay accepted');
    }
    fragments++;
    if (fragments === 2) {
-    await rejects(() => hugeTarget.evict(), 'fragment target eviction must abort'); hugeTarget = env.PROJECT.getByName(`huge-target-${n}`);
-    await rejects(() => huge.evict(), 'fragment source eviction must abort'); huge = env.PROJECT.getByName(`huge-${n}`);
+    await rejects(() => hugeTarget.evict(), 'stream target eviction must abort'); hugeTarget = env.PROJECT.getByName(`huge-target-${n}`);
+    await rejects(() => huge.evict(), 'stream source eviction must abort'); huge = env.PROJECT.getByName(`huge-${n}`);
     await hugeTarget.receive('huge', firstFragment, 0);
    }
    if (payload.done) break;
-   if (fragments > 20) throw Error('Too many row fragments');
+   if (fragments > 20) throw Error('Too many stream chunks');
   }
   const hugeRows = (await hugeTarget.evidence()).users;
   const hugeData = Uint8Array.fromBase64(hugeRows[0][2].blob);
@@ -430,7 +611,44 @@ export default { async fetch(request, env) {
    if (JSON.parse(part.content).done) break;
    if (index === 19) throw Error('Text transfer did not finish');
   }
-  check(await textTarget.readWideText() === 'é😀\n'.repeat(45_000), 'fragmented Unicode text changed');
+  check(await textTarget.readWideText() === '\uFEFF' + 'é😀\n'.repeat(45_000), 'fragmented Unicode text changed');
+  // Ordinary rows retain the prior wire shape. Oversized rows use the v2
+  // stream and each bounded cell slice must replay with identical bytes.
+  for (const fixture of ['below', 'at', 'above', 'long-ascii', 'escaped', 'unicode', 'unicode-fallback', 'blob', 'mixed']) {
+   const id = `wire-${fixture}`, move = `${id}-move`, sourceName = `${id}-source-${n}`, targetName = `${id}-target-${n}`;
+   const wireSource = env.PROJECT.getByName(sourceName), wireTarget = env.PROJECT.getByName(targetName);
+   const base = { projectId: id, generation: 1, moveId: move, index: 0, prev: '', table: 'wide_text', columns: ['id', 'value'], offset: 0, rows: [['wide', '']], last: false, done: false, cursor: ['wide'] };
+   const boundary = 64 * 1024 - 4; // The TEXT primary key contributes four bytes.
+   const value = fixture === 'below' ? 'x'.repeat(boundary - 1) : fixture === 'at' ? 'x'.repeat(boundary) : fixture === 'above' ? 'x'.repeat(boundary + 1) : fixture === 'long-ascii' || fixture === 'mixed' ? 'x'.repeat(140_000) : fixture === 'escaped' ? '\n"\\'.repeat(50_000) : fixture === 'unicode' ? 'é😀'.repeat(50_000) : fixture === 'unicode-fallback' ? 'é'.repeat(70_000) : new Uint8Array(140_000).fill(42).buffer;
+   const small = fixture === 'mixed';
+   await wireSource.init(id, sourceName); await wireSource.seedWireRows(id, value, small); await wireSource.freeze(id, 1, move);
+   await wireSource.beginExport(id, 1, move, ['wide_text']); await wireTarget.beginImport(id, 1, move, targetName, ['wide_text']);
+   let index = 0, prev = '', sawStream = false, sawDone = false;
+   const values = [new TextEncoder().encode('wide'), typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value)];
+   const offsets = [0, 0];
+   for (; index < 20; index++) {
+    const part = await wireSource.chunk(id, 1, move, index, false), payload = JSON.parse(part.content);
+    check(part.digest === await hash(part.content) && (await wireSource.chunk(id, 1, move, index, false)).content === part.content, 'wire replay or digest changed');
+    check(payload.prev === prev && new TextEncoder().encode(part.content).length <= 128 * 1024, 'wire chain or bound changed');
+    if (payload.stream) {
+     sawStream = true;
+     const stream = payload.stream, expected = values[stream.column], data = Uint8Array.fromBase64(stream.data);
+     check(stream.v === 2 && expected && stream.offset === offsets[stream.column] && stream.total === expected.length && data.length <= 64 * 1024, 'stream metadata or bound differs');
+     check(data.every((byte, i) => byte === expected[stream.offset + i]), 'stream cell bytes changed');
+     offsets[stream.column] += data.length;
+     if (stream.rowDone) check(offsets.every((offset, i) => offset === values[i].length), 'stream completed before all cell bytes');
+    } else if (fixture === 'below' || fixture === 'at') {
+     const expected = { ...base, rows: [['wide', value]], last: true, done: true };
+     check(part.content === JSON.stringify(expected), 'ordinary chunk wire bytes changed');
+    }
+    await wireTarget.receive(id, part, 0); await wireTarget.receive(id, part, 0);
+    prev = part.digest;
+    if (payload.done) { sawDone = true; break; }
+   }
+   check(sawDone && sawStream === !['below', 'at'].includes(fixture), 'wrong ordinary or streamed row decision');
+   const copied = await wireTarget.readWideText();
+   check(typeof value === 'string' ? copied === value : copied instanceof ArrayBuffer && new Uint8Array(copied).length === 140_000 && new Uint8Array(copied).every(byte => byte === 42), 'wire fixture changed during transfer');
+  }
   const tooLarge = env.PROJECT.getByName(`too-large-${n}`);
   await tooLarge.init('too-large', `too-large-${n}`); await tooLarge.beyondRowLimit('too-large'); await tooLarge.freeze('too-large', 1, 'too-large-move');
   await tooLarge.beginExport('too-large', 1, 'too-large-move', ['users']);

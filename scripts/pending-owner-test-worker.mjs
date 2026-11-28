@@ -1,17 +1,23 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 import application, { NextgenApplication } from "../worker/generated/pending-owner-test-app.js";
 import { ProjectRegistry } from "../worker/registry.js";
 import { reserveMoveDestination } from "../worker/owner-fence.js";
 
 export class PendingRegistry extends ProjectRegistry {
-  #candidates = [];
   evict() { this.ctx.abort("registry restart"); }
-  testCandidates(values) { this.#candidates = values; }
-  moveDestinationCandidate() { return this.#candidates.shift() ?? super.moveDestinationCandidate(); }
+  seedExistingIntentForTest(origin, projectId, moveId, destination) {
+    if (this.env.MAPI_LOCAL_TEST !== '1') throw Error('Local relocation test required');
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, route.object_name, destination, route.generation);
+  }
   testOldRecoveryLedger(projectId, recoveryId, epoch) {
     this.ctx.storage.sql.exec("INSERT INTO mapi_project_recoveries (project_id, recovery_id, origin, object_name, object_id, generation, epoch, phase, clock_highwater) VALUES (?, ?, 'https://historic.example', 'historic', 'historic-id', 1, ?, 'closing', NULL)", projectId, recoveryId, epoch);
   }
 }
 export class PendingOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+
   #hold = false; #held = false; #release;
   #holdRecovery = false; #recoveryHeld = false; #releaseRecovery;
   #holdFreeze = false; #freezeHeld = false; #releaseFreeze;
@@ -269,6 +275,7 @@ export default {
    await raceOwner.holdRecoveryProof();
    const raceRecovery = registry.beginProjectRecovery("move-secret", raceOrigin, raceId, "racing-recovery", "racing-era").then(() => false, () => true);
    while (!await raceOwner.recoveryProofHeld()) await new Promise(resolve => setTimeout(resolve, 5));
+   await registry.seedExistingIntentForTest(raceOrigin, raceId, "racing-move", "project:racing-move");
    await registry.beginRelocation("move-secret", raceOrigin, raceId, "racing-move");
    await raceOwner.releaseRecoveryProof();
    check(await raceRecovery, "Stale recovery proof bypassed relocation intent");
@@ -315,9 +322,11 @@ export default {
    check(await registry.recoveryIntentStatus("move-secret", undrainedId) === null && await registry.recoveryStatus("move-secret", undrainedId) === null && (await registry.resolve(undrainedOrigin)).state === "active", "Undrained legacy owner began recovery");
    await registry.reserve("https://occupied.example", "project:collision");
    const occupied = env.NEXTGEN_APPLICATION.getByName("project:collision"), occupiedBefore = JSON.stringify(await occupied.tableNames());
-   await registry.testCandidates(["project:collision", "project:chosen"]);
+   await rejects(() => registry.beginRelocation("move-secret", origin, projectId, "collision-move"));
+   check((await registry.relocationStatus("move-secret", projectId)).intent === null, "Rejected admission recorded an intent");
+   await registry.seedExistingIntentForTest(origin, projectId, "collision-move", "project:chosen");
    const moving = await registry.beginRelocation("move-secret", origin, projectId, "collision-move");
-   check(moving.destination_object === "project:chosen", "Move allocated an occupied project object");
+   check(moving.destination_object === "project:chosen", "Existing intent changed its destination");
    check(JSON.stringify(await occupied.tableNames()) === occupiedBefore && (await registry.resolve("https://occupied.example")).state === "pending", "Move changed occupied project object");
    await rejects(() => registry.reserve("https://duplicate.example", "project:chosen"));
    check(await registry.resolve("https://duplicate.example") === null, "Pending route reserved a move destination");

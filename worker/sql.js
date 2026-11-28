@@ -365,31 +365,44 @@ export function execute(storage, { statement, args, query }) {
   return { columns, rows };
 }
 
-// Relocation selects one row by its primary-key order inside a synchronous
-// storage transaction. Check stored TEXT bytes before the normal Workerd
-// result conversion can replace malformed bytes with U+FFFD. Keeping the
-// validation projection separate avoids adding columns or bytes to the row.
-export function readRelocationRow(storage, names, source, args) {
-  const columns = names.map(name => '"' + name.replaceAll('"', '""') + '"');
-  const textColumns = columns.map(column => `CASE typeof(${column}) WHEN 'text' THEN CAST(${column} AS BLOB) END`);
-  const { sql, values } = bind(`SELECT ${textColumns.join(', ')} ${source}`, args);
-  const row = storage.sql.exec(sql, ...values).raw().toArray()[0];
-  if (!row) return undefined;
+function relocationTextProjection(columns) {
+  return columns.map(column => `CASE typeof(${column}) WHEN 'text' THEN CAST(${column} AS BLOB) END`).join(', ');
+}
 
+function assertRelocationTextRows(rows) {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const sliceBytes = 64 * 1024;
-  try {
+  for (const row of rows) {
     for (const cell of row) {
       if (cell === null) continue;
       const bytes = new Uint8Array(cell);
-      for (let start = 0; start < bytes.length; start += sliceBytes) {
-        decoder.decode(bytes.subarray(start, start + sliceBytes), { stream: true });
+      try {
+        for (let start = 0; start < bytes.length; start += sliceBytes) {
+          decoder.decode(bytes.subarray(start, start + sliceBytes), { stream: true });
+        }
+        decoder.decode();
+      } catch {
+        throw new Error("Invalid UTF-8 TEXT in relocation row");
       }
-      decoder.decode();
     }
-  } catch {
-    throw new Error("Invalid UTF-8 TEXT in relocation row");
   }
+}
+
+export function assertRelocationTableText(storage, table) {
+  const target = '"' + table.replaceAll('"', '""') + '"';
+  const columns = storage.sql.exec(`PRAGMA table_xinfo(${target})`).toArray().filter(column => column.hidden === 0)
+    .map(column => '"' + column.name.replaceAll('"', '""') + '"');
+  assertRelocationTextRows(storage.sql.exec(`SELECT ${relocationTextProjection(columns)} FROM ${target}`).raw());
+}
+
+// Both projections read the same row inside a synchronous storage transaction.
+// Check stored bytes before Workerd can replace malformed bytes with U+FFFD.
+export function readRelocationRow(storage, names, source, args) {
+  const columns = names.map(name => '"' + name.replaceAll('"', '""') + '"');
+  const { sql, values } = bind(`SELECT ${relocationTextProjection(columns)} ${source}`, args);
+  const rows = storage.sql.exec(sql, ...values).raw().toArray();
+  if (!rows.length) return undefined;
+  assertRelocationTextRows(rows);
   return execute(storage, { statement: `SELECT ${columns.join(', ')} ${source}`, args, query: true }).rows[0];
 }
 

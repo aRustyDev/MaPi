@@ -30,11 +30,15 @@ for (let attempt = 1; attempt <= limit; attempt++) {
   console.log(JSON.stringify({ attempt, managementReads: fixture ? attempt : 0, ...progress }));
   if (progress.done) {
     if (process.env.MAPI_REHEARSAL_VERIFY_EVIDENCE === '1') {
-      let after = 0, pages = 0; const tables = new Set();
+      let after = 0, pages = 0, pending = 0; const tables = new Set();
       for (;;) {
         const evidenceURL = new URL(target); evidenceURL.pathname = '/evidence'; evidenceURL.search = new URLSearchParams({ after: String(after) }).toString();
         const response = await fetch(evidenceURL, { method: 'POST', headers: { authorization: `Bearer ${secret}` }, redirect: 'error', signal: AbortSignal.timeout(60000) });
-        if (!response.ok) throw Error('Could not read reconciliation evidence');
+        if (!response.ok) {
+          const result = response.status === 503 ? await response.json().catch(() => null) : null;
+          if (result?.pending === true && ++pending <= limit) { await setTimeout(10); continue; }
+          throw Error('Could not read reconciliation evidence');
+        }
         const evidence = await response.json();
         if (!evidence.complete || !Array.isArray(evidence.pages) || !Number.isSafeInteger(evidence.next) || evidence.next < after || typeof evidence.done !== 'boolean') throw Error('Invalid reconciliation evidence');
         for (const page of evidence.pages) {

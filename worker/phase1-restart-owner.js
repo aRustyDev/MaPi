@@ -31,6 +31,7 @@ export class RelocationCoordinator extends BaseCoordinator {
     if (stage === 'frozen') {
       if (move) throw Error('Freeze restart must start a new move');
       move = await registry.beginRelocation(secret, origin, projectId, moveId);
+      if (move.phase === 'preflighting') return { done: false, phase: 'preflighting' };
       const source = this.env.NEXTGEN_APPLICATION.getByName(move.source_object);
       await source.armRelocation(secret, projectId, moveId);
       await source.freezeRelocation(secret, { projectId, origin, objectName: move.source_object, generation: move.generation }, moveId);

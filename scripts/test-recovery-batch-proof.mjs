@@ -7,16 +7,20 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
+import { prepareRecoveryProofOwner } from './recovery-proof-owner-build.mjs';
 
+await prepareRecoveryProofOwner();
 await import('./build-recovery-batch-proof.mjs');
 
 async function port() { const s=createServer().listen(0,"127.0.0.1");await once(s,"listening");const p=s.address().port;await new Promise(done=>s.close(done));return p; }
-const dir=await mkdtemp(resolve(tmpdir(),"mapi-recovery-batch-proof-")), address=await port(), inspector=await port(), envFile=resolve(dir,"worker.env");
-const {privateKey}=generateKeyPairSync("rsa",{modulusLength:2048,privateKeyEncoding:{type:"pkcs8",format:"pem"},publicKeyEncoding:{type:"spki",format:"pem"}});
-const master=Buffer.from(JSON.stringify({id:"master-test",pem:privateKey})).toString("base64");
-await writeFile(envFile,`MAPI_MASTER_KEY=${master}\n`,{mode:0o600});
-const server=spawn(process.execPath,[resolve("node_modules/wrangler/bin/wrangler.js"),"dev","--local","--config","scripts/recovery-batch-proof.wrangler.jsonc","--env-file",envFile,"--ip","127.0.0.1","--port",String(address),"--inspector-port",String(inspector),"--persist-to",dir],{stdio:["ignore","ignore","inherit"],env:{...process.env,WRANGLER_LOG_PATH:resolve(dir,"wrangler.log"),WRANGLER_SEND_METRICS:"false"}});
+const dir=await mkdtemp(resolve(tmpdir(),"mapi-recovery-batch-proof-"));
+let server;
 try {
+  const address=await port(), inspector=await port(), envFile=resolve(dir,"worker.env");
+  const {privateKey}=generateKeyPairSync("rsa",{modulusLength:2048,privateKeyEncoding:{type:"pkcs8",format:"pem"},publicKeyEncoding:{type:"spki",format:"pem"}});
+  const master=Buffer.from(JSON.stringify({id:"master-test",pem:privateKey})).toString("base64");
+  await writeFile(envFile,`MAPI_MASTER_KEY=${master}\n`,{mode:0o600});
+  server=spawn(process.execPath,[resolve("node_modules/wrangler/bin/wrangler.js"),"dev","--local","--config","scripts/recovery-batch-proof.wrangler.jsonc","--env-file",envFile,"--ip","127.0.0.1","--port",String(address),"--inspector-port",String(inspector),"--persist-to",dir],{stdio:["ignore","ignore","inherit"],env:{...process.env,WRANGLER_LOG_PATH:resolve(dir,"wrangler.log"),WRANGLER_SEND_METRICS:"false"}});
   let response;
   for(let i=0;i<100;i++){if(server.exitCode!==null)throw new Error("local workerd exited");try{response=await fetch(`http://127.0.0.1:${address}/`,{signal:AbortSignal.timeout(120000)});break;}catch(error){if(error.name==="TimeoutError")throw error;await setTimeout(200);}}
   if(!response)throw new Error("local workerd did not start");
@@ -25,6 +29,6 @@ try {
   assert.equal(result.ok,true,result.error);
   console.log("Real Go recovery invalidation is bounded, restartable, and audited.");
 } finally {
-  if(server.exitCode===null&&server.signalCode===null){const stopped=once(server,"exit");server.kill("SIGTERM");await stopped;}
+  if(server && server.exitCode===null&&server.signalCode===null){const stopped=once(server,"exit");server.kill("SIGTERM");await stopped;}
   await rm(dir,{recursive:true,force:true});
 }

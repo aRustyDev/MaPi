@@ -60,6 +60,40 @@ try {
   assert.equal(await memberships(),0);
   if(workerSide){await test('fail_audit');const failed=await req(teamPath,{token:f.projectSecret,body:teamBody});assert.equal(failed.status,500);assert.equal(await count(),beforeTeam,'failed team create retained user');assert.equal(await memberships(),0,'failed team create retained membership');assert.equal(await audit(),beforeTeamAudit,'failed team create retained audit');}
   const teamUser=await record('create in team',req(teamPath,{token:f.projectSecret,body:teamBody}));assert.equal(teamUser.status,201);assert.equal(await count(),beforeTeam+1);assert.equal(await memberships(),1);assert.equal(await audit(),beforeTeamAudit+1);
+  const textCases = [
+    { label: 'multibyte', value: 'é😀' },
+    { label: 'replacement', value: '\uFFFD' },
+    { label: 'invalid UTF-8', value: '\uFFFD', raw: true },
+  ];
+  const textBytes = async id => workerSide ? test('text_probe_bytes', id) :
+    db.prepare("SELECT hex(value) AS bytes FROM user_attributes WHERE project_id = ? AND user_id = ? AND key = 'text_probe'").get(f.projectId, id);
+  async function probeText(method, url, mode, attributes, id, credentials) {
+    const before = id ? await textBytes(id) : null;
+    const fields = { ...(method === 'POST' ? { schema } : {}), attributes };
+    const payload = Buffer.from(JSON.stringify({ ...fields, attributes: { ...attributes, text_probe: mode.raw ? 'x' : mode.value } }));
+    if (mode.raw) payload[payload.lastIndexOf(Buffer.from('"x"')) + 1] = 0x80;
+    const originalCount = await count();
+    const response = await fetch(base + url, {
+      method, headers: { 'content-type': 'application/json', ...credentials }, body: payload,
+    });
+    if (mode.raw && response.status >= 400 && response.status < 500) {
+      assert.equal(await count(), originalCount);
+      if (id) assert.deepEqual(await textBytes(id), before);
+      return response.status;
+    }
+    assert.ok([200, 201].includes(response.status), `${method} ${mode.label}: ${response.status}`);
+    const user = await response.json();
+    assert.equal(user.attributes.text_probe, mode.value);
+    assert.equal((await textBytes(user.id)).bytes, Buffer.from(JSON.stringify(mode.value)).toString('hex').toUpperCase());
+    return response.status;
+  }
+  const adminCredentials = { authorization: `Bearer ${f.projectSecret}` };
+  const selfCredentials = { origin, cookie: session.cookie, 'x-zitadel-csrf': csrf.csrf_token };
+  for (const mode of textCases) {
+    results[`create ${mode.label}`] = await probeText('POST', path, mode, { email: `text-${randomUUID()}@example.test` }, null, adminCredentials);
+    results[`admin patch ${mode.label}`] = await probeText('PATCH', `/users/${made.data.id}`, mode, { email }, made.data.id, adminCredentials);
+    results[`self patch ${mode.label}`] = await probeText('PATCH', `/users/me?project_id=${encodeURIComponent(f.projectId)}`, mode, { email: f.user.email }, f.user.id, selfCredentials);
+  }
   assert.equal((await api.revoke(session)).status,204);
   for(const name of ['missing credential','invalid credential'])assert.equal(results[name].status,401,name);
   for(const name of ['session missing csrf','session cross origin'])assert.equal(results[name].status,403,name);

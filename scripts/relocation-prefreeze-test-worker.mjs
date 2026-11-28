@@ -1,9 +1,29 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 import app, { NextgenApplication } from "../worker/app.js";
 import { ProjectRegistry } from "../worker/registry.js";
 import { validateRelocationSourceSchema } from "../worker/relocation-manifest.js";
 
 export class TestRegistry extends ProjectRegistry {
+  seedExistingIntentForTest(origin, projectId, moveId) {
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, route.object_name, `project:${crypto.randomUUID()}`, route.generation);
+  }
   evict() { this.ctx.abort("registry restart"); }
+  setLegacyPreflight(projectId, version, done, tableCount) {
+    const sql = this.ctx.storage.sql;
+    const row = sql.exec('SELECT * FROM mapi_move_text_preflight WHERE project_id = ?', projectId).one();
+    const cursor = { version, table: done ? tableCount : 0, after: null, row: null, column: 0, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done };
+    // v2 was an intermediate local format, reconstructed from its known fields.
+    if (version >= 2) cursor.rowBytes = 0;
+    if (version >= 3) cursor.cursorBytes = 2;
+    sql.exec('UPDATE mapi_move_text_preflight SET cursor = ?, done = ? WHERE project_id = ?', JSON.stringify(cursor), done ? 1 : 0, projectId);
+    return row;
+  }
+  setLegacyJournal(projectId, moveId, present) {
+    if (present) this.ctx.storage.sql.exec('INSERT INTO mapi_move_journals VALUES (?, ?, 0)', moveId, projectId);
+    else this.ctx.storage.sql.exec('DELETE FROM mapi_move_journals WHERE move_id = ? AND project_id = ?', moveId, projectId);
+  }
   setTestGeneration(projectId, generation) {
     this.ctx.storage.sql.exec('UPDATE project_routes SET generation = CAST(? AS INTEGER) WHERE project_id = ?', generation, projectId);
   }
@@ -12,7 +32,8 @@ export class TestRegistry extends ProjectRegistry {
 export class TestOwner extends NextgenApplication {
   constructor(ctx, env) {
     const target = env.NEXTGEN_APPLICATION.idFromName('configured-epoch-source').toString();
-    super(ctx, ctx.id.toString() === target ? { ...env, MAPI_RECOVERY_TARGET_OBJECT: target, MAPI_RECOVERY_OBJECT_EPOCHS: JSON.stringify({ [target]: 'fixture-era' }) } : env);
+    const collisionTarget = env.NEXTGEN_APPLICATION.idFromName('epoch-utf8-source').toString();
+    super(ctx, ctx.id.toString() === target ? { ...env, MAPI_RECOVERY_TARGET_OBJECT: target, MAPI_RECOVERY_OBJECT_EPOCHS: JSON.stringify({ [target]: 'fixture-era' }) } : ctx.id.toString() === collisionTarget ? { ...env, MAPI_RECOVERY_EPOCH: '\uFFFD' } : env);
   }
   #hold = false;
   #held = false;
@@ -33,6 +54,8 @@ export class TestOwner extends NextgenApplication {
   #nextLoginStatus = null;
   #nextSessionStatus = new Map();
   addUnsupportedSchema() { this.ctx.storage.sql.exec("CREATE TABLE unsupported_source_schema (id INTEGER PRIMARY KEY)"); }
+  addLegacyTransferState() { this.ctx.storage.sql.exec('CREATE TABLE mapi_chunk_export (test INTEGER)'); this.ctx.storage.sql.exec('INSERT INTO mapi_chunk_export VALUES (1)'); }
+  removeLegacyTransferState() { this.ctx.storage.sql.exec('DROP TABLE mapi_chunk_export'); }
   removeUnsupportedSchema() { this.ctx.storage.sql.exec("DROP TABLE unsupported_source_schema"); }
   addOversizedSchemaDefinition() { this.ctx.storage.sql.exec(`CREATE TABLE oversized_source_schema (id INTEGER /* ${'x'.repeat(17000)} */ PRIMARY KEY)`); }
   removeOversizedSchemaDefinition() { this.ctx.storage.sql.exec('DROP TABLE oversized_source_schema'); }
@@ -46,6 +69,8 @@ export class TestOwner extends NextgenApplication {
   testRecoveryEpoch() { return this.ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch").one().epoch; }
   seedConfiguredTestEpoch() { this.ctx.storage.sql.exec("CREATE TABLE mapi_recovery_epoch (epoch TEXT NOT NULL)"); this.ctx.storage.sql.exec("INSERT INTO mapi_recovery_epoch VALUES ('fixture-era')"); }
   setTestRecoveryEpoch(value) { this.ctx.storage.sql.exec("UPDATE mapi_recovery_epoch SET epoch = ?", value); }
+  setMalformedTestRecoveryEpoch() { this.ctx.storage.sql.exec("UPDATE mapi_recovery_epoch SET epoch = CAST(X'80' AS TEXT)"); }
+  testRecoveryEpochBytes() { return this.ctx.storage.sql.exec('SELECT hex(CAST(epoch AS BLOB)) AS bytes FROM mapi_recovery_epoch').one().bytes; }
   addTestRecoveryEpoch(value) { this.ctx.storage.sql.exec("INSERT INTO mapi_recovery_epoch (epoch) VALUES (?)", value); }
   removeTestRecoveryEpoch(value) { this.ctx.storage.sql.exec("DELETE FROM mapi_recovery_epoch WHERE epoch = ?", value); }
   addTestOrigin(value) { this.ctx.storage.sql.exec("INSERT INTO mapi_project_origin (origin) VALUES (?)", value); }
@@ -81,6 +106,7 @@ export class TestOwner extends NextgenApplication {
     this.ctx.storage.sql.exec(`UPDATE mapi_revision_clock SET stamp = ${values[kind]} WHERE id = 1`);
   }
   validateTestSourceSchema(route) { validateRelocationSourceSchema(this.ctx.storage, route); }
+  textPreflightTableCount(route) { return validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true }).length; }
   dropTestRevisionScopes() { this.ctx.storage.sql.exec("DROP TABLE mapi_revision_scopes"); }
   holdNextProof() { this.#hold = true; }
   proofHeld() { return this.#held; }
@@ -137,8 +163,8 @@ export class TestOwner extends NextgenApplication {
     if (this.#failAdd) { this.#failAdd = false; throw Error("Injected non-fence application failure"); }
     return super.addUser(...args);
   }
-  async preFreezeRelocation(secret, route, moveId) {
-    const proof = await super.preFreezeRelocation(secret, route, moveId);
+  async preFreezeRelocation(secret, route, moveId, marker) {
+    const proof = await syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker);
     if (this.#hold) {
       this.#hold = false;
       this.#held = true;
@@ -155,6 +181,13 @@ export default {
   async fetch(_request, env) {
     try {
       let registry = env.PROJECT_REGISTRY.getByName("projects");
+      const beginRelocation = async (...args) => {
+        for (let page = 0; page < 10000; page++) {
+          const result = await registry.beginRelocation(...args);
+          if (result.phase !== 'preflighting') return result;
+        }
+        throw Error('TEXT preflight exceeded test page limit');
+      };
       let owner = env.NEXTGEN_APPLICATION.getByName("source");
       const other = env.NEXTGEN_APPLICATION.getByName("other");
       const origin = "https://source.example", otherOrigin = "https://other.example";
@@ -170,6 +203,21 @@ export default {
       const login = (target, email, password) => app.fetch(new Request(`${target}/login`, { method: "POST", headers: { origin: target, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email, password }) }), env);
       const appPage = (target, cookie = "") => app.fetch(new Request(`${target}/app`, { headers: { cookie } }), env);
       const logout = (target, cookie, csrf) => app.fetch(new Request(`${target}/logout`, { method: "POST", headers: { origin: target, cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) }), env);
+      // Invalid UTF-8 can otherwise decode to the same replacement character
+      // as a valid configured epoch. Neither readiness nor login may accept it.
+      const collisionOrigin = 'https://epoch-utf8.example', collisionName = 'epoch-utf8-source';
+      const collisionOwner = env.NEXTGEN_APPLICATION.getByName(collisionName);
+      await registry.reserve(collisionOrigin, collisionName);
+      const collisionId = (await collisionOwner.provision('Epoch UTF-8', collisionOrigin, { projectId: null, origin: collisionOrigin, objectName: collisionName, generation: 1 })).projectId;
+      await registry.activate(collisionOrigin, collisionName, collisionId);
+      const collisionRoute = { projectId: collisionId, origin: collisionOrigin, objectName: collisionName, generation: 1 };
+      await collisionOwner.setTestRecoveryEpoch('\uFFFD');
+      check((await collisionOwner.status(false, collisionRoute)).recoveryReady && await collisionOwner.admitLogin(collisionRoute), 'Valid UTF-8 recovery epoch was rejected');
+      const collisionFence = await collisionOwner.ownerFence(), collisionBusiness = await collisionOwner.businessSnapshot();
+      await collisionOwner.setMalformedTestRecoveryEpoch();
+      check(!(await collisionOwner.status(false, collisionRoute)).recoveryReady, 'Malformed UTF-8 recovery epoch reported ready');
+      check(!(await collisionOwner.admitLogin(collisionRoute)), 'Malformed UTF-8 recovery epoch admitted login');
+      check(await collisionOwner.testRecoveryEpochBytes() === '80' && JSON.stringify(await collisionOwner.ownerFence()) === JSON.stringify(collisionFence) && JSON.stringify(await collisionOwner.businessSnapshot()) === JSON.stringify(collisionBusiness), 'Malformed epoch check changed owner state');
       // A route at the maximum exactly representable generation cannot be
       // moved again; reject before freezing the only live owner.
       const maximumOrigin = 'https://max-generation.example', maximumName = 'max-generation-source';
@@ -179,10 +227,91 @@ export default {
       await registry.activate(maximumOrigin, maximumName, maximumId);
       await registry.setTestGeneration(maximumId, '9007199254740991');
       await maximumOwner.setTestOwnerGeneration('9007199254740991');
+      // Progress remains valid across both object evictions, and a real Go
+      // mutation invalidates the marker before a later page can reuse it.
+      const progressOrigin = 'https://progress.example', progressName = 'progress-source';
+      let progressOwner = env.NEXTGEN_APPLICATION.getByName(progressName);
+      await registry.reserve(progressOrigin, progressName);
+      const progressId = (await progressOwner.provision('Progress', progressOrigin, { projectId: null, origin: progressOrigin, objectName: progressName, generation: 1 })).projectId;
+      await registry.activate(progressOrigin, progressName, progressId);
+      const progressRoute = { projectId: progressId, origin: progressOrigin, objectName: progressName, generation: 1 };
+      await registry.seedExistingIntentForTest(progressOrigin, progressId, 'progress-move');
+      check((await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move')).phase === 'preflighting', 'First page did not preserve active route');
+      const beforeEviction = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+      check(beforeEviction && !beforeEviction.done, 'Initial progress missing');
+      await rejects(() => progressOwner.evict()); progressOwner = env.NEXTGEN_APPLICATION.getByName(progressName);
+      await rejects(() => registry.evict()); registry = env.PROJECT_REGISTRY.getByName('projects');
+      check(JSON.stringify(await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move')) === JSON.stringify(beforeEviction), 'Checkpoint changed after eviction');
+      await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move');
+      const afterEviction = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+      check(afterEviction.marker === beforeEviction.marker && JSON.stringify(afterEviction.cursor) !== JSON.stringify(beforeEviction.cursor), 'Preflight did not resume after eviction');
+      await progressOwner.addUser('progress@example.test', 'Synthetic-password-123!', progressRoute);
+      await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move');
+      const afterMutation = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+      check(afterMutation && afterMutation.marker !== afterEviction.marker, 'Go mutation did not invalidate preflight');
+      const beforeLegacyFence = await progressOwner.ownerFence(), beforeLegacyBusiness = await progressOwner.businessSnapshot();
+      const progressTableCount = await progressOwner.textPreflightTableCount(progressRoute);
+      for (const [version, done] of [[1, false], [1, true], [2, false], [2, true], [3, false], [3, true]]) {
+        const prior = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+        await registry.setLegacyPreflight(progressId, version, done, progressTableCount);
+        const results = await Promise.allSettled([
+          registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move'),
+          registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move'),
+        ]);
+        check(results.some(result => result.status === 'fulfilled' && result.value.phase === 'preflighting') && results.every(result => result.status === 'fulfilled' ? result.value.phase === 'preflighting' : String(result.reason).includes('Stale legacy TEXT preflight')), 'Legacy recovery did not remain in preflight');
+        check(await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move') === null, 'Legacy checkpoint was not reset');
+        check(JSON.stringify(await progressOwner.ownerFence()) === JSON.stringify(beforeLegacyFence) && JSON.stringify(await progressOwner.businessSnapshot()) === JSON.stringify(beforeLegacyBusiness), 'Legacy recovery changed source state');
+        await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move');
+        const restarted = await registry.relocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+        check(restarted && restarted.cursor.version === 4 && restarted.marker !== prior.marker, 'Legacy recovery did not start a fresh scan');
+      }
+      await registry.setLegacyPreflight(progressId, 1, true, progressTableCount);
+      const legacyBefore = await registry.legacyRelocationTextPreflightStatus('move-secret', progressId, 'progress-move');
+      await progressOwner.addLegacyTransferState();
+      let blocked = '';
+      try { await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move'); } catch (error) { blocked = String(error); }
+      check(blocked.includes('Legacy transfer state requires manual review') && JSON.stringify(await registry.legacyRelocationTextPreflightStatus('move-secret', progressId, 'progress-move')) === JSON.stringify(legacyBefore) && JSON.stringify(await progressOwner.ownerFence()) === JSON.stringify(beforeLegacyFence) && JSON.stringify(await progressOwner.businessSnapshot()) === JSON.stringify(beforeLegacyBusiness), 'Legacy transfer evidence was changed');
+      await progressOwner.removeLegacyTransferState();
+      await registry.setLegacyJournal(progressId, 'progress-move', true);
+      blocked = '';
+      try { await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move'); } catch (error) { blocked = String(error); }
+      check(blocked.includes('Legacy transfer state requires manual review') && JSON.stringify(await registry.legacyRelocationTextPreflightStatus('move-secret', progressId, 'progress-move')) === JSON.stringify(legacyBefore) && JSON.stringify(await progressOwner.ownerFence()) === JSON.stringify(beforeLegacyFence) && JSON.stringify(await progressOwner.businessSnapshot()) === JSON.stringify(beforeLegacyBusiness), 'Legacy registry evidence was changed');
+      await registry.setLegacyJournal(progressId, 'progress-move', false);
+      await registry.beginRelocation('move-secret', progressOrigin, progressId, 'progress-move');
+      check((await beginRelocation('move-secret', progressOrigin, progressId, 'progress-move')).phase === 'moving', 'Invalidated preflight did not complete');
+      const lostOrigin = 'https://legacy-frozen.example', lostName = 'legacy-frozen-source', lostMove = 'legacy-frozen-move';
+      const lostOwner = env.NEXTGEN_APPLICATION.getByName(lostName);
+      await registry.reserve(lostOrigin, lostName);
+      const lostId = (await lostOwner.provision('Legacy frozen', lostOrigin, { projectId: null, origin: lostOrigin, objectName: lostName, generation: 1 })).projectId;
+      await registry.activate(lostOrigin, lostName, lostId);
+      await registry.seedExistingIntentForTest(lostOrigin, lostId, lostMove);
+      for (let page = 0; page < 10000; page++) {
+        const current = await registry.relocationTextPreflightStatus('move-secret', lostId, lostMove).catch(() => null);
+        if (current?.done) break;
+        const result = await registry.beginRelocation('move-secret', lostOrigin, lostId, lostMove);
+        check(result.phase === 'preflighting' && page < 9999, 'Legacy frozen scan did not reach its last page');
+      }
+      await lostOwner.holdNextProof();
+      const lost = registry.beginRelocation('move-secret', lostOrigin, lostId, lostMove).then(() => false, () => true);
+      for (let attempt = 0; attempt < 1000 && !await lostOwner.proofHeld(); attempt++) await new Promise(resolve => setTimeout(resolve, 1));
+      check(await lostOwner.proofHeld(), 'Freeze acknowledgement was not held');
+      const frozenBefore = await lostOwner.ownerFence(), frozenBusiness = await lostOwner.businessSnapshot();
+      check(frozenBefore[0]?.state === 'frozen', 'Lost-ack source was not frozen');
+      await registry.setLegacyPreflight(lostId, 2, true, (await registry.relocationTextPreflightStatus('move-secret', lostId, lostMove)).cursor.table);
+      await lostOwner.releaseProof();
+      check(await lost, 'Injected lost acknowledgement did not fail');
+      check((await registry.beginRelocation('move-secret', lostOrigin, lostId, lostMove)).phase === 'preflighting', 'Frozen legacy recovery did not restart');
+      check(JSON.stringify(await lostOwner.ownerFence()) === JSON.stringify(frozenBefore) && JSON.stringify(await lostOwner.businessSnapshot()) === JSON.stringify(frozenBusiness), 'Frozen recovery changed source state');
+      check((await beginRelocation('move-secret', lostOrigin, lostId, lostMove)).phase === 'moving', 'Frozen legacy recovery failed to resume');
+      await registry.setLegacyPreflight(lostId, 1, true, (await registry.relocationTextPreflightStatus('move-secret', lostId, lostMove)).cursor.table);
+      const movingBefore = await registry.relocationStatus('move-secret', lostId), movingFence = await lostOwner.ownerFence();
+      let movingError = '';
+      try { await registry.beginRelocation('move-secret', lostOrigin, lostId, lostMove); } catch (error) { movingError = String(error); }
+      check(movingError.includes('Legacy TEXT preflight requires manual review') && JSON.stringify(await registry.relocationStatus('move-secret', lostId)) === JSON.stringify(movingBefore) && JSON.stringify(await lostOwner.ownerFence()) === JSON.stringify(movingFence), 'Moving legacy recovery did not fail closed');
       const maximumRoute = { projectId: maximumId, origin: maximumOrigin, objectName: maximumName, generation: Number.MAX_SAFE_INTEGER };
       const maximumFence = await maximumOwner.ownerFence(), maximumBefore = await maximumOwner.testCounts();
       let maximumError = '';
-      try { await registry.beginRelocation('move-secret', maximumOrigin, maximumId, 'max-generation-move'); } catch (error) { maximumError = String(error); }
+      try { await beginRelocation('move-secret', maximumOrigin, maximumId, 'max-generation-move'); } catch (error) { maximumError = String(error); }
       const maximumStatus = await registry.relocationStatus('move-secret', maximumId);
       const maximumFenceAfter = await maximumOwner.ownerFence();
       check(maximumError.includes('Project generation cannot advance'), `Unexpected maximum-generation rejection: ${maximumError}, owner state ${maximumFenceAfter?.[0]?.state}, intent present ${!!maximumStatus.intent}`);
@@ -197,9 +326,10 @@ export default {
       await registry.activate(nearOrigin, nearName, nearId);
       await registry.setTestGeneration(nearId, '9007199254740990');
       await nearOwner.setTestOwnerGeneration('9007199254740990');
-      const nearMove = await registry.beginRelocation('move-secret', nearOrigin, nearId, 'near-max-generation-move');
+      await registry.seedExistingIntentForTest(nearOrigin, nearId, 'near-max-generation-move');
+      const nearMove = await beginRelocation('move-secret', nearOrigin, nearId, 'near-max-generation-move');
       check(nearMove.phase === 'moving' && nearMove.generation === Number.MAX_SAFE_INTEGER - 1, 'Last representable generation could not begin a move');
-      check((await registry.beginRelocation('move-secret', nearOrigin, nearId, 'near-max-generation-move')).generation === nearMove.generation, 'Near-maximum move retry changed generation');
+      check((await beginRelocation('move-secret', nearOrigin, nearId, 'near-max-generation-move')).generation === nearMove.generation, 'Near-maximum move retry changed generation');
       // A separately configured recovery era must also block pre-freeze when
       // the durable epoch is missing, changed, or duplicated. The test-only
       // fixture seeds the matching epoch before normal provisioning.
@@ -212,9 +342,10 @@ export default {
       const epochRoute = { projectId: epochId, origin: epochOrigin, objectName: epochName, generation: 1 };
       await epochOwner.addUser('configured-epoch@example.test', 'Synthetic-password-123!', epochRoute);
       const epochFence = await epochOwner.ownerFence(), epochBusiness = await epochOwner.businessSnapshot();
+      await registry.seedExistingIntentForTest(epochOrigin, epochId, 'configured-epoch-move');
       const rejectEpochMove = async label => {
         let error = '';
-        try { await registry.beginRelocation('move-secret', epochOrigin, epochId, 'configured-epoch-move'); } catch (caught) { error = String(caught); }
+        try { await beginRelocation('move-secret', epochOrigin, epochId, 'configured-epoch-move'); } catch (caught) { error = String(caught); }
         check(error.includes('Project recovery is not reconciled'), `${label} configured epoch rejection: ${error}`);
         const status = await registry.relocationStatus('move-secret', epochId);
         check(!status.move && status.intent?.move_id === 'configured-epoch-move' && (await registry.resolve(epochOrigin)).state === 'active', `${label} configured epoch closed the route`);
@@ -233,7 +364,7 @@ export default {
       await epochOwner.removeTestRecoveryEpoch('fixture-era');
       await rejectEpochMove('Missing');
       await epochOwner.addTestRecoveryEpoch('fixture-era');
-      const epochMove = await registry.beginRelocation('move-secret', epochOrigin, epochId, 'configured-epoch-move');
+      const epochMove = await beginRelocation('move-secret', epochOrigin, epochId, 'configured-epoch-move');
       check(epochMove.phase === 'moving', 'Matching configured epoch did not allow the same move intent to resume');
       check((await ready(otherOrigin)).status === 200, 'Configured epoch checks affected the other project');
       const schemaOrigin = "https://schema.example", schemaName = "schema-source";
@@ -242,14 +373,15 @@ export default {
       const schemaId = (await schemaOwner.provision("Schema", schemaOrigin, { projectId: null, origin: schemaOrigin, objectName: schemaName, generation: 1 })).projectId;
       await registry.activate(schemaOrigin, schemaName, schemaId);
       const schemaRoute = { projectId: schemaId, origin: schemaOrigin, objectName: schemaName, generation: 1 };
+      await registry.seedExistingIntentForTest(schemaOrigin, schemaId, 'schema-move');
       await schemaOwner.addUnsupportedSchema();
       let schemaError = "";
-      try { await registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (error) { schemaError = String(error); }
+      try { await beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (error) { schemaError = String(error); }
       check(schemaError.includes("Unreviewed schema object"), `Unexpected schema rejection: ${schemaError}`);
       let schemaStatus = await registry.relocationStatus("move-secret", schemaId);
       check(!schemaStatus.move && schemaStatus.intent?.move_id === "schema-move" && (await registry.resolve(schemaOrigin)).state === "active", "Schema failure did not leave active route and same intent");
       await schemaOwner.addUser("schema@example.test", "Schema-password-123!", schemaRoute);
-      await rejects(() => registry.beginRelocation("move-secret", schemaOrigin, schemaId, "other-schema-move"));
+      await rejects(() => beginRelocation("move-secret", schemaOrigin, schemaId, "other-schema-move"));
       check((await ready(otherOrigin)).status === 200, "Other owner unavailable after schema failure");
       const destination = schemaStatus.intent.destination_object;
       await rejects(() => schemaOwner.evict()); schemaOwner = env.NEXTGEN_APPLICATION.getByName(schemaName);
@@ -260,7 +392,7 @@ export default {
       const beforeSchemaBounds = await schemaOwner.testCounts(), fenceBeforeSchemaBounds = await schemaOwner.ownerFence();
       const rejectSchemaBounds = async label => {
         let error = '';
-        try { await registry.beginRelocation('move-secret', schemaOrigin, schemaId, 'schema-move'); } catch (caught) { error = String(caught); }
+        try { await beginRelocation('move-secret', schemaOrigin, schemaId, 'schema-move'); } catch (caught) { error = String(caught); }
         check(error.includes('Schema exceeds inspection bounds'), `${label} schema bound rejection: ${error}`);
         const status = await registry.relocationStatus('move-secret', schemaId);
         check(!status.move && status.intent?.move_id === 'schema-move' && (await registry.resolve(schemaOrigin)).state === 'active', `${label} schema bound closed route`);
@@ -279,34 +411,34 @@ export default {
       for (const [version, expected] of [[999, "Unsupported application schema version"], [2, "Application schema history differs"]]) {
         await schemaOwner.setTestSchemaVersion(version);
         let error = "";
-        try { await registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (caught) { error = String(caught); }
+        try { await beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (caught) { error = String(caught); }
         check(error.includes(expected), `Unexpected schema metadata rejection: ${error}`);
         schemaStatus = await registry.relocationStatus("move-secret", schemaId);
         check(!schemaStatus.move && schemaStatus.intent?.move_id === "schema-move" && (await registry.resolve(schemaOrigin)).state === "active", "Schema metadata rejection closed active route");
       }
       await schemaOwner.setTestSchemaVersion(1);
       await schemaOwner.addTestSchemaVersion(999);
-      await rejects(() => registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"));
+      await rejects(() => beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"));
       check((await registry.resolve(schemaOrigin)).state === "active", "Multiple schema versions closed active route");
       await schemaOwner.removeTestSchemaVersion(999);
       const originalEpoch = await schemaOwner.testRecoveryEpoch();
       await schemaOwner.setTestRecoveryEpoch('');
       let recoveryError = '';
-      try { await registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (caught) { recoveryError = String(caught); }
+      try { await beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (caught) { recoveryError = String(caught); }
       check(recoveryError.includes('Invalid recovery epoch'), `Unexpected empty recovery epoch rejection: ${recoveryError}`);
       check((await registry.resolve(schemaOrigin)).state === 'active', 'Invalid epoch closed active route');
       await schemaOwner.setTestRecoveryEpoch(originalEpoch);
       await schemaOwner.addTestRecoveryEpoch('extra-epoch');
-      await rejects(() => registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"));
+      await rejects(() => beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"));
       check((await registry.resolve(schemaOrigin)).state === 'active', 'Multiple epochs closed active route');
       await schemaOwner.removeTestRecoveryEpoch('extra-epoch');
       await schemaOwner.addTestOrigin('https://unexpected.example');
-      await rejects(() => registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"));
+      await rejects(() => beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"));
       check((await registry.resolve(schemaOrigin)).state === 'active', 'Multiple origins closed active route');
       await schemaOwner.removeTestOrigin('https://unexpected.example');
       await schemaOwner.addForeignProject();
       let projectError = '';
-      try { await registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (caught) { projectError = String(caught); }
+      try { await beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (caught) { projectError = String(caught); }
       check(projectError.includes('Project object contains an unexpected project'), `Unexpected foreign-project rejection: ${projectError}`);
       schemaStatus = await registry.relocationStatus("move-secret", schemaId);
       check(!schemaStatus.move && schemaStatus.intent?.move_id === 'schema-move' && (await registry.resolve(schemaOrigin)).state === 'active', 'Foreign project closed the active route');
@@ -316,8 +448,9 @@ export default {
       const originalIdentity = await schemaOwner.removeOwnerIdentity();
       const assertIdentityRejected = async label => {
         let error = '';
-        try { await registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (caught) { error = String(caught); }
-        check(error.includes('Source identity mismatch'), `${label} identity rejection: ${error}`);
+        try { await beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move"); } catch (caught) { error = String(caught); }
+        const expected = label.includes('origin') ? 'Project origin differs' : 'Owner project identity differs';
+        check(error.includes(expected), `${label} identity rejection: ${error}`);
         const status = await registry.relocationStatus("move-secret", schemaId);
         check(!status.move && status.intent?.move_id === 'schema-move' && (await registry.resolve(schemaOrigin)).state === 'active', `${label} closed the active route`);
         check(JSON.stringify(await schemaOwner.ownerFence()) === JSON.stringify(fenceBeforeIdentityCases), `${label} changed the owner fence`);
@@ -338,7 +471,7 @@ export default {
       await schemaOwner.setOversizedOrigin();
       await assertIdentityRejected('Oversized origin');
       await schemaOwner.restoreOrigin(schemaOrigin);
-      const schemaMove = await registry.beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move");
+      const schemaMove = await beginRelocation("move-secret", schemaOrigin, schemaId, "schema-move");
       check(schemaMove.phase === "moving" && schemaMove.destination_object === destination, "Same-move retry failed after schema repair");
       await rejects(() => schemaOwner.addUser("schema-frozen@example.test", "Schema-password-123!", schemaRoute));
       // A negative aggregate is not a valid recovery anchor. Detect it before
@@ -348,6 +481,7 @@ export default {
       await registry.reserve(negativeOrigin, negativeName);
       const negativeId = (await negativeOwner.provision("Negative clock", negativeOrigin, { projectId: null, origin: negativeOrigin, objectName: negativeName, generation: 1 })).projectId;
       await registry.activate(negativeOrigin, negativeName, negativeId);
+      await registry.seedExistingIntentForTest(negativeOrigin, negativeId, 'negative-clock-move');
       const negativeCounts = await negativeOwner.testCounts(), negativeFence = await negativeOwner.ownerFence(), otherCounts = await other.testCounts();
       const negativeRoute = { projectId: negativeId, origin: negativeOrigin, objectName: negativeName, generation: 1 };
       const originalStamp = await negativeOwner.removeTestRevisionClock();
@@ -368,7 +502,7 @@ export default {
       await negativeOwner.restoreTestRevisionClock('-1');
       const assertNegativeClockRejected = async () => {
         let error = '';
-        try { await registry.beginRelocation("move-secret", negativeOrigin, negativeId, "negative-clock-move"); } catch (caught) { error = String(caught); }
+        try { await beginRelocation("move-secret", negativeOrigin, negativeId, "negative-clock-move"); } catch (caught) { error = String(caught); }
         check(error.includes('Invalid revision clock'), `Unexpected negative clock rejection: ${error}`);
         const status = await registry.relocationStatus("move-secret", negativeId);
         check(!status.move && status.intent?.move_id === 'negative-clock-move' && (await registry.resolve(negativeOrigin)).state === 'active', 'Negative clock closed active route');
@@ -381,22 +515,23 @@ export default {
       await assertNegativeClockRejected();
       check(await negativeOwner.removeTestRevisionClock() === '-1', 'Negative test clock changed unexpectedly');
       await negativeOwner.restoreTestRevisionClock(originalStamp);
-      const negativeMove = await registry.beginRelocation("move-secret", negativeOrigin, negativeId, "negative-clock-move");
+      const negativeMove = await beginRelocation("move-secret", negativeOrigin, negativeId, "negative-clock-move");
       check(negativeMove.phase === 'moving', 'Same move did not resume after revision-clock repair');
       const brokenClockOrigin = "https://broken-clock.example", brokenClockName = "broken-clock-source";
       const brokenClockOwner = env.NEXTGEN_APPLICATION.getByName(brokenClockName);
       await registry.reserve(brokenClockOrigin, brokenClockName);
       const brokenClockId = (await brokenClockOwner.provision("Broken clock", brokenClockOrigin, { projectId: null, origin: brokenClockOrigin, objectName: brokenClockName, generation: 1 })).projectId;
       await registry.activate(brokenClockOrigin, brokenClockName, brokenClockId);
+      await registry.seedExistingIntentForTest(brokenClockOrigin, brokenClockId, 'broken-clock-move');
       const clockStamp = await brokenClockOwner.removeTestRevisionClock();
       let clockError = "";
-      try { await registry.beginRelocation("move-secret", brokenClockOrigin, brokenClockId, "broken-clock-move"); } catch (caught) { clockError = String(caught); }
+      try { await beginRelocation("move-secret", brokenClockOrigin, brokenClockId, "broken-clock-move"); } catch (caught) { clockError = String(caught); }
       check(clockError.includes("Invalid revision clock"), `Unexpected missing clock rejection: ${clockError}`);
       check((await registry.resolve(brokenClockOrigin)).state === "active", "Missing revision clock closed active route");
       await brokenClockOwner.restoreTestRevisionClock(clockStamp);
       await brokenClockOwner.dropTestRevisionScopes();
       clockError = "";
-      try { await registry.beginRelocation("move-secret", brokenClockOrigin, brokenClockId, "broken-clock-move"); } catch (caught) { clockError = String(caught); }
+      try { await beginRelocation("move-secret", brokenClockOrigin, brokenClockId, "broken-clock-move"); } catch (caught) { clockError = String(caught); }
       check(clockError.includes("Revision clock tables must coexist"), `Unexpected revision-clock rejection: ${clockError}`);
       check((await registry.resolve(brokenClockOrigin)).state === "active", "Revision-clock rejection closed active route");
       check((await ready(otherOrigin)).status === 200, "Other owner unavailable after metadata failure");
@@ -404,8 +539,9 @@ export default {
       const before = await owner.testCounts();
       await rejects(() => owner.preFreezeRelocation("move-secret", route, "move-1"));
       await rejects(() => other.preFreezeRelocation("move-secret", route, "move-1"));
+      await registry.seedExistingIntentForTest(origin, projectId, 'move-1');
       await owner.holdNextProof();
-      const first = registry.beginRelocation("move-secret", origin, projectId, "move-1").then(() => false, () => true);
+      const first = beginRelocation("move-secret", origin, projectId, "move-1").then(() => false, () => true);
       while (!await owner.proofHeld()) await new Promise(resolve => setTimeout(resolve, 5));
       const pending = await registry.relocationStatus("move-secret", projectId);
       check(!pending.move && pending.intent?.move_id === "move-1" && (await registry.resolve(origin)).state === "active", "Intent not durable before moving");
@@ -422,7 +558,7 @@ export default {
       await rejects(() => owner.addUser("bad2@example.test", "Bad-password-123!", route));
       await rejects(() => owner.addUser("bad3@example.test", "Bad-password-123!", { ...route, generation: 2 }));
       await rejects(() => owner.preFreezeRelocation("move-secret", { ...route, generation: 2 }, "move-1"));
-      await rejects(() => registry.beginRelocation("move-secret", origin, projectId, "move-2"));
+      await rejects(() => beginRelocation("move-secret", origin, projectId, "move-2"));
       await rejects(() => registry.beginProjectRecovery("move-secret", origin, projectId, "recovery-1", "era-1"));
       const otherResponse = await postUser(otherOrigin, "other@example.test");
       check(otherResponse.status === 200, `Other project admin returned ${otherResponse.status}`);
@@ -443,7 +579,7 @@ export default {
       await rejects(() => owner.evict()); owner = env.NEXTGEN_APPLICATION.getByName("source");
       await rejects(() => registry.evict()); registry = env.PROJECT_REGISTRY.getByName("projects");
       await rejects(() => owner.addUser("restart@example.test", "Restart-password-123!", route));
-      const resumed = await registry.beginRelocation("move-secret", origin, projectId, "move-1");
+      const resumed = await beginRelocation("move-secret", origin, projectId, "move-1");
       check(resumed.phase === "moving" && resumed.destination_object === pending.intent.destination_object, "Restart did not resume same intent");
       await rejects(() => owner.addUser("late@example.test", "Late-password-123!", route));
       check(JSON.stringify(await owner.testCounts()) === JSON.stringify(before), "Source changed after restart");
@@ -465,8 +601,9 @@ export default {
       const pendingFlow = postAdmin(raceOrigin, "/_mapi/admin/oidc/flow/status");
       for (let attempts = 0; !(await race.addHeld()); attempts++) { if (attempts > 1000) throw Error("Admin request did not reach mutation"); await new Promise(resolve => setTimeout(resolve, 5)); }
       for (let attempts = 0; !(await race.adminHeld("oauth")) || !(await race.adminHeld("flow")); attempts++) { if (attempts > 1000) throw Error("OIDC admin requests did not reach mutation"); await new Promise(resolve => setTimeout(resolve, 5)); }
+      await registry.seedExistingIntentForTest(raceOrigin, raceId, 'race-move');
       await race.holdNextProof();
-      const raceMove = registry.beginRelocation("move-secret", raceOrigin, raceId, "race-move").then(() => false, () => true);
+      const raceMove = beginRelocation("move-secret", raceOrigin, raceId, "race-move").then(() => false, () => true);
       for (let attempts = 0; !(await race.proofHeld()); attempts++) { if (attempts > 1000) throw Error("Race source did not freeze"); await new Promise(resolve => setTimeout(resolve, 5)); }
       check((await registry.resolve(raceOrigin)).state === "active", "Race route changed before held proof");
       await race.releaseAdd();
@@ -479,7 +616,7 @@ export default {
       check(JSON.stringify(await race.testCounts()) === JSON.stringify(raceBefore), "Racing write changed source rows or audit");
       await race.releaseProof();
       check(await raceMove, "Injected race acknowledgement loss was not observed");
-      check((await registry.beginRelocation("move-secret", raceOrigin, raceId, "race-move")).phase === "moving", "Race move did not resume");
+      check((await beginRelocation("move-secret", raceOrigin, raceId, "race-move")).phase === "moving", "Race move did not resume");
       const stillOther = await postUser(otherOrigin, "still-other@example.test");
       check(stillOther.status === 200 && (await other.testCounts()).users === 2, "Other project did not remain available");
 
@@ -517,8 +654,9 @@ export default {
       const pendingLogout = logout(sessionOrigin, cookie, csrf);
       for (let attempts = 0; !(await sessionOwner.sessionHeld("logout")); attempts++) { if (attempts > 1000) throw Error("Logout did not reach owner"); await new Promise(resolve => setTimeout(resolve, 5)); }
       const beforeSessionRace = await sessionOwner.businessSnapshot();
+      await registry.seedExistingIntentForTest(sessionOrigin, sessionId, 'session-race-move');
       await sessionOwner.holdNextProof();
-      const sessionMove = registry.beginRelocation("move-secret", sessionOrigin, sessionId, "session-race-move").then(() => false, () => true);
+      const sessionMove = beginRelocation("move-secret", sessionOrigin, sessionId, "session-race-move").then(() => false, () => true);
       for (let attempts = 0; !(await sessionOwner.proofHeld()); attempts++) { if (attempts > 1000) throw Error("Session race owner did not freeze"); await new Promise(resolve => setTimeout(resolve, 5)); }
       check((await registry.resolve(sessionOrigin)).state === "active", "Session race route changed before held acknowledgement");
       await sessionOwner.releaseLogin();
@@ -530,7 +668,7 @@ export default {
       check(JSON.stringify(await sessionOwner.businessSnapshot()) === JSON.stringify(beforeSessionRace), "Frozen login/session race changed rows, audit or throttle");
       check((await postUser(otherOrigin, "other-after-session-race@example.test")).status === 200, "Other project was unavailable during session freeze");
       await sessionOwner.releaseProof(); check(await sessionMove, "Session race lost acknowledgement was not observed");
-      check((await registry.beginRelocation("move-secret", sessionOrigin, sessionId, "session-race-move")).phase === "moving", "Session race move did not resume");
+      check((await beginRelocation("move-secret", sessionOrigin, sessionId, "session-race-move")).phase === "moving", "Session race move did not resume");
       return Response.json({ ok: true });
     } catch (error) { return Response.json({ error: String(error), stack: error.stack }, { status: 500 }); }
   },

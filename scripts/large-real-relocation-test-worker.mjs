@@ -1,3 +1,4 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 // Local-only representative fixture. All setup/bulk writes are disposable and
 // happen before the real registry/owner move starts.
 import { NextgenApplication } from '../worker/generated/phase1-owner-app.js';
@@ -6,7 +7,17 @@ import { RelocationCoordinator } from '../worker/relocation-coordinator.js';
 import { initializeOwnerFence } from '../worker/owner-fence.js';
 import { exportChunk, importChunk, chunkExportStatus, chunkImportStatus } from '../worker/relocation-chunks.js';
 
-export { ProjectRegistry, RelocationCoordinator };
+export { RelocationCoordinator };
+// Test-only historical intent, modeling an already-started move. Production
+// admission remains closed while independent archive proof is unavailable.
+export class TestProjectRegistry extends ProjectRegistry {
+  seedExistingIntentForTest(projectId) {
+    if (this.env.MAPI_LOCAL_TEST !== '1') throw Error('Local relocation test required');
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId || route.object_name !== sourceName) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, sourceName, `project:${crypto.randomUUID()}`, route.generation);
+  }
+}
 const origin = 'https://large-real.example.test';
 const otherOrigin = 'https://large-other.example.test';
 const moveId = 'large-real-move';
@@ -56,6 +67,8 @@ async function verifyMovedSigning(owner, route, sessionCookie, client, jwks, exp
 }
 
 export class LargeOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+
   async arm(route) { initializeOwnerFence(this.ctx.storage, route); await this.ctx.storage.sync(); }
   seedOverlap(projectId) {
     return this.ctx.storage.transactionSync(() => {
@@ -131,7 +144,7 @@ export class LargeOwner extends NextgenApplication {
   failImport(projectId, part) { return importChunk(this.ctx.storage, projectId, part, 1); }
   replayImport(projectId, part) { return importChunk(this.ctx.storage, projectId, part); }
   exportStats(projectId) {
-    return this.ctx.storage.sql.exec("SELECT COUNT(*) AS chunks, COALESCE(SUM(length(CAST(content AS BLOB))),0) AS bytes, COALESCE(MAX(length(CAST(content AS BLOB))),0) AS max_chunk, COALESCE(SUM(CASE WHEN json_type(content, '$.fragment') IS NOT NULL THEN 1 ELSE 0 END),0) AS fragments FROM mapi_chunk_export_data WHERE project_id = ?", projectId).one();
+    return this.ctx.storage.sql.exec("SELECT COUNT(*) AS chunks, COALESCE(SUM(length(CAST(content AS BLOB))),0) AS bytes, COALESCE(MAX(length(CAST(content AS BLOB))),0) AS max_chunk, COALESCE(SUM(CASE WHEN (json_type(content, '$.fragment') IS NOT NULL OR json_type(content, '$.stream') IS NOT NULL) THEN 1 ELSE 0 END),0) AS fragments FROM mapi_chunk_export_data WHERE project_id = ?", projectId).one();
   }
   counts(projectId) {
     const sql = this.ctx.storage.sql;
@@ -190,6 +203,7 @@ export default {
         const session = await source.session(result.cookie.split(';', 1)[0], 'read', '', route);
         return Response.json({ status: result.status, sessionUserMatches: session.status === 200 && session.data?.project_id === body.projectId && session.data?.user_id === userId(0) });
       }
+      if (body.action === 'seedExistingIntent') return Response.json(await registry.seedExistingIntentForTest(body.projectId) ?? true);
       if (body.action === 'advance') {
         const delayResponse = body.testDelayAfterAdvance === true;
         if (delayResponse && (env.MAPI_LOCAL_TEST !== '1' || env.MAPI_LOCAL_TIMEOUT_REGRESSION !== '1' || new URL(request.url).hostname !== '127.0.0.1')) throw Error('Local timeout test disabled');
@@ -211,6 +225,10 @@ export default {
       if (!move || move.move_id !== moveId) throw Error('Move is unavailable');
       if (body.action === 'moveStatus') {
         return Response.json({ storedRouteState: status.route?.state ?? null, phase: status.move?.phase ?? null, finalized: status.move?.finalized === true });
+      }
+      if (body.action === 'gateStatus') {
+        const proofs = await registry.relocationProofs('large-move-secret', body.projectId, moveId);
+        return Response.json({ route: await registry.resolve(origin), source: proofs.source, destination: proofs.destination });
       }
       const target = env.NEXTGEN_APPLICATION.getByName(move.destination_object);
       if (body.action === 'exportStatus') return Response.json(await source.exportStatus(body.projectId));

@@ -27,8 +27,8 @@ let acknowledgedAdvances = 0, lastAcknowledgedPhase = 'not-started';
 let timeoutTestAttempts = 0;
 for (const stream of [server.stdout, server.stderr]) stream?.on('data', chunk => { diagnostic = (diagnostic + chunk.toString()).slice(-8000); });
 async function call(action, body = {}, expectedFailure = false, timeoutMs = 120000) {
-  const delayedAdvance = timeoutRegression && action === 'advance' && acknowledgedAdvances === 1;
-  if (timeoutRegression && action === 'advance') console.error(JSON.stringify({ event: 'local.timeout.test.attempt', attempt: ++timeoutTestAttempts }));
+  const delayedAdvance = timeoutRegression && action === 'advance' && lastAcknowledgedPhase === 'importing';
+  if (timeoutRegression && action === 'advance' && (lastAcknowledgedPhase === 'importing' || delayedAdvance)) console.error(JSON.stringify({ event: 'local.timeout.test.attempt', attempt: ++timeoutTestAttempts }));
   if (delayedAdvance) { body = { ...body, testDelayAfterAdvance: true }; timeoutMs = 3000; }
   const started = performance.now();
   const timeout = AbortSignal.timeout(timeoutMs);
@@ -43,9 +43,15 @@ async function call(action, body = {}, expectedFailure = false, timeoutMs = 1200
   }
   let value; try { value = JSON.parse(text); } catch { if (expectedFailure && response.status >= 500) return null; throw Error(`${action}: invalid response HTTP ${response.status}`); }
   if (expectedFailure) { assert.equal(response.status, 500, `Expected ${action} failure`); return value; }
+  if (action === 'advance' && response.status === 500 && value.error === 'Error: Relocation cutover unavailable: independent archive proof is not configured') {
+    return { phase: 'archive-blocked' };
+  }
   assert.equal(response.status, 200, `${action}: ${value.error ?? response.status}`);
   if (action === 'advance') { acknowledgedAdvances++; lastAcknowledgedPhase = typeof value.phase === 'string' ? value.phase : 'unknown'; }
-  if (timeoutRegression && action === 'advance') console.error(JSON.stringify({ event: 'local.timeout.test.ack', nextChunk: value.nextChunk }));
+  if (timeoutRegression && action === 'advance' && value.phase === 'importing') {
+    if (timeoutTestAttempts === 0) console.error(JSON.stringify({ event: 'local.timeout.test.attempt', attempt: ++timeoutTestAttempts }));
+    console.error(JSON.stringify({ event: 'local.timeout.test.ack', nextChunk: value.nextChunk }));
+  }
   return value;
 }
 let diagnosticFixture;
@@ -73,7 +79,12 @@ try {
   const seedSeconds = (performance.now() - startedSeed) / 1000;
   const moveStarted = performance.now();
   let advances = 0;
-  let progress = await call('advance', fixture); advances++;
+  await call('seedExistingIntent', fixture);
+  let progress;
+  do {
+    progress = await call('advance', fixture); advances++;
+    if (advances > 10000) throw Error('Preflight exceeded bounded coordinator calls');
+  } while (progress.phase === 'preflighting');
   assert.equal(progress.phase, 'importing');
   const beforeExport = await call('exportStatus', fixture);
   const beforeImport = await call('importStatus', fixture);
@@ -111,13 +122,21 @@ try {
   for (;;) {
     progress = await call('advance', fixture); advances++;
     if (large && advances % 500 === 0) console.log(`Advanced ${advances} chunks/pages; phase ${progress.phase}.`);
-    if (progress.done) break;
+    if (progress.done || progress.phase === 'archive-blocked') break;
     if (advances > 10000) throw Error('Move exceeded bounded coordinator calls');
   }
   const moveSeconds = (performance.now() - moveStarted) / 1000;
   const stats = await call('exportStats', fixture);
   const sourceBytesAfter = await call('databaseSize', { name: 'large-source' });
-  const destinationBytesAfter = await call('databaseSize', { name: progress.objectName });
+  const gate = progress.phase === 'archive-blocked' ? await call('gateStatus', fixture) : null;
+  if (gate) {
+    assert.equal(gate.route.state, 'moving');
+    assert.equal(gate.source.state, 'frozen');
+    assert.equal(gate.destination.state, 'staged');
+    assert.equal(gate.source.digest, gate.destination.digest);
+  }
+  const destinationName = gate ? gate.destination.object_name : progress.objectName;
+  const destinationBytesAfter = await call('databaseSize', { name: destinationName });
   assert.ok(sourceBytesBefore > 0 && sourceBytesAfter > 0 && destinationBytesAfter > 0);
   assert.ok(stats.max_chunk <= 128 * 1024); assert.ok(stats.fragments > 1);
   if (large) assert.ok(stats.bytes >= 128 * 1024 * 1024, 'Encoded transfer below representative size');
@@ -132,12 +151,19 @@ try {
   }
   assert.equal(counts.users, sourceCounts.users); assert.equal(counts.user_passwords, sourceCounts.user_passwords); assert.equal(counts.events, sourceCounts.events);
   assert.equal(counts.mapi_oauth_signing_keys, 1, 'Issuer signing key missing from reconciliation');
-  const result = await call('verify', { ...fixture, client });
-  assert.equal(result.projectId, fixture.projectId); assert.equal(result.generation, 2);
-  assert.equal(result.active, 200); assert.equal(result.revoked, 401); assert.equal(result.login, 200); assert.equal(result.bulkLogin, 200); assert.equal(result.bulkSessionMatched, true); assert.equal(result.foreign, 401); assert.equal(result.foreignBulk, 401); assert.equal(result.otherSession, 200); assert.equal(result.staleRejected, true); assert.equal(result.fk, 0);
-  assert.equal(result.movedOverlapEmail, 'bulk-0@example.invalid'); assert.equal(result.otherOverlapEmail, 'other-overlap@example.invalid');
-  assert.equal(result.counts.users, users); assert.equal(result.counts.user_passwords, users); assert.ok(result.counts.events >= sourceCounts.events);
-  console.log(JSON.stringify({ large, users, seededEvents: events, historicalEvents: sourceCounts.events, seedSeconds, moveSeconds, advances, transfer: stats, transferBytesPerSecond: stats.bytes / moveSeconds, databaseBytes: { sourceBefore: sourceBytesBefore, sourceAfter: sourceBytesAfter, destinationAfter: destinationBytesAfter }, evidencePages: pages, tables: tables.size, projectIdPreserved: true, actualGoCredentialAndActiveRevokedSessions: true, bulkCredentialSessionIdentityAndCrossProjectRejection: true, preMoveIssuerKeySignsAfterMove: true, staleSourceRejected: true, otherProjectSessionConcurrent: true, overlappingUserIdsIsolated: true, interruptedExportAndImport: true, identicalReplayAndLostAcknowledgement: true, foreignKeys: result.fk }, null, 2));
+  if (gate) {
+    const targetCounts = await call('counts', { projectId: fixture.projectId, name: destinationName });
+    assert.deepEqual(targetCounts, sourceCounts, 'Staged destination counts differ');
+    assert.deepEqual(await call('counts', { projectId: fixture.projectId, name: 'large-source' }), sourceCounts, 'Source counts changed');
+    console.log(JSON.stringify({ large, users, seededEvents: events, seedSeconds, moveSeconds, advances, transfer: stats, evidencePages: pages, tables: tables.size, archiveGateRejected: true, sourceFrozen: true, destinationStaged: true, stagedCountsMatch: true }, null, 2));
+  } else {
+    const result = await call('verify', { ...fixture, client });
+    assert.equal(result.projectId, fixture.projectId); assert.equal(result.generation, 2);
+    assert.equal(result.active, 200); assert.equal(result.revoked, 401); assert.equal(result.login, 200); assert.equal(result.bulkLogin, 200); assert.equal(result.bulkSessionMatched, true); assert.equal(result.foreign, 401); assert.equal(result.foreignBulk, 401); assert.equal(result.otherSession, 200); assert.equal(result.staleRejected, true); assert.equal(result.fk, 0);
+    assert.equal(result.movedOverlapEmail, 'bulk-0@example.invalid'); assert.equal(result.otherOverlapEmail, 'other-overlap@example.invalid');
+    assert.equal(result.counts.users, users); assert.equal(result.counts.user_passwords, users); assert.ok(result.counts.events >= sourceCounts.events);
+    console.log(JSON.stringify({ large, users, seededEvents: events, historicalEvents: sourceCounts.events, seedSeconds, moveSeconds, advances, transfer: stats, transferBytesPerSecond: stats.bytes / moveSeconds, databaseBytes: { sourceBefore: sourceBytesBefore, sourceAfter: sourceBytesAfter, destinationAfter: destinationBytesAfter }, evidencePages: pages, tables: tables.size, projectIdPreserved: true, actualGoCredentialAndActiveRevokedSessions: true, bulkCredentialSessionIdentityAndCrossProjectRejection: true, preMoveIssuerKeySignsAfterMove: true, staleSourceRejected: true, otherProjectSessionConcurrent: true, overlappingUserIdsIsolated: true, interruptedExportAndImport: true, identicalReplayAndLostAcknowledgement: true, foreignKeys: result.fk }, null, 2));
+  }
 } catch (error) {
   if (error.localAction === 'advance' && error.localTimeout && diagnosticFixture) {
     // Read durable state before cleanup. The in-flight call may still be

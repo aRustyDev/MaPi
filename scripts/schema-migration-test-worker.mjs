@@ -1,10 +1,21 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 import application, { NextgenApplication } from '../worker/generated/schema-migration-test-app.js';
 import { ProjectRegistry } from '../worker/registry.js';
 import { RelocationCoordinator } from '../worker/relocation-coordinator.js';
 export { RelocationCoordinator };
 
-export class TestRegistry extends ProjectRegistry { evict() { this.ctx.abort('registry restart'); } }
+export class TestRegistry extends ProjectRegistry {
+  evict() { this.ctx.abort('registry restart'); }
+  seedExistingIntentForTest(route, moveId) {
+    if (this.env.MAPI_LOCAL_TEST !== '1') throw Error('Local relocation test required');
+    const current = this.resolve(route.origin);
+    if (!current || current.state !== 'active' || current.project_id !== route.projectId || current.object_name !== route.objectName || current.generation !== route.generation) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', route.projectId, moveId, route.origin, route.objectName, `project:${crypto.randomUUID()}`, route.generation);
+  }
+}
 export class SchemaOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+
   #holdApply = false; #applyHeld = false; #releaseApply;
   #holdActivate = false; #activateHeld = false; #releaseActivate;
   #holdBeforeActivate = false; #beforeActivateHeld = false; #releaseBeforeActivate;
@@ -170,23 +181,31 @@ export default {
       const coordinator = env.COORDINATOR.getByName('schema-global-move');
       const moveProject = async (source, route, moveId, expectedVersion, email) => {
         const sourceBefore = await source.inspectSchema();
-        let progress;
+        await registry.seedExistingIntentForTest(route, moveId);
+        let archiveRejected = false;
         for (let i = 0; i < 2000; i++) {
-          const [step, traffic] = await Promise.all([
+          const [step, traffic] = await Promise.allSettled([
             coordinator.advance('relocation-secret', route.origin, route.projectId, moveId),
             other.session(otherSession.cookie, 'read', '', otherRoute),
           ]);
-          check(traffic.status === 200, 'Other project session failed during global-target move');
-          progress = step;
-          if (step.done) break;
+          check(traffic.status === 'fulfilled' && traffic.value.status === 200, 'Other project session failed during global-target move');
+          if (step.status === 'rejected') {
+            if (!String(step.reason).includes('independent archive proof is not configured')) throw step.reason;
+            archiveRejected = true; break;
+          }
+          check(!step.value.done, 'Relocation unexpectedly bypassed archive gate');
         }
-        check(progress?.done, 'Global-target relocation did not complete');
-        const destination = env.NEXTGEN_APPLICATION.getByName(progress.objectName);
-        const destinationRoute = { ...route, objectName: progress.objectName, generation: progress.generation };
+        check(archiveRejected, 'Global-target relocation did not reach archive gate');
+        const status = await registry.relocationStatus('relocation-secret', route.projectId);
+        check(status.move?.phase === 'moving' && (await registry.resolve(route.origin)).state === 'moving', 'Archive refusal changed route');
+        const frozen = await source.inspectSchema();
+        check(frozen.fence.length === 1 && frozen.fence[0].state === 'frozen' && JSON.stringify(frozen.counts) === JSON.stringify(sourceBefore.counts), 'Archive refusal changed source data or fence');
+        const destination = env.NEXTGEN_APPLICATION.getByName(status.move.destination_object);
+        const destinationRoute = { ...route, objectName: status.move.destination_object, generation: route.generation + 1 };
         const moved = await destination.inspectSchema();
         check(moved.version === expectedVersion && moved.history.length === (expectedVersion === 2 ? 1 : 0) && JSON.stringify(moved.counts) === JSON.stringify(sourceBefore.counts), 'Destination schema or business data differs from source');
         check(await destination.identity() === route.projectId, 'Relocation changed project ID');
-        check((await destination.login(email, 'Example-password-123!', '127.0.0.1', destinationRoute)).status === 200, 'Relocated credentials failed');
+        await rejects(() => destination.login(email, 'Example-password-123!', '127.0.0.1', destinationRoute));
       };
       await moveProject(legacy, legacyNext, 'global-v2-move', 2, 'legacy@example.test');
       const v1Origin = 'https://schema-unmigrated.example';

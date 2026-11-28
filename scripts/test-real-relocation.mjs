@@ -24,7 +24,8 @@ try {
   assert.equal(result.tables, 59, "Expected 55 pinned tables, two project runtime tables and both revision clock tables");
   assert.equal(result.users, 1);
   assert.ok(result.events > 0, "Expected mutation audit history");
-  console.log(`Real Nextgen project, ${result.users} user and ${result.events} audit rows moved across local owners using ${result.tables} tables.`);
+  assert.equal(result.legacyJournalsRejected, true, "Expected partial, complete and unfinalized committed legacy journal checks");
+  console.log(`Real Go/Wasm project reconciled ${result.tables} tables, ${result.users} user and ${result.events} audit rows. Legacy journals were rejected and the archive gate blocked fresh cutover.`);
 } finally {
   if(server.exitCode===null&&server.signalCode===null){const stopped=once(server,"exit");server.kill("SIGTERM");await stopped;}
   await rm(dir,{recursive:true,force:true});

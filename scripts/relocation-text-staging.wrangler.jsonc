@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mapi-issue-10-text-staging",
+  "account_id": "4d90c2d31b480584f8f878d2f62848ab",
+  "main": "relocation-text-staging-worker.mjs",
+  "compatibility_date": "2026-11-19",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": { "MAPI_RELOCATION_ENABLED": "1", "MAPI_FENCE_WRITERS_DRAINED": "1" },
+  "durable_objects": { "bindings": [
+    { "name": "NEXTGEN_APPLICATION", "class_name": "RelocationTextStagingOwner" },
+    { "name": "PROJECT_REGISTRY", "class_name": "ProjectRegistry" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelocationTextStagingOwner", "ProjectRegistry"] }]
+}

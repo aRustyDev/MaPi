@@ -1,6 +1,7 @@
 // Test-only orchestration. The control methods trust the caller.
 import { DurableObject } from 'cloudflare:workers';
 import { NextgenApplication } from '../worker/generated/real-recovery-proof-object.js';
+export { ProjectRegistry } from '../worker/registry.js';
 export { NextgenApplication };
 const check = (value, message) => { if (!value) throw Error(message); };
 const rejects = async (fn, message) => { try { await fn(); } catch { return; } throw Error(message); };
@@ -29,9 +30,17 @@ export default { async fetch(request, env) {
   if (env.MAPI_LOCAL_TEST !== '1' || !['localhost','127.0.0.1'].includes(new URL(request.url).hostname)) return new Response(null,{status:404});
   try {
     const registry=env.RECOVERY_REGISTRY.getByName('control'), name=crypto.randomUUID();
-    const one=env.NEXTGEN_APPLICATION.getByName('one-'+name), two=env.NEXTGEN_APPLICATION.getByName('two-'+name);
-    const p1=(await one.provision('Recovery one','https://one.example')).projectId, p2=(await two.provision('Recovery two','https://two.example')).projectId;
-    const r1={projectId:p1,era:(await registry.register(p1)).era},r2={projectId:p2,era:(await registry.register(p2)).era};
+    const oneName='one-'+name, twoName='two-'+name;
+    const one=env.NEXTGEN_APPLICATION.getByName(oneName), two=env.NEXTGEN_APPLICATION.getByName(twoName);
+    const projects=env.PROJECT_REGISTRY.getByName('projects');
+    async function provision(owner, name, origin, objectName) {
+      await projects.reserve(origin,objectName);
+      const projectId=(await owner.provision(name,origin,{projectId:null,origin,objectName,generation:1})).projectId;
+      await projects.activate(origin,objectName,projectId);
+      return {projectId,origin,objectName,generation:1};
+    }
+    const route1=await provision(one,'Recovery one','https://one.example',oneName), route2=await provision(two,'Recovery two','https://two.example',twoName), p1=route1.projectId,p2=route2.projectId;
+    const r1={projectId:p1,era:(await registry.register(p1)).era,ownerRoute:route1},r2={projectId:p2,era:(await registry.register(p2)).era,ownerRoute:route2};
     await one.proofInit(r1.era);await two.proofInit(r2.era);
     const email1='one@example.test', email2='two@example.test', pass='Test-Password-123!';
     await one.proofCall(r1,'add',{email:email1,password:pass});await two.proofCall(r2,'add',{email:email2,password:pass});
@@ -61,7 +70,7 @@ export default { async fetch(request, env) {
     await one.proofRelease('late');check(await pendingResult,'suspended write committed after fence');
     check((await two.proofCall(r2,'session',{cookie:c2})).status===200,'other project affected');
     await one.proofRestore(r1);await rejects(()=>one.evict(),'eviction failed');check(await restartResult,'in-flight write survived restart');
-    const restored=env.NEXTGEN_APPLICATION.getByName('one-'+name),rnew={projectId:p1,era:next.era};
+    const restored=env.NEXTGEN_APPLICATION.getByName(oneName),rnew={projectId:p1,era:next.era,ownerRoute:route1};
     await rejects(()=>restored.proofCall(r1,'session',{cookie:c1}),'old route admitted during recovery');
     const before=await restored.proofState();check(before.sessions>0&&before.users===1&&before.recovered===0,'partial restore missing state');
     await rejects(()=>restored.proofRecover(rnew,true),'injected recovery audit failure committed');

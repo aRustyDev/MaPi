@@ -1,30 +1,76 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 // Local-only rehearsal. Control methods trust bindings in this isolated harness.
 import { RelocationCoordinator } from "../worker/relocation-coordinator.js";
 import { NextgenApplication } from "../worker/app.js";
 import { ProjectRegistry, validateReconciliationPage } from "../worker/registry.js";
-import { beginRegistryMove } from "../worker/registry-move.js";
+import { beginRegistryMove, commitRegistryMove } from "../worker/registry-move.js";
+import { RELOCATION_RECONCILIATION_VERSION } from "../worker/relocation-values.js";
 import { initializeOwnerFence } from "../worker/owner-fence.js";
 import { projectFenceStatus } from "../worker/relocation.js";
 import { execute } from "../worker/sql.js";
 import { inspectRelocationDestination } from "../worker/relocation-manifest.js";
+import { assertNoTextPreflightMarkerAccess } from "../worker/relocation-text-marker.js";
+import { chunkImportStatus } from '../worker/relocation-chunks.js';
 const quote = (s) => `"${s.replaceAll('"', '""')}"`;
 const check = (condition, message) => { if (!condition) throw Error(message); };
 const rejects = async (fn) => { try { await fn(); } catch { return; } throw Error("Expected rejection"); };
 const rejectsWith = async (fn, message) => { try { await fn(); } catch (error) { if (String(error).includes(message)) return; throw error; } throw Error(`Expected rejection: ${message}`); };
 export class RealRegistry extends ProjectRegistry {
+  seedExistingIntentForTest(origin, projectId, moveId) {
+    if (this.env.MAPI_LOCAL_TEST !== '1') throw Error('Local relocation test required');
+    const route = this.resolve(origin);
+    if (!route || route.state !== 'active' || route.project_id !== projectId) throw Error('Invalid synthetic route');
+    this.ctx.storage.sql.exec('INSERT INTO mapi_move_intents VALUES (?, ?, ?, ?, ?, ?)', projectId, moveId, origin, route.object_name, `project:${crypto.randomUUID()}`, route.generation);
+  }
   begin(project, source, target, generation, move) { return beginRegistryMove(this.ctx.storage, project, source, target, generation, move); }
   move(project) { return this.ctx.storage.sql.exec("SELECT * FROM mapi_route_moves WHERE project_id = ?", project).toArray()[0] ?? null; }
   history(project) { return this.ctx.storage.sql.exec("SELECT move_id, source_object, destination_object, generation FROM mapi_move_history WHERE project_id = ? ORDER BY generation", project).toArray(); }
   journalVersion(project, version) { this.ctx.storage.sql.exec('UPDATE mapi_move_reconciliation SET journal_version = ? WHERE project_id = ?', version, project); }
+  corruptJournal(project, field, kind) {
+    if (!['cursor', 'tables'].includes(field)) throw Error('Invalid fixture');
+    const sql = this.ctx.storage.sql, expr = kind === 'invalid-utf8' ? "CAST(X'80' AS TEXT)" : '?';
+    const value = kind === 'oversized' ? 'x'.repeat(150000) : '{synthetic_private_sentinel';
+    sql.exec(`UPDATE mapi_move_reconciliation SET ${field} = ${expr} WHERE project_id = ?`, ...(kind === 'invalid-utf8' ? [project] : [value, project]));
+  }
+  restoreJournal(project, value) { this.ctx.storage.sql.exec('UPDATE mapi_move_reconciliation SET tables = ?, cursor = ? WHERE project_id = ?', value.tables, value.cursor, project); }
+  journalFingerprint(project) { return this.ctx.storage.sql.exec("SELECT typeof(tables) AS tables_type, length(CAST(tables AS BLOB)) AS tables_size, hex(substr(CAST(tables AS BLOB),1,32)) AS tables_head, typeof(cursor) AS cursor_type, length(CAST(cursor AS BLOB)) AS cursor_size, hex(substr(CAST(cursor AS BLOB),1,32)) AS cursor_head, table_index, journal_version FROM mapi_move_reconciliation WHERE project_id = ?", project).one(); }
+  evidenceCursor(project) { return this.ctx.storage.sql.exec('SELECT cursor_in FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1', project).one().cursor_in; }
+  evidenceNextCursor(project) { return this.ctx.storage.sql.exec('SELECT cursor_out FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1', project).one().cursor_out; }
+  setEvidenceNextCursor(project, value) { this.ctx.storage.sql.exec('UPDATE mapi_move_evidence SET cursor_out = ? WHERE rowid = (SELECT rowid FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1)', value, project); }
+  corruptEvidenceCursor(project, kind) {
+    const expr = kind === 'invalid-utf8' ? "CAST(X'80' AS TEXT)" : '?';
+    const value = kind === 'oversized' ? 'x'.repeat(150000) : '{synthetic_private_sentinel';
+    this.ctx.storage.sql.exec(`UPDATE mapi_move_evidence SET cursor_in = ${expr} WHERE rowid = (SELECT rowid FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1)`, ...(kind === 'invalid-utf8' ? [project] : [value, project]));
+  }
+  restoreEvidenceCursor(project, value) { this.ctx.storage.sql.exec('UPDATE mapi_move_evidence SET cursor_in = ? WHERE rowid = (SELECT rowid FROM mapi_move_evidence WHERE project_id = ? ORDER BY rowid LIMIT 1)', value, project); }
   journal(project) { return this.ctx.storage.sql.exec('SELECT * FROM mapi_move_reconciliation WHERE project_id = ?', project).toArray()[0] ?? null; }
   evidenceCount(project) { return this.ctx.storage.sql.exec('SELECT count(*) AS n FROM mapi_move_evidence WHERE project_id = ?', project).one().n; }
+  historyVerification(project, move) { return this.ctx.storage.sql.exec('SELECT total_chunks, next_index, chain, final_digest, complete FROM mapi_move_history_verification WHERE project_id = ? AND move_id = ?', project, move).toArray()[0] ?? null; }
+  // Create a historical committed fixture only after the real archive gate
+  // has refused this otherwise reconciled, disposable relocation.
+  async seedCommittedMoveForTest(secret, project, moveId) {
+    if (this.env.MAPI_LOCAL_TEST !== "1") throw Error("Local relocation test required");
+    await rejectsWith(() => super.commitRelocation(secret, project, moveId), "independent archive proof is not configured");
+    const { source, destination } = await this.relocationProofs(secret, project, moveId);
+    return commitRegistryMove(this.ctx.storage, project, source.generation, moveId, source, destination);
+  }
   evict() { this.ctx.abort("registry restart"); }
 }
 export class RealOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+  preFreezeProductionForTest(secret, route, moveId, marker) { return super.preFreezeRelocation(secret, route, moveId, marker); }
+  setFenceStateForTest(state, moveId) {
+    if (this.env.MAPI_LOCAL_TEST !== '1' || !['active', 'frozen'].includes(state)) throw Error('Local relocation test required');
+    this.ctx.storage.sql.exec('UPDATE mapi_owner_fence SET state = ?, move_id = ? WHERE singleton = 1', state, state === 'frozen' ? moveId : null);
+  }
+
   #legacyDigestForTest = false;
   #malformedPageForTest = null;
   #heldRestore;
   #releaseRestore;
+  #holdExport = false;
+  #heldExport = false;
+  #releaseExport;
   legacyDigestForTest(value) { this.#legacyDigestForTest = value; }
   malformedPageForTest(value) { this.#malformedPageForTest = value; }
   async relocationReconcile(...args) {
@@ -36,8 +82,25 @@ export class RealOwner extends NextgenApplication {
   constructor(ctx, env) {
     const hasMetadata = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mapi_relocation_project'").toArray().length;
     const importing = hasMetadata && ctx.storage.sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing','staged')").toArray().length;
-    super(ctx, importing ? { ...env, MAPI_SCHEMA_TARGET: "2" } : env);
+    const hasEpoch = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mapi_recovery_epoch'").toArray().length;
+    const epoch = hasEpoch ? ctx.storage.sql.exec('SELECT epoch FROM mapi_recovery_epoch').toArray()[0]?.epoch : null;
+    const scoped = epoch === 'synthetic-current' || epoch === 'synthetic-stale';
+    const objectId = ctx.id.toString();
+    super(ctx, { ...env, ...(importing ? { MAPI_SCHEMA_TARGET: '2' } : {}), ...(scoped ? { MAPI_RECOVERY_TARGET_OBJECT: objectId, MAPI_RECOVERY_OBJECT_EPOCHS: JSON.stringify({ [objectId]: 'synthetic-current' }), MAPI_RECOVERY_EPOCH: 'synthetic-current' } : {}) });
   }
+  setStoredEpochForTest(epoch) {
+    if (this.env.MAPI_LOCAL_TEST !== '1' || !['synthetic-current', 'synthetic-stale'].includes(epoch)) throw Error('Invalid synthetic epoch');
+    this.ctx.storage.sql.exec('UPDATE mapi_recovery_epoch SET epoch = ?', epoch);
+  }
+  holdNextExportForTest() { if (this.env.MAPI_LOCAL_TEST !== '1') throw Error('Local testing required'); this.#holdExport = true; }
+  exportHeldForTest() { return this.#heldExport; }
+  releaseExportForTest() { if (!this.#releaseExport) throw Error('Export is not held'); this.#releaseExport(); this.#releaseExport = undefined; }
+  async exportRelocationChunk(...args) {
+    const chunk = await super.exportRelocationChunk(...args);
+    if (this.#holdExport) { this.#holdExport = false; this.#heldExport = true; await new Promise(resolve => { this.#releaseExport = resolve; }); this.#heldExport = false; }
+    return chunk;
+  }
+  rawImportStateForTest(projectId) { return { checkpoint: chunkImportStatus(this.ctx.storage, projectId), counts: this.testCounts(), history: this.ctx.storage.sql.exec('SELECT COUNT(*) AS n FROM mapi_chunk_import_data WHERE project_id = ?', projectId).one().n }; }
   schemaVersion() { return this.ctx.storage.sql.exec("SELECT version FROM mapi_schema_version").one().version; }
   async holdRestoreForTest(bookmark) {
     if (this.#heldRestore) throw Error("Restore already held");
@@ -70,6 +133,16 @@ export class RealOwner extends NextgenApplication {
     return ["mapi_project", "mapi_login_limits", ...clockTables, ...ordered];
   }
   sourceStatus() { return this.ctx.storage.sql.exec("SELECT project_id, object_name, generation, state, move_id, digest FROM mapi_owner_fence WHERE singleton=1").one(); }
+  sourceFenceRows() {
+    if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mapi_owner_fence'").toArray().length) return [];
+    return this.ctx.storage.sql.exec('SELECT * FROM mapi_owner_fence').toArray();
+  }
+  seedAdmissionFixture(projectId, userId) {
+    this.ctx.storage.sql.exec("INSERT INTO user_attributes (project_id, user_id, key, value) VALUES (?, ?, 'admission-fixture', ?)", projectId, userId, JSON.stringify('synthetic-é😀'));
+  }
+  admissionFixture(projectId, userId) {
+    return this.ctx.storage.sql.exec("SELECT typeof(value) AS kind, hex(CAST(value AS BLOB)) AS bytes FROM user_attributes WHERE project_id = ? AND user_id = ? AND key = 'admission-fixture'", projectId, userId).one();
+  }
   stagedStatus(project) { return projectFenceStatus(this.ctx.storage, project); }
   savedOrigin() { return this.ctx.storage.sql.exec("SELECT origin FROM mapi_project_origin").one().origin; }
   async evidence(tables) {
@@ -117,7 +190,7 @@ export class RealCoordinator extends RelocationCoordinator {
         if (failAt === "reconcile") throw Error("Injected interruption after reconciliation page");
         if (progress.done) break;
       }
-      await registry.commitRelocation("move-secret", projectId, moveId);
+      await registry.seedCommittedMoveForTest("move-secret", projectId, moveId);
       if (failAt === "committed") throw Error("Injected interruption after registry commit");
     }
     const route = await registry.resolve(origin);
@@ -130,9 +203,21 @@ export class RealCoordinator extends RelocationCoordinator {
   }
 }
 export default {
-  async fetch(_request, env) {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (env.MAPI_LOCAL_TEST !== "1" || url.protocol !== "http:" || url.hostname !== "127.0.0.1") return new Response(null, { status: 404 });
     try {
-      const page = (count, cursor, done) => ({ guardVersion: 2, count, cursor, done, digest: 'a'.repeat(64) });
+      for (const statement of [
+        "CREATE VIEW 'mapi_relocation_text_preflight_marker' AS SELECT '0123456789abcdef0123456789abcdef' AS token",
+        "UPDATE users SET name='synthetic'; CREATE VIEW 'mapi_relocation_text_preflight_marker' AS SELECT '0123456789abcdef0123456789abcdef' AS token",
+        'DROP VIEW "MAPI_RELOCATION_TEXT_PREFLIGHT_MARKER"',
+        "DELETE FROM 'mapi_relocation_text_preflight_seal'",
+      ]) {
+        let denied = false;
+        try { assertNoTextPreflightMarkerAccess(statement); } catch { denied = true; }
+        check(denied, 'Reserved preflight object was accessible through SQL');
+      }
+      const page = (count, cursor, done) => ({ guardVersion: RELOCATION_RECONCILIATION_VERSION, count, cursor, done, digest: 'a'.repeat(64) });
       validateReconciliationPage(page(0, null, true), null);
       validateReconciliationPage(page(0, [{ integer: '-9223372036854775808' }], true), [{ integer: '-9223372036854775808' }]);
       validateReconciliationPage(page(64, [{ integer: '9223372036854775807' }, { blob: 'AAE=' }, { blob: 'AA==' }, { blob: '' }, 'key', 1.5], false), null);
@@ -142,7 +227,9 @@ export default {
         check(rejected, 'Noncanonical blob key was accepted');
       }
       const largeBlob = 'A'.repeat(8_388_608);
-      validateReconciliationPage(page(1, [{ blob: largeBlob }], true), null);
+      let largeKeyRejected = false;
+      try { validateReconciliationPage(page(1, [{ blob: largeBlob }], true), null); } catch { largeKeyRejected = true; }
+      check(largeKeyRejected, 'Oversized blob key was accepted');
       let largeCorruptionRejected = false;
       try { validateReconciliationPage(page(1, [{ blob: largeBlob.slice(0, -2) + '!A' }], true), null); } catch { largeCorruptionRejected = true; }
       check(largeCorruptionRejected, 'Late corruption in large blob key was accepted');
@@ -165,10 +252,68 @@ export default {
       await rejectsWith(() => target.reserveMoveDestination("move-secret", reservedRoute, "move-1"), "Destination is not reserved by registry");
       const login = await source.login("source@example.test", "Example-password-123!", "192.0.2.1", route);
       check(login.status === 200 && login.cookie, "Source login failed");
+      // Simulate an independently deployed object-specific epoch after real
+      // Go/Wasm setup. The configured value is fixed across the next restart.
+      await source.setStoredEpochForTest('synthetic-current');
+      await rejects(() => source.evict()); source = env.OWNER.getByName('source');
+      const liveRuntime = await source.status(true, route);
+      check(liveRuntime.ready && liveRuntime.wasmMemoryBytes > 0 && liveRuntime.reactorInitializations > 0 && liveRuntime.reactorAttempts >= liveRuntime.reactorInitializations, 'Active Go/Wasm reactor was not initialized');
+      await source.seedAdmissionFixture(projectId, user.userId);
       const sourceCounts = await source.testCounts(), tables = await source.manifest();
+      const fixtureBeforeAdmission = await source.admissionFixture(projectId, user.userId);
+      const routeBeforeAdmission = await registry.relocationStatus('move-secret', projectId);
+      const fenceBeforeAdmission = await source.sourceFenceRows();
+      await rejectsWith(() => registry.beginRelocation('move-secret', origin, projectId, 'move-1'), 'Relocation admission unavailable');
+      await rejectsWith(() => coordinator.advance('move-secret', origin, projectId, 'move-1'), 'Relocation admission unavailable');
+      check(JSON.stringify(await registry.relocationStatus('move-secret', projectId)) === JSON.stringify(routeBeforeAdmission), 'Rejected admission changed route or intent');
+      check(JSON.stringify(await source.sourceFenceRows()) === JSON.stringify(fenceBeforeAdmission), 'Rejected admission changed owner fence');
+      check(JSON.stringify(await source.testCounts()) === JSON.stringify(sourceCounts), 'Rejected admission changed application data');
+      check(JSON.stringify(await source.admissionFixture(projectId, user.userId)) === JSON.stringify(fixtureBeforeAdmission), 'Rejected admission changed synthetic value');
+      // The remaining end-to-end rehearsal covers a pre-existing intent, as
+      // would be present after deployment interrupted an earlier attempt.
+      await registry.seedExistingIntentForTest(origin, projectId, 'move-1');
+      await rejectsWith(() => registry.beginRelocation('move-secret', origin, projectId, 'different-move'), 'Conflicting relocation intent');
+      // A pre-existing intent may predate today's closed admission gate.
+      // Complete its preflight without yet using the historical-freeze fixture.
+      let priorCheckpoint;
+      for (let page = 0; page < 4096; page++) {
+        priorCheckpoint = await registry.relocationTextPreflightStatus('move-secret', projectId, 'move-1');
+        if (priorCheckpoint?.done) break;
+        const progress = await registry.beginRelocation('move-secret', origin, projectId, 'move-1');
+        check(progress.phase === 'preflighting', 'Existing intent froze before preflight completed');
+      }
+      check(priorCheckpoint?.done, 'Existing intent preflight did not complete');
+      const priorRoute = await registry.relocationStatus('move-secret', projectId), priorFence = await source.sourceFenceRows();
+      await rejectsWith(() => source.preFreezeProductionForTest('move-secret', route, 'move-1', priorCheckpoint.marker), 'Relocation admission unavailable');
+      check(JSON.stringify(await registry.relocationStatus('move-secret', projectId)) === JSON.stringify(priorRoute) &&
+        JSON.stringify(await source.sourceFenceRows()) === JSON.stringify(priorFence) &&
+        JSON.stringify(await source.admissionFixture(projectId, user.userId)) === JSON.stringify(fixtureBeforeAdmission), 'Rejected old intent changed source state');
       const restoreAttempt = source.holdRestoreForTest("old-bookmark").then(() => false, error => String(error).includes("Coordinated recovery is required"));
       while (!await source.restoreHeldForTest()) await new Promise(resolve => setTimeout(resolve, 0));
-      const move = await registry.beginRelocation("move-secret", origin, projectId, "move-1");
+      let move;
+      for (let page = 0; page < 4096; page++) {
+        move = await registry.beginRelocation("move-secret", origin, projectId, "move-1");
+        if (move.phase !== "preflighting") break;
+      }
+      check(move?.phase === "moving", "Bounded preflight did not finish");
+      // Simulate an old/restored active fence while the registry still says
+      // moving. A direct freeze RPC must leave the active source untouched.
+      await source.setFenceStateForTest('active', 'move-1');
+      const restoredActiveFence = await source.sourceFenceRows(), restoredActiveData = await source.admissionFixture(projectId, user.userId);
+      await rejectsWith(() => source.freezeRelocation('move-secret', route, 'move-1'), 'Relocation admission unavailable');
+      check(JSON.stringify(await source.sourceFenceRows()) === JSON.stringify(restoredActiveFence) &&
+        JSON.stringify(await source.admissionFixture(projectId, user.userId)) === JSON.stringify(restoredActiveData), 'Direct freeze changed restored active source');
+      await source.setFenceStateForTest('frozen', 'move-1');
+      const frozenRuntime = await source.status(true, route);
+      check(!frozenRuntime.ready && !frozenRuntime.fenceReady && frozenRuntime.wasmMemoryBytes === 0 && frozenRuntime.reactorInitializations === liveRuntime.reactorInitializations && frozenRuntime.reactorAttempts === liveRuntime.reactorAttempts, 'Frozen source retained or recreated its Go/Wasm reactor');
+      const staleRequest = await source.handleRequest({ method: 'GET', url: `${origin}/readyz`, headers: {}, body: '', peer: '192.0.2.9' }, route);
+      check(staleRequest.status === 503, 'Frozen source accepted stale ingress');
+      await rejects(() => source.addUser('frozen-stale@example.test', 'Stale-password-123!', route));
+      const afterStale = await source.status(true, route);
+      check(afterStale.wasmMemoryBytes === 0 && afterStale.reactorInitializations === frozenRuntime.reactorInitializations && afterStale.reactorAttempts === frozenRuntime.reactorAttempts, 'Stale ingress attempted to recreate the frozen Go/Wasm reactor');
+      await source.freezeRelocation('move-secret', route, 'move-1');
+      const afterFreezeRetry = await source.status(true, route);
+      check(afterFreezeRetry.wasmMemoryBytes === 0 && afterFreezeRetry.reactorInitializations === frozenRuntime.reactorInitializations && afterFreezeRetry.reactorAttempts === frozenRuntime.reactorAttempts, 'Idempotent freeze retry attempted to recreate the reactor');
       const targetName = move.destination_object;
       target = env.OWNER.getByName(targetName);
       reservedRoute = { ...route, objectName: targetName, generation: 2 };
@@ -205,6 +350,24 @@ export default {
       await rejects(() => coordinator.evict()); coordinator = env.COORDINATOR.getByName("coordinator");
       const concurrent = await Promise.allSettled([resume("secret", "chunk"), other.addUser("concurrent@example.test", "Concurrent-password-123!", otherRoute)]);
       check(concurrent[0].status === "rejected" && String(concurrent[0].reason).includes("Injected interruption after chunk") && concurrent[1].status === "fulfilled", "Concurrent traffic failed");
+      // Destination preparation requires its original epoch 0. Introduce the
+      // separately configured synthetic epoch only after import has begun.
+      await target.setStoredEpochForTest('synthetic-current');
+      await rejects(() => target.evict()); target = env.OWNER.getByName(targetName);
+      // In-flight source RPC reply arrives after a destination's independently
+      // configured epoch no longer matches restored storage. The actual owner
+      // import call must recheck it in the same transaction as its checkpoint.
+      const beforeEpochRace = await target.rawImportStateForTest(projectId);
+      await source.holdNextExportForTest();
+      const epochRace = target.importRelocationChunk('move-secret', projectId, 'move-1', beforeEpochRace.checkpoint.next_chunk)
+        .then(() => null, error => String(error));
+      for (let attempt = 0; !(await source.exportHeldForTest()); attempt++) { if (attempt > 1000) throw Error('Synthetic source reply was not held'); await new Promise(resolve => setTimeout(resolve, 5)); }
+      await target.setStoredEpochForTest('synthetic-stale');
+      await source.releaseExportForTest();
+      check((await epochRace)?.includes('Project recovery is not reconciled'), 'Stale destination epoch accepted an in-flight import');
+      check(JSON.stringify(await target.rawImportStateForTest(projectId)) === JSON.stringify(beforeEpochRace), 'Stale in-flight import changed destination rows or checkpoint');
+      await target.setStoredEpochForTest('synthetic-current');
+      await target.importRelocationChunk('move-secret', projectId, 'move-1', beforeEpochRace.checkpoint.next_chunk);
       const targetRoute = { ...route, objectName: targetName, generation: 2 };
       await rejectsWith(() => target.addUser("premature@example.test", "Premature-password-123!", targetRoute), "Owner import is not active");
       await rejects(() => target.provision("Premature", origin, targetRoute));
@@ -223,11 +386,20 @@ export default {
       check(await target.caseSensitiveLike(), "Importing destination lost case-sensitive LIKE after restart");
       check(await target.schemaVersion() === 1, "Constructor migrated an importing destination");
       await rejectsWith(() => coordinator.advance("wrong", origin, projectId, "move-1"), "Relocation control denied");
+      let verifiedChunks = 0;
       for (;;) {
         const progress = await coordinator.advance("move-secret", origin, projectId, "move-1");
         if (progress.phase === "reconciling") break;
-        check(progress.phase === "importing", "Unexpected coordinator phase");
+        if (progress.phase === "verifying-history") {
+          check(progress.nextChunk === ++verifiedChunks, "Transfer history did not advance by one chunk");
+        } else {
+          check(progress.phase === "importing" && verifiedChunks === 0, "Unexpected coordinator phase");
+        }
       }
+      const verifiedHistory = await registry.historyVerification(projectId, 'move-1');
+      check(verifiedHistory?.complete === 1 && verifiedHistory.next_index === verifiedHistory.total_chunks &&
+        verifiedHistory.chain === verifiedHistory.final_digest && verifiedChunks + 1 === verifiedHistory.total_chunks,
+        "Coordinator did not complete transfer history verification");
       const stagedBeforeRetry = await target.stagedStatus(projectId);
       const stagedRowsBeforeRetry = await target.evidence(tables);
       check(stagedBeforeRetry?.state === 'staged', 'Destination was not staged before reservation retry');
@@ -237,7 +409,7 @@ export default {
       check(JSON.stringify(await target.stagedStatus(projectId)) === JSON.stringify(stagedBeforeRetry), 'Staged reservation retry changed the owner state');
       check(JSON.stringify(await target.evidence(tables)) === JSON.stringify(stagedRowsBeforeRetry), 'Staged reservation retry changed project rows');
       let checkpoint = await registry.journal(projectId);
-      check(checkpoint?.journal_version === 2, 'Current reconciliation version missing');
+      check(checkpoint?.journal_version === RELOCATION_RECONCILIATION_VERSION, 'Current reconciliation version missing');
       await source.legacyDigestForTest(true);
       await rejectsWith(() => registry.reconcileRelocation('move-secret', projectId, 'move-1'), 'Relocation owner guard version mismatch');
       check(JSON.stringify(await registry.journal(projectId)) === JSON.stringify(checkpoint), 'Rejected old owner changed checkpoint');
@@ -259,44 +431,79 @@ export default {
       await registry.reconcileRelocation('move-secret', projectId, 'move-1');
       check(await registry.evidenceCount(projectId) === originalEvidenceCount + 1, 'Valid page retry did not advance exactly once');
       checkpoint = await registry.journal(projectId);
-      await registry.journalVersion(projectId, 1);
+      for (const field of ['cursor', 'tables']) for (const kind of ['oversized', 'invalid-utf8', 'malformed']) {
+        await registry.corruptJournal(projectId, field, kind);
+        const before = JSON.stringify(await registry.journalFingerprint(projectId));
+        let message = ''; try { await registry.reconcileRelocation('move-secret', projectId, 'move-1'); } catch (error) { message = String(error); }
+        check(message.includes('Invalid reconciliation checkpoint') && !message.includes('synthetic_private_sentinel'), 'Invalid journal was accepted or leaked data');
+        check(JSON.stringify(await registry.journalFingerprint(projectId)) === before, 'Invalid journal changed state');
+        await registry.restoreJournal(projectId, checkpoint);
+      }
+      const originalCursor = await registry.evidenceCursor(projectId);
+      for (const kind of ['oversized', 'invalid-utf8', 'malformed']) {
+        await registry.corruptEvidenceCursor(projectId, kind);
+        let message = ''; try { await registry.relocationEvidence('move-secret', projectId, 'move-1'); } catch (error) { message = String(error); }
+        check(message.includes('Invalid reconciliation checkpoint') && !message.includes('synthetic_private_sentinel'), 'Invalid evidence was accepted or leaked data');
+        await registry.restoreEvidenceCursor(projectId, originalCursor);
+      }
+      const originalNextCursor = await registry.evidenceNextCursor(projectId);
+      await registry.setEvidenceNextCursor(projectId, null);
+      check((await registry.relocationEvidence('move-secret', projectId, 'move-1')).pages[0].nextCursor === null, 'Historical NULL evidence cursor became unreadable');
+      await registry.setEvidenceNextCursor(projectId, originalNextCursor);
+      await registry.journalVersion(projectId, 2);
+      const journalState = async () => JSON.stringify({
+        checkpoint: await registry.journal(projectId), evidenceCount: await registry.evidenceCount(projectId),
+        history: await registry.historyVerification(projectId, 'move-1'),
+        route: await registry.resolve(origin), source: await source.sourceStatus(), target: await target.stagedStatus(projectId),
+      });
+      const partialState = await journalState();
       const oldPartial = async () => {
         await rejectsWith(() => registry.reconcileRelocation('move-secret', projectId, 'move-1'), 'Legacy reconciliation');
         await rejectsWith(() => registry.commitRelocation('move-secret', projectId, 'move-1'), 'Reconciliation is incomplete');
         await rejectsWith(() => coordinator.advance('move-secret', origin, projectId, 'move-1'), 'Legacy reconciliation');
+        check(await journalState() === partialState, 'Legacy partial journal changed relocation state');
         check((await registry.resolve(otherOrigin)).state === 'active', 'Legacy checkpoint affected other project');
       };
       await oldPartial(); await rejects(() => registry.evict()); registry = env.REGISTRY.getByName('projects'); await oldPartial();
-      await registry.journalVersion(projectId, 2);
+      await registry.journalVersion(projectId, RELOCATION_RECONCILIATION_VERSION);
       await rejects(() => coordinator.evict()); coordinator = env.COORDINATOR.getByName("coordinator");
       await rejectsWith(() => resume("secret", "reconcile"), "Injected interruption after reconciliation page");
       await rejectsWith(() => registry.commitRelocation("move-secret", projectId, "move-1"), "Reconciliation is incomplete");
       await rejects(() => coordinator.evict()); coordinator = env.COORDINATOR.getByName("coordinator");
       while (!(await registry.reconcileRelocation('move-secret', projectId, 'move-1')).done) {}
-      await registry.journalVersion(projectId, 1);
+      await registry.journalVersion(projectId, 3);
+      const completeState = await journalState();
       const oldComplete = async () => {
         await rejectsWith(() => registry.reconcileRelocation('move-secret', projectId, 'move-1'), 'Legacy reconciliation');
         await rejectsWith(() => registry.commitRelocation('move-secret', projectId, 'move-1'), 'Reconciliation is incomplete');
         await rejectsWith(() => coordinator.advance('move-secret', origin, projectId, 'move-1'), 'Legacy reconciliation');
         check((await source.sourceStatus()).state === 'frozen', 'Legacy complete source unfenced');
         check((await target.stagedStatus(projectId)).state === 'staged', 'Legacy complete destination activated');
+        check(await journalState() === completeState, 'Legacy complete journal changed relocation state');
       };
       await oldComplete(); await rejects(() => registry.evict()); registry = env.REGISTRY.getByName('projects'); await oldComplete();
-      await registry.journalVersion(projectId, 2);
+      await registry.journalVersion(projectId, RELOCATION_RECONCILIATION_VERSION);
+      const beforeArchiveGate = await journalState();
+      await rejectsWith(() => coordinator.advance("move-secret", origin, projectId, "move-1"), "independent archive proof is not configured");
+      check(await journalState() === beforeArchiveGate, "Archive rejection changed relocation state");
+      check((await registry.resolve(origin)).state === 'moving' && (await source.sourceStatus()).state === 'frozen' &&
+        (await target.stagedStatus(projectId)).state === 'staged', "Archive rejection changed owner authority");
       await rejectsWith(() => resume("secret", "committed"), "Injected interruption after registry commit");
-      await registry.journalVersion(projectId, 1);
+      await registry.journalVersion(projectId, 2);
+      const committedState = await journalState();
       const oldCommitted = async () => {
         await rejectsWith(() => coordinator.advance('move-secret', origin, projectId, 'move-1'), 'Legacy committed relocation');
         await rejectsWith(() => target.activateRelocation('move-secret', projectId, 'move-1'), 'Legacy committed relocation');
         await rejectsWith(() => source.retireRelocation('move-secret', projectId, 'move-1'), 'Legacy committed relocation');
         await rejectsWith(() => registry.finalizeRelocation('move-secret', projectId, 'move-1'), 'Legacy committed relocation');
         await rejectsWith(() => registry.commitRelocation('move-secret', projectId, 'move-1'), 'Legacy committed relocation');
+        check(await journalState() === committedState, 'Legacy committed journal changed relocation state');
         check((await source.sourceStatus()).state === 'frozen', 'Legacy committed source unfenced');
         check((await target.stagedStatus(projectId)).state === 'staged', 'Legacy committed destination activated');
         check((await registry.resolve(otherOrigin)).state === 'active', 'Legacy committed move affected other project');
       };
       await oldCommitted(); await rejects(() => registry.evict()); registry = env.REGISTRY.getByName('projects'); await oldCommitted();
-      await registry.journalVersion(projectId, 2);
+      await registry.journalVersion(projectId, RELOCATION_RECONCILIATION_VERSION);
       await rejectsWith(() => registry.beginProjectRecovery("move-secret", origin, projectId, "recovery-race", "era-race"), "Project relocation is pending");
       await rejectsWith(() => registry.finalizeRelocation("move-secret", projectId, "move-1"), "Relocation is not finalized by owners");
       await rejectsWith(() => registry.beginRelocation("move-secret", origin, projectId, "move-2"), "Previous move has not been finalized");
@@ -311,7 +518,7 @@ export default {
       check((await registry.resolve(otherOrigin)).state === 'active', "Post-activation recovery attempt affected the other project");
       const final = await coordinator.advance("move-secret", origin, projectId, "move-1");
       check(final.done && final.phase === "retired", "Coordinator did not complete retirement");
-      await registry.journalVersion(projectId, 1);
+      await registry.journalVersion(projectId, 2);
       const historical = await coordinator.advance('move-secret', origin, projectId, 'move-1');
       check(historical.done && historical.phase === 'retired', 'Completed legacy history was not preserved');
       await target.activateRelocation('move-secret', projectId, 'move-1');
@@ -349,12 +556,17 @@ export default {
       check((await target.session(login.cookie, "read", "", next)).status === 200, "Active session was not preserved");
       check((await target.login("source@example.test", "Example-password-123!", "192.0.2.2", next)).status === 200, "Migrated user cannot sign in");
       check((await other.login("concurrent@example.test", "Concurrent-password-123!", "192.0.2.3", otherRoute)).status === 200, "Other project was affected");
-      let second;
-      for (;;) {
-        second = await coordinator.advance("move-secret", origin, projectId, "move-2");
-        if (second.done) break;
-      }
-      check(second.generation === 3 && second.objectName !== "source" && second.objectName !== targetName, "Second move reused an owner or generation");
+      await registry.seedExistingIntentForTest(origin, projectId, 'move-2');
+      await rejectsWith(async () => {
+        for (let attempt = 0; attempt < 256; attempt++) {
+          const progress = await coordinator.advance("move-secret", origin, projectId, "move-2");
+          check(!progress.done, "Second move cut over without archive proof");
+        }
+        throw Error("Second move exceeded the coordinator advance limit");
+      }, "independent archive proof is not configured");
+      await registry.seedCommittedMoveForTest("move-secret", projectId, "move-2");
+      const second = await coordinator.advance("move-secret", origin, projectId, "move-2");
+      check(second.done && second.generation === 3 && second.objectName !== "source" && second.objectName !== targetName, "Second move reused an owner or generation");
       const latestRoute = { ...route, objectName: second.objectName, generation: 3 };
       const latest = env.OWNER.getByName(second.objectName);
       check((await latest.identity()) === projectId, "Second move changed project ID");
@@ -364,7 +576,7 @@ export default {
       check(history.length === 2 && history[0].move_id === "move-1" && history[1].move_id === "move-2" && history[1].generation === 2, "Move history was not preserved");
       check(JSON.stringify(await readEvidence()) === JSON.stringify(journal), "Earlier move evidence was not preserved");
       await rejectsWith(() => registry.beginRelocation("move-secret", origin, projectId, "move-1"), "Move ID already used");
-      return Response.json({ ok: true, tables: tables.length, users: movedCounts.users, events: movedCounts.events });
+      return Response.json({ ok: true, tables: tables.length, users: movedCounts.users, events: movedCounts.events, legacyJournalsRejected: true });
     } catch (error) { return Response.json({ error: String(error), stack: error?.stack }, { status: 500 }); }
   },
 };

@@ -1,4 +1,5 @@
 import { NextgenApplication } from '../worker/generated/recovery-batch-proof-object.js';
+export { ProjectRegistry } from '../worker/registry.js';
 const check = (v, message) => { if (!v) throw Error(message); };
 const reject = async (fn, expected) => { try { await fn(); } catch (error) { if (!expected || String(error).includes(expected)) return; throw error; } throw Error('Expected rejection'); };
 export class RecoveryBatchOwner extends NextgenApplication {
@@ -40,24 +41,33 @@ export default { async fetch(_request,env) {
   try {
     let owner=env.OWNER.getByName('one');
     const other=env.OWNER.getByName('other');
-    const otherProject=(await other.provision('Other project','https://other.example')).projectId;
-    await other.addUser('other@example.test','Other-password-123!');
-    const otherLogin=await other.login('other@example.test','Other-password-123!','192.0.2.2');
-    const otherHandoff=await other.testMintHandoff('other@example.test','Other-password-123!');
-    const otherAttempt=await other.testPrepareVerifiedAttempt('other@example.test','Other-password-123!');
+    const registry=env.PROJECT_REGISTRY.getByName('projects');
+    async function provision(instance, name, origin, objectName) {
+      await registry.reserve(origin, objectName);
+      const pending = {projectId:null, origin, objectName, generation:1};
+      const projectId = (await instance.provision(name, origin, pending)).projectId;
+      await registry.activate(origin, objectName, projectId);
+      return {projectId, origin, objectName, generation:1};
+    }
+    const otherRoute=await provision(other,'Other project','https://other.example','other');
+    const otherProject=otherRoute.projectId;
+    await other.addUser('other@example.test','Other-password-123!',otherRoute);
+    const otherLogin=await other.login('other@example.test','Other-password-123!','192.0.2.2',otherRoute);
+    const otherHandoff=await other.testMintHandoff('other@example.test','Other-password-123!',otherRoute);
+    const otherAttempt=await other.testPrepareVerifiedAttempt('other@example.test','Other-password-123!',otherRoute);
     check(otherLogin.status===200 && otherHandoff.status===200 && otherProject!==null,'other project fixture failed');
-    const projectId=(await owner.provision('Batch proof','https://one.example')).projectId;
-    await owner.addUser('one@example.test','Batch-password-123!');
-    const login=await owner.login('one@example.test','Batch-password-123!','192.0.2.1');
+    const route=await provision(owner,'Batch proof','https://one.example','one'), projectId=route.projectId;
+    await owner.addUser('one@example.test','Batch-password-123!',route);
+    const login=await owner.login('one@example.test','Batch-password-123!','192.0.2.1',route);
     check(login.status===200 && login.cookie,'login failed');
-    const handoff=await owner.testMintHandoff('one@example.test','Batch-password-123!');
-    const verified=await owner.testPrepareVerifiedAttempt('one@example.test','Batch-password-123!');
-    const control=await owner.testPrepareVerifiedAttempt('one@example.test','Batch-password-123!');
-    check((await owner.testResumeVerifiedAttempt(control.attemptId,control.challengeId,'Batch-password-123!','handoff')).status===200,'verified control attempt could not hand off');
+    const handoff=await owner.testMintHandoff('one@example.test','Batch-password-123!',route);
+    const verified=await owner.testPrepareVerifiedAttempt('one@example.test','Batch-password-123!',route);
+    const control=await owner.testPrepareVerifiedAttempt('one@example.test','Batch-password-123!',route);
+    check((await owner.testResumeVerifiedAttempt(control.attemptId,control.challengeId,'Batch-password-123!','handoff',route)).status===200,'verified control attempt could not hand off');
     check(handoff.status===200,'handoff failed');
     await owner.seed(projectId);
     const oversizedBefore=await owner.state(projectId);
-    await reject(()=>owner.testRecoveryBatch('recovery-one'), 'recovery ID exceeds limit or is invalid');
+    await reject(()=>owner.testRecoveryBatch('recovery-one',route), 'recovery ID exceeds limit or is invalid');
     check(JSON.stringify(await owner.state(projectId))===JSON.stringify(oversizedBefore),'oversized ID rejection committed data');
     await owner.removeOversizeForTest(projectId);
     let previous=await owner.state(projectId), failed=false, evicted=false, attemptAuditFailed=false, attemptDeleteFailed=false, completionArmed=false, completionFailed=false, calls=0;
@@ -65,19 +75,19 @@ export default { async fetch(_request,env) {
     while (calls++ < 400) {
       if (!failed && previous.sessions===1 && previous.checks===0 && previous.liveTokens===0) {
         await owner.failNextAudit(1);
-        await reject(()=>owner.testRecoveryBatch('recovery-one'));
+        await reject(()=>owner.testRecoveryBatch('recovery-one',route));
         const rolledBack=await owner.state(projectId);
         check(JSON.stringify(rolledBack)===JSON.stringify(previous),'audit failure committed partial recovery');
         failed=true;
       }
       if (failed && !completionArmed && previous.sessions===0 && previous.attempts===0) { await owner.failNextAudit(1); completionArmed=true; }
       if (!attemptDeleteFailed && previous.sessions===0 && await owner.nextAttemptHasNoChecks(projectId)) {
-        await owner.failNextAudit(1); await reject(()=>owner.testRecoveryBatch('recovery-one'));
+        await owner.failNextAudit(1); await reject(()=>owner.testRecoveryBatch('recovery-one',route));
         check(JSON.stringify(await owner.state(projectId))===JSON.stringify(previous),'attempt deletion audit failure committed changes');
         attemptDeleteFailed=true;
       }
       let result;
-      try { result=await owner.testRecoveryBatch('recovery-one'); } catch (error) {
+      try { result=await owner.testRecoveryBatch('recovery-one',route); } catch (error) {
         if (!completionArmed || completionFailed) throw error;
         check(JSON.stringify(await owner.state(projectId))===JSON.stringify(previous),'completion audit failure changed state');
         completionFailed=true; continue;
@@ -85,12 +95,12 @@ export default { async fetch(_request,env) {
       if (result.count!==undefined) check(result.count<=64,'batch bound exceeded');
       if (!attemptAuditFailed && result.phase==='attempt-checks') {
         const beforeAttemptFailure=await owner.state(projectId);
-        await owner.failNextAudit(1); await reject(()=>owner.testRecoveryBatch('recovery-one'));
+        await owner.failNextAudit(1); await reject(()=>owner.testRecoveryBatch('recovery-one',route));
         check(JSON.stringify(await owner.state(projectId))===JSON.stringify(beforeAttemptFailure),'attempt audit failure committed partial cleanup');
         attemptAuditFailed=true;
       }
       if (!evicted && result.phase==='checks') {
-        await reject(()=>owner.testRecoveryBatch('wrong-recovery'));
+        await reject(()=>owner.testRecoveryBatch('wrong-recovery',route));
         await reject(()=>owner.evict()); owner=env.OWNER.getByName('one'); evicted=true;
       }
       const current=await owner.state(projectId);
@@ -102,15 +112,15 @@ export default { async fetch(_request,env) {
     const final=await owner.state(projectId);
     check(final.sessions===0 && final.checks===0 && final.tokens===0 && final.pending===0 && final.attempts===0 && final.attemptChecks===0 && final.recovery===1,'invalidation incomplete');
     check(final.attemptAudit===expectedAttempts && final.attemptChecksAudit>=3,'attempt or challenge invalidation audit incomplete');
-    check((await owner.session(login.cookie,'read','')).status===401,'old session survived');
-    check((await owner.testExchangeHandoff(handoff.handoff)).status>=400,'old handoff survived');
-    check((await owner.testResumeVerifiedAttempt(verified.attemptId,verified.challengeId,'Batch-password-123!','handoff')).status>=400,'verified pre-handoff attempt resumed');
-    check((await owner.testResumeVerifiedAttempt(verified.attemptId,verified.challengeId,'Batch-password-123!','challenge')).status>=400,'old challenge resumed');
-    check((await other.session(otherLogin.cookie,'read','')).status===200,'other session was invalidated');
-    check((await other.testExchangeHandoff(otherHandoff.handoff)).status===200,'other handoff was invalidated');
-    check((await other.testResumeVerifiedAttempt(otherAttempt.attemptId,otherAttempt.challengeId,'Other-password-123!','handoff')).status===200,'other verified attempt was invalidated');
-    await reject(()=>owner.testRecoveryBatch('recovery-two'), 'conflicting recovery checkpoint');
-    const after=await owner.testRecoveryBatch('recovery-one');
+    check((await owner.session(login.cookie,'read','',route)).status===401,'old session survived');
+    check((await owner.testExchangeHandoff(handoff.handoff,route)).status>=400,'old handoff survived');
+    check((await owner.testResumeVerifiedAttempt(verified.attemptId,verified.challengeId,'Batch-password-123!','handoff',route)).status>=400,'verified pre-handoff attempt resumed');
+    check((await owner.testResumeVerifiedAttempt(verified.attemptId,verified.challengeId,'Batch-password-123!','challenge',route)).status>=400,'old challenge resumed');
+    check((await other.session(otherLogin.cookie,'read','',otherRoute)).status===200,'other session was invalidated');
+    check((await other.testExchangeHandoff(otherHandoff.handoff,otherRoute)).status===200,'other handoff was invalidated');
+    check((await other.testResumeVerifiedAttempt(otherAttempt.attemptId,otherAttempt.challengeId,'Other-password-123!','handoff',otherRoute)).status===200,'other verified attempt was invalidated');
+    await reject(()=>owner.testRecoveryBatch('recovery-two',route), 'conflicting recovery checkpoint');
+    const after=await owner.testRecoveryBatch('recovery-one',route);
     check(after.done && (await owner.state(projectId)).recovery===1,'retry duplicated completion audit');
     return Response.json({ok:true,calls,final});
   } catch(error) { return Response.json({error:String(error),stack:error?.stack},{status:500}); }

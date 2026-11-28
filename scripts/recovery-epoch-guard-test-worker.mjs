@@ -47,7 +47,7 @@ export class RecoveryRegistry extends ProjectRegistry {
     this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       sql.exec("INSERT INTO mapi_project_recoveries (project_id,recovery_id,origin,object_name,object_id,generation,epoch,phase,clock_highwater,clock_kind) VALUES (?, ?, ?, ?, ?, 1, ?, 'anchored', '9007199254740995', 'revision')", projectId, recoveryId, 'https://' + 'x'.repeat(size), 'o'.repeat(size), objectId, epoch);
-      sql.exec("INSERT INTO mapi_recovery_scope_progress VALUES (?, ?, NULL, 1, ?, 1)", projectId, recoveryId, 'a'.repeat(64));
+      sql.exec("INSERT INTO mapi_recovery_scope_progress VALUES (?, ?, ?, 1, ?, 1)", projectId, recoveryId, syntheticScope(projectId, 0), 'a'.repeat(64));
     });
   }
 }
@@ -203,7 +203,7 @@ export default {
         if (new TextEncoder().encode(JSON.stringify(sourcePage)).length > 128 * 1024 || sourcePage.rows.length > 64) throw Error('Recovery scope page exceeded bounds');
         sourceCursor = sourcePage.cursor;
       } while (!sourcePage.done);
-      await reject(() => registry.recoveryScopeSnapshot('secret', projectId, 'recovery-1'), 'Recovery scope anchor is incomplete');
+      await reject(() => registry.recoveryScopeSnapshot('secret', projectId, 'recovery-1'), 'Invalid recovery scope checkpoint');
       await reject(() => registry.captureRecoveryScopes('wrong', projectId, 'recovery-1'), 'Relocation control denied');
       const firstCapture = await registry.captureRecoveryScopes('secret', projectId, 'recovery-1');
       if (firstCapture.done || firstCapture.count < 1 || firstCapture.count > 64) throw Error('Recovery capture was not bounded');

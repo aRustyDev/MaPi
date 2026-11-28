@@ -22,15 +22,17 @@ const stubs={
   'login-ui.js':'renderLogin', 'flow-proxy.js':'handleFlowProxy', 'oauth-ingress.js':'handleOAuthIngress isOAuthRoute',
   'flow-diagnostics.js':'classifyFlowSubmission',
   'relocation-source-identity.js':'sourceIdentityMatches',
-  'relocation-manifest.js':'digestRelocationPage inspectRelocationDestination inspectRelocationSource prepareRelocationDestination restoreRelocationMetadata validateRelocationSourceSchema',
-  'relocation-chunks.js':'beginChunkExport beginChunkImport chunkImportStatus exportChunk importChunk',
+  'relocation-manifest.js':'digestRelocationPage inspectRelocationDestination inspectRelocationSource prepareRelocationDestination restoreRelocationMetadata validateRelocationSourceSchema validateSourceRecoveryEpoch',
+  'relocation-chunks.js':'beginChunkExport beginChunkImport chunkExportStatus chunkImportStatus exportChunk importChunk',
   'relocation-history.js':'destinationTransferHistory sourceTransferHistory transferHistoryStatus',
+  'relocation-values.js':`export const RELOCATION_TEXT_GUARD_VERSION=2; export const assertRelocationTextGuard=()=>{throw Error('Unexpected synthetic dependency')};`,
+  'relocation-text-preflight.js':'advanceRelocationTextPreflight',
   'recovery-scopes.js':'assertRecoveryEnvelope readOwnerRecoveryScopes recoveryPageDigest validRecoveryStamp validateRecoveryScope',
   'schema-migration.js':'authorizeSchemaMigration', 'login-throttle.js':'admitLogin', 'request-body.js':'readBoundedText',
   'relocation-coordinator.js':`export class RelocationCoordinator {}`,
 };
 const modules=[];
-for(const name of ['wasi.js','sql.js','runtime-diagnostics.js','owner-fence.js','recovery-epochs.js']) modules.push({type:'ESModule',path:`worker/${name}`,contents:await readFile(`worker/${name}`,'utf8')});
+for(const name of ['wasi.js','sql.js','runtime-diagnostics.js','owner-fence.js','recovery-epochs.js','relocation-text-marker.js']) modules.push({type:'ESModule',path:`worker/${name}`,contents:await readFile(`worker/${name}`,'utf8')});
 for(const [name,spec] of Object.entries(stubs)) modules.push({type:'ESModule',path:`worker/${name}`,contents:spec.includes('export ')?spec:spec.split(' ').map(x=>`export const ${x}=()=>{throw Error('Unexpected synthetic dependency')};`).join('\n')});
 modules.push({type:'ESModule',path:'worker/baseline-stub.js',contents:`export default ${await readFile('worker/generated/baseline.json','utf8')};`});
 modules.push({type:'ESModule',path:'worker/app.js',contents:app},{type:'CompiledWasm',path:'worker/owner.wasm',contents:wasm});

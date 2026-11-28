@@ -39,6 +39,19 @@ export class ManifestProject extends NextgenApplication {
     sql.exec('CREATE TABLE test_relocation_text (id INTEGER PRIMARY KEY, value TEXT)');
     sql.exec("INSERT INTO test_relocation_text VALUES (1, CAST(X'80' AS TEXT)), (2, CAST(X'EFBFBD' AS TEXT)), (3, 'é😀')");
   }
+  installLargeDigestFixtures(rowid, mutate = false) {
+    const sql = this.ctx.storage.sql;
+    sql.exec('CREATE TABLE test_large_reconcile (id TEXT PRIMARY KEY, value TEXT, data BLOB, number INTEGER)');
+    const value = 'a'.repeat(65535) + 'é😀' + 'z'.repeat(180000) + (mutate ? 'x' : 'y');
+    const data = new Uint8Array(150000); for (let i = 0; i < data.length; i++) data[i] = i % 251;
+    sql.exec('INSERT INTO test_large_reconcile(rowid, id, value, data, number) VALUES (?, ?, ?, ?, 9223372036854775807)', rowid, 'key', value, data.buffer);
+  }
+  installOversizedDigestSchema() {
+    const sql = this.ctx.storage.sql;
+    sql.exec('CREATE TABLE test_oversized_identifier (id INTEGER PRIMARY KEY, ' + quote('x'.repeat(1025)) + ' TEXT)');
+    sql.exec('CREATE TABLE test_oversized_definition (' + ' '.repeat(17000) + 'id INTEGER PRIMARY KEY)');
+  }
+  alterLargeDigestFixture() { this.ctx.storage.sql.exec("UPDATE test_large_reconcile SET value = CAST(CAST(value AS BLOB) || X'80' AS TEXT)"); }
   installRealDigestFixtures() {
     this.ctx.storage.sql.exec('CREATE TABLE test_real_infinity (id INTEGER PRIMARY KEY, value REAL)');
     this.ctx.storage.sql.exec('INSERT INTO test_real_infinity VALUES (1, 1e999), (2, -1e999)');
@@ -83,6 +96,9 @@ export class ManifestProject extends NextgenApplication {
     else if (kind === 'principal') sql.exec("UPDATE authz_assignments SET principal_type = 'user', principal_id = 'missing' WHERE project_id = ?", projectId);
     else if (kind === 'global') sql.exec("INSERT INTO event_sinks (id,type,scope,enabled) VALUES ('sink','http','global',0)");
     else if (kind === 'origin') sql.exec("UPDATE mapi_project_origin SET origin='https://wrong.example'");
+    else if (kind === 'epoch-invalid') sql.exec("UPDATE mapi_recovery_epoch SET epoch=CAST(X'80' AS TEXT)");
+    else if (kind === 'epoch-oversized') sql.exec("UPDATE mapi_recovery_epoch SET epoch=?", 'x'.repeat(129));
+    else if (kind === 'epoch-blob') sql.exec("UPDATE mapi_recovery_epoch SET epoch=X'30'");
     else if (kind === 'issuer-foreign') sql.exec("UPDATE mapi_oauth_codes SET project_id='foreign'");
     else if (kind === 'issuer-index') sql.exec('DROP INDEX mapi_fapi_reload_expiry');
     else if (kind === 'issuer-schema') sql.exec('ALTER TABLE mapi_oauth_codes ADD COLUMN extra TEXT');
@@ -115,7 +131,7 @@ export default {
     try {
       const origin = 'https://manifest.example';
       const registry = env.PROJECT_REGISTRY.getByName('projects');
-      const source = env.PROJECT.getByName('source');
+      let source = env.PROJECT.getByName('source');
       let target = env.PROJECT.getByName('target');
       await registry.reserve(origin, 'source');
       const projectId = (await source.provision('Manifest project', origin, { projectId: null, origin, objectName: 'source', generation: 1 })).projectId;
@@ -191,6 +207,7 @@ export default {
         ['unknown', 'Unreviewed schema object'], ['hidden', 'Unreviewed schema object'], ['sqlite-prefix', 'Unreviewed schema object'],
         ['schema', 'Unreviewed schema object'], ['principal', 'Unresolved or unsupported assignment'],
         ['global', 'Foreign or global row'], ['origin', 'Project origin differs'],
+        ['epoch-invalid', 'Invalid recovery epoch'], ['epoch-oversized', 'Invalid recovery epoch'], ['epoch-blob', 'Invalid recovery epoch'],
         ['issuer-foreign', 'Foreign or global row'], ['issuer-index', 'Missing issuer index'],
         ['issuer-schema', 'Issuer schema differs'], ['issuer-prompt', 'Unresolved FAPI prompt'],
         ['clock-empty', 'Invalid revision clock'], ['clock-text', 'Invalid revision clock'], ['clock-multiple', 'Invalid revision clock'],
@@ -222,6 +239,42 @@ export default {
       await reject(() => source.digest(textManifest, 'source', 'test_relocation_text', null), 'Invalid UTF-8 TEXT');
       const validTextDigest = await source.digest(textManifest, 'source', 'test_relocation_text', [{ integer: '1' }]);
       check(validTextDigest.count === 2 && validTextDigest.done === true, 'valid TEXT digest was rejected');
+      await source.installLargeDigestFixtures(3);
+      await target.installLargeDigestFixtures(9);
+      const largeManifest = { version: 1, ...route, moveId: 'move', tables: ['test_large_reconcile'] };
+      let largeCursor = null, slices = 0;
+      for (;;) {
+        const left = await source.digest(largeManifest, 'source', 'test_large_reconcile', largeCursor);
+        const right = await target.digest(largeManifest, 'destination', 'test_large_reconcile', largeCursor);
+        check(JSON.stringify(left) === JSON.stringify(right), 'Large reconciliation slice differed across rowids');
+        slices++;
+        if (left.done) break;
+        check(slices < 30, 'Large reconciliation did not finish');
+        largeCursor = left.cursor;
+        if (slices === 3) {
+          try { await source.evict(); } catch {}
+          try { await target.evict(); } catch {}
+          source = env.PROJECT.getByName('source'); target = env.PROJECT.getByName('target');
+        }
+      }
+      check(slices > 5, 'Large reconciliation did not use bounded slices');
+      await target.alterLargeDigestFixture();
+      let changed = false, invalid = false; largeCursor = null;
+      for (let index = 0; index < 30; index++) {
+        const left = await source.digest(largeManifest, 'source', 'test_large_reconcile', largeCursor);
+        try {
+          const right = await target.digest(largeManifest, 'destination', 'test_large_reconcile', largeCursor);
+          if (JSON.stringify(left) !== JSON.stringify(right)) changed = true;
+        } catch (error) { if (!String(error).includes('Invalid UTF-8 TEXT')) throw error; invalid = true; break; }
+        if (left.done) break;
+        largeCursor = left.cursor;
+      }
+      check(changed && invalid, 'Malformed or changed large TEXT was not rejected');
+      await source.installOversizedDigestSchema();
+      for (const table of ['test_oversized_identifier', 'test_oversized_definition']) {
+        const badSchemaManifest = { version: 1, ...route, moveId: 'move', tables: [table] };
+        await reject(() => source.digest(badSchemaManifest, 'source', table, null), 'Invalid reconciliation schema');
+      }
       await source.installRealDigestFixtures();
       const realManifest = { version: 1, ...route, moveId: 'move', tables: ['test_real_infinity', 'test_real_null'] };
       await reject(() => source.digest(realManifest, 'source', 'test_real_infinity', null), 'Non-finite REAL');

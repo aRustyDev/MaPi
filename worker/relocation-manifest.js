@@ -2,12 +2,14 @@
 // baseline. Control calls that use it must be private and authenticated.
 import baseline from './generated/baseline.json';
 import issuerSchema from './relocation-issuer-schema.json';
-import { execute, readRelocationRow } from './sql.js';
+import { assertRelocationTableText, execute, readRelocationRow } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { sourceIdentityMatches } from './relocation-source-identity.js';
 import { assertRelocationValuesRepresentable, RELOCATION_RECONCILIATION_VERSION } from './relocation-values.js';
 import { readOwnerRecoveryScopes, validRecoveryStamp } from './recovery-scopes.js';
 import { readRelocationSequences } from './relocation-sequences.js';
+import { readTextPreflightMarker } from './relocation-text-marker.js';
+import { validReconciliationCursor, validReconciliationKeys, consumeReconciliationUtf8 } from './relocation-reconcile-cursor.js';
 
 const SHARED_TABLES = new Set([
   'authz_bundle_members', 'authz_bundles', 'authz_catalogs',
@@ -32,7 +34,8 @@ const CONTROL_TABLES = new Set([
   'mapi_owner_fence', 'mapi_destination_reservation', 'mapi_relocation_project',
   'mapi_relocation_prepared', 'mapi_chunk_export', 'mapi_chunk_export_data',
   'mapi_chunk_import', 'mapi_chunk_import_data', 'mapi_chunk_import_fragment',
-  'mapi_chunk_import_fragment_data',
+  'mapi_chunk_import_fragment_data', 'mapi_chunk_import_stream', 'mapi_chunk_import_stream_data',
+  'mapi_relocation_text_preflight_seal',
 ]);
 const ISSUER_SINGLETONS = new Set(['mapi_oauth_schema', 'mapi_private_par_schema', 'mapi_fapi_prompts']);
 const quote = name => '"' + name.replaceAll('"', '""') + '"';
@@ -57,7 +60,7 @@ function schemaObjects(storage, expected) {
   // Bound data returned to JS even when a corrupt or unreviewed schema has
   // many objects or unusually large definitions. The count accommodates all
   // reviewed object names, including optional issuer and control objects.
-  const maxObjects = expected.length + issuerSchema.length + RUNTIME_TABLES.size + CONTROL_TABLES.size;
+  const maxObjects = expected.length + issuerSchema.length + RUNTIME_TABLES.size + CONTROL_TABLES.size + 1;
   const encoder = new TextEncoder();
   const maxDefinitionBytes = Math.max(16 * 1024, ...expected.map(item => encoder.encode(item.sql).length), ...issuerSchema.map(item => encoder.encode(item.sql).length), ...Object.values(RUNTIME_SCHEMA).map(sql => encoder.encode(sql).length));
   const maxIdentifierBytes = 1024;
@@ -83,6 +86,10 @@ function schemaInventory(storage) {
   }
   for (const item of actual) {
     if (expectedNames.has(item.name)) continue;
+    if (item.name === 'mapi_relocation_text_preflight_marker') {
+      if (item.type !== 'view' || readTextPreflightMarker(storage) === null) throw Error('Invalid TEXT preflight marker');
+      continue;
+    }
     const issuer = issuerObjects.get(item.name);
     if (issuer) {
       if (issuer.type !== item.type || issuer.tbl_name !== item.tbl_name || issuer.sql !== item.sql) throw Error(`Issuer schema differs: ${item.name}`);
@@ -106,14 +113,23 @@ function schemaInventory(storage) {
 }
 
 // Advisory schema check before the fence; full inspection repeats after freezing.
-export function validateRelocationSourceSchema(storage, route) {
-  const metadata = readSourceSchemaMetadata(storage, schemaInventory(storage));
+export function validateRelocationSourceSchema(storage, route, { textGuard = false } = {}) {
+  const schema = schemaInventory(storage);
+  const metadata = readSourceSchemaMetadata(storage, schema);
   validateSourceRecoveryEpoch(storage);
   validateSourceOrigin(storage, route.origin);
   validateSourceProjectIdentity(storage, route.projectId);
   assertSourceSchemaHistory(metadata);
   if (metadata.clockPresent) validateSourceClockRecord(storage);
   assertSourceClockPair(metadata);
+  if (!textGuard) validateSourceText(storage, schema);
+  return schema.filter(item => item.type === 'table').map(item => item.name);
+}
+
+function validateSourceText(storage, schema) {
+  for (const { type, name } of schema) {
+    if (type === 'table') assertRelocationTableText(storage, name);
+  }
 }
 
 // A single-project owner must not freeze until its two project identities
@@ -123,10 +139,16 @@ function validateSourceProjectIdentity(storage, projectId) {
   if (!sourceIdentityMatches(storage, 'owner', projectId)) throw Error('Owner project identity differs');
 }
 
-function validateSourceRecoveryEpoch(storage) {
-  const epochs = storage.sql.exec('SELECT epoch FROM mapi_recovery_epoch LIMIT 2').toArray();
-  if (epochs.length !== 1 || typeof epochs[0].epoch !== 'string' || !epochs[0].epoch) throw Error('Invalid recovery epoch');
-  return epochs[0].epoch;
+export function validateSourceRecoveryEpoch(storage) {
+  const epochs = storage.sql.exec(`SELECT CASE
+    WHEN typeof(epoch) = 'text' AND length(CAST(epoch AS BLOB)) BETWEEN 1 AND 128
+    THEN CAST(epoch AS BLOB) END AS bytes FROM mapi_recovery_epoch LIMIT 2`).toArray();
+  if (epochs.length !== 1 || epochs[0].bytes === null) throw Error('Invalid recovery epoch');
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(epochs[0].bytes);
+  } catch {
+    throw Error('Invalid recovery epoch');
+  }
 }
 
 function validateSourceOrigin(storage, origin) {
@@ -292,14 +314,15 @@ export function prepareRelocationDestination(storage, manifest, route) {
 }
 
 // Call after all writers have adopted the fence and the source has frozen.
-export function inspectRelocationSource(storage, route, moveId) {
+export function inspectRelocationSource(storage, route, moveId, { textGuard = false } = {}) {
   return storage.transactionSync(() => {
     assertSourceFence(storage, route, moveId);
     const schema = schemaInventory(storage);
+    const recoveryEpoch = validateSourceRecoveryEpoch(storage);
+    if (!textGuard) validateSourceText(storage, schema);
     const pinnedTables = schema.filter(item => item.type === 'table' && !RUNTIME_TABLES.has(item.name)).map(item => item.name);
     validateOwnership(storage, route.projectId, pinnedTables);
     const { schemaVersion, historyPresent, clockPresent, scopesPresent } = readSourceSchemaMetadata(storage, schema);
-    const recoveryEpoch = validateSourceRecoveryEpoch(storage);
     validateSourceOrigin(storage, route.origin);
     assertSourceSchemaHistory({ schemaVersion, historyPresent });
     if (clockPresent) validateSourceClockRecord(storage);
@@ -352,41 +375,98 @@ export function inspectRelocationDestination(storage, manifest) {
   });
 }
 
-// Reconcile one bounded page without returning project records to the caller.
-// Repeating a page with the same cursor returns the same count and digest.
+// Pages are either bounded ordinary rows or a single bounded cell slice.
+// Large-row progress contains keysets, column and UTF-8 continuation state,
+// never a source rowid: corresponding owners can have different rowids.
 export async function digestRelocationPage(storage, manifest, role, table, cursor = null) {
-  if (!manifest || manifest.version !== 1 || !manifest.tables.includes(table) || !['source', 'destination'].includes(role)) throw Error('Invalid reconciliation request');
+  if (!manifest || manifest.version !== 1 || !manifest.tables.includes(table) || !['source', 'destination'].includes(role) || !validReconciliationCursor(cursor)) throw Error('Invalid reconciliation request');
   const assertFence = () => role === 'source'
     ? assertSourceFence(storage, { projectId: manifest.projectId, origin: manifest.origin, objectName: manifest.objectName, generation: manifest.generation }, manifest.moveId)
     : assertDestinationFence(storage, manifest);
   const page = storage.transactionSync(() => {
     assertFence();
-    const info = storage.sql.exec(`PRAGMA table_xinfo(${quote(table)})`).toArray();
+    // A damaged schema must not cause unbounded metadata or SQL text to cross
+    // the bridge. Read only needed columns with bounded name bytes and rows.
+    const rawInfo = storage.sql.exec(`SELECT CASE WHEN typeof(name) = 'text' AND length(CAST(name AS BLOB)) BETWEEN 1 AND 1024 THEN CAST(name AS BLOB) END AS name, pk, hidden FROM pragma_table_xinfo(?) LIMIT 101`, table).toArray();
+    if (!rawInfo.length || rawInfo.length > 100) throw Error('Invalid reconciliation schema');
+    const info = rawInfo.map(column => {
+      if (!(column.name instanceof ArrayBuffer) || !Number.isInteger(column.pk) || column.pk < 0 || column.pk > 100 || !Number.isInteger(column.hidden) || column.hidden < 0 || column.hidden > 3) throw Error('Invalid reconciliation schema');
+      let name; try { name = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(column.name); } catch { throw Error('Invalid reconciliation schema'); }
+      return { name, pk: column.pk, hidden: column.hidden };
+    });
     const names = info.filter(column => column.hidden === 0).map(column => column.name);
     const keys = info.filter(column => column.pk > 0).sort((a, b) => a.pk - b.pk).map(column => column.name);
-    if (!keys.length || (cursor !== null && (!Array.isArray(cursor) || cursor.length !== keys.length))) throw Error('Invalid reconciliation cursor');
-    const definition = first(storage, "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?", table)?.sql ?? '';
+    if (!keys.length || names.length > 100 || keys.some(key => !names.includes(key))) throw Error('Invalid reconciliation schema');
+    const isSlice = cursor !== null && !Array.isArray(cursor);
+    let current = isSlice ? cursor.after : cursor;
+    if (current !== null && current.length !== keys.length || isSlice && (cursor.key.length !== keys.length || cursor.column >= names.length)) throw Error('Invalid reconciliation cursor');
+    const definitions = storage.sql.exec("SELECT CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 16384 THEN CAST(sql AS BLOB) END AS ddl FROM sqlite_schema WHERE type = 'table' AND name = ? LIMIT 2", table).toArray();
+    if (definitions.length !== 1 || !(definitions[0].ddl instanceof ArrayBuffer)) throw Error('Invalid reconciliation schema');
+    let definition; try { definition = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(definitions[0].ddl); } catch { throw Error('Invalid reconciliation schema'); }
     const order = keys.map(key => quote(key) + (/\bCOLLATE\b/i.test(definition) ? ' COLLATE BINARY' : '')).join(', ');
     const rows = [];
-    let current = cursor;
-    let done = false;
-    let size = 0;
+    let size = 0, done = false;
     for (let i = 0; i < 64; i++) {
       const where = current ? ` WHERE (${order}) > (${keys.map(() => '?').join(', ')})` : '';
       const source = `FROM ${quote(table)}${where} ORDER BY ${order} LIMIT 1`;
-      const row = readRelocationRow(storage, names, source, current ? toArgs(current) : []);
-      if (!row) { done = true; break; }
+      const args = current ? toArgs(current) : [];
+      // One bounded descriptor per column; avoid pulling any complete TEXT or
+      // BLOB across the JS bridge merely to decide whether the row is large.
+      const descriptor = names.map(name => `json_array(typeof(${quote(name)}),CASE WHEN typeof(${quote(name)}) IN ('text','blob') THEN octet_length(${quote(name)}) ELSE 8 END)`).join(', ');
+      const result = execute(storage, { statement: `SELECT ${descriptor} ${source}`, args, query: true }).rows;
+      if (!result.length) { if (isSlice) throw Error('Reconciliation row changed'); done = true; break; }
+      const kinds = result[0].map(value => {
+        let data; try { data = JSON.parse(value); } catch { throw Error('Invalid reconciliation descriptor'); }
+        if (!Array.isArray(data) || data.length !== 2 || !['null','integer','real','text','blob'].includes(data[0]) || !Number.isSafeInteger(data[1]) || data[1] < 0 || data[1] > 8388608) throw Error('Invalid reconciliation descriptor');
+        return data;
+      });
+      const keyBytes = keys.reduce((total, key) => total + kinds[names.indexOf(key)][1], 0);
+      if (keyBytes > 4096) throw Error('Reconciliation primary key exceeds limit');
+      const nextKey = readRelocationRow(storage, keys, source, args);
+      if (!validReconciliationKeys(nextKey)) throw Error('Invalid reconciliation primary key');
+      const large = kinds.reduce((total, item) => total + item[1], 0) > 32768;
+      if (isSlice || large) {
+        if (rows.length) break;
+        const state = isSlice ? { ...cursor } : { v: 1, after: current, key: nextKey, column: 0, offset: 0, remaining: 0, minimum: 128, maximum: 191 };
+        if (JSON.stringify(state.key) !== JSON.stringify(nextKey)) throw Error('Reconciliation row changed');
+        const [kind, total] = kinds[state.column], column = quote(names[state.column]);
+        if (state.offset > total || (state.offset > 0 && state.offset === total) || (kind !== 'text' && (state.remaining || state.minimum !== 128 || state.maximum !== 191))) throw Error('Invalid reconciliation offset');
+        let value, end;
+        if (kind === 'text' || kind === 'blob') {
+          const amount = Math.min(64 * 1024, total - state.offset);
+          const slice = execute(storage, { statement: `SELECT substr(CAST(${column} AS BLOB), ${state.offset + 1}, ${amount}) ${source}`, args, query: true }).rows;
+          if (slice.length !== 1 || !slice[0][0] || typeof slice[0][0].blob !== 'string') throw Error('Invalid reconciliation slice');
+          value = slice[0][0].blob;
+          let raw; try { raw = Uint8Array.fromBase64(value); } catch { throw Error('Invalid reconciliation slice'); }
+          if (raw.length !== amount) throw Error('Invalid reconciliation slice');
+          if (kind === 'text') consumeReconciliationUtf8(state, raw);
+          end = state.offset + amount;
+          if (end === total && state.remaining) throw Error('Invalid UTF-8 TEXT in relocation row');
+        } else {
+          if (state.offset !== 0) throw Error('Invalid reconciliation offset');
+          const result = execute(storage, { statement: `SELECT ${column} ${source}`, args, query: true }).rows;
+          if (result.length !== 1) throw Error('Reconciliation row changed');
+          value = result[0][0];
+          assertRelocationValuesRepresentable([value]);
+          end = total;
+        }
+        const payload = { table, columns: names, key: state.key, column: state.column, kind, total, offset: state.offset, value };
+        let next;
+        if (end === total) {
+          state.column++; state.offset = 0; state.remaining = 0; state.minimum = 128; state.maximum = 191;
+          next = state.column === names.length ? state.key : state;
+        } else { state.offset = end; next = state; }
+        return { payload, cursor: next, count: Array.isArray(next) ? 1 : 0, done: false };
+      }
+      const row = readRelocationRow(storage, names, source, args);
       assertRelocationValuesRepresentable(row);
       const encodedSize = new TextEncoder().encode(JSON.stringify(row)).length;
       if (rows.length && size + encodedSize > 128 * 1024) break;
-      rows.push(row);
-      size += encodedSize;
-      current = keys.map(key => row[names.indexOf(key)]);
-      if (current.some(value => value === null)) throw Error('Null reconciliation primary key');
+      rows.push(row); size += encodedSize; current = nextKey;
     }
-    return { table, columns: names, rows, cursor: current, done };
+    return { payload: { table, columns: names, rows }, cursor: current, count: rows.length, done };
   });
-  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ table: page.table, columns: page.columns, rows: page.rows })));
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(page.payload)));
   storage.transactionSync(assertFence);
-  return { guardVersion: RELOCATION_RECONCILIATION_VERSION, count: page.rows.length, cursor: page.cursor, done: page.done, digest: [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
+  return { guardVersion: RELOCATION_RECONCILIATION_VERSION, count: page.count, cursor: page.cursor, done: page.done, digest: [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
 }
