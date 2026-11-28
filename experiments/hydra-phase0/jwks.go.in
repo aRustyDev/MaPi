@@ -1,0 +1,7 @@
+package jwk
+
+import "net/http"
+
+func Phase0JWKS(registry InternalRegistry) http.Handler {
+	return http.HandlerFunc(NewHandler(registry).discoverJsonWebKeys)
+}

@@ -1,0 +1,15 @@
+package consent
+
+import "net/http"
+
+// Phase0Admin exposes only the login and consent operations needed by the
+// privately bound staging adapter.
+func Phase0Admin(registry InternalRegistry) http.Handler {
+	h := NewHandler(registry)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /admin"+LoginPath, h.getOAuth2LoginRequest)
+	mux.HandleFunc("PUT /admin"+LoginPath+"/accept", h.acceptOAuth2LoginRequest)
+	mux.HandleFunc("GET /admin"+ConsentPath, h.getOAuth2ConsentRequest)
+	mux.HandleFunc("PUT /admin"+ConsentPath+"/accept", h.acceptOAuth2ConsentRequest)
+	return mux
+}

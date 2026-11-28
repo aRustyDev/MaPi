@@ -1,0 +1,50 @@
+package oauth2
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/ory/hydra/v2/fosite"
+)
+
+type phase0FenceKey struct{}
+
+// Phase0RefreshFence wraps only a refresh request after Hydra has authenticated
+// its client and recovered the original grant ID from the refresh token.
+type Phase0RefreshFence struct {
+	Begin        func(context.Context, string, string) (bool, error)
+	Receipt      func(context.Context) (bool, error)
+	BeforeCommit func() error
+	Release      func(context.Context) (bool, error)
+}
+
+func WithPhase0RefreshFence(ctx context.Context, fence *Phase0RefreshFence) context.Context {
+	return context.WithValue(ctx, phase0FenceKey{}, fence)
+}
+
+func phase0RefreshFence(ctx context.Context, request fosite.AccessRequester) *Phase0RefreshFence {
+	if !request.GetGrantTypes().ExactOne(string(fosite.GrantTypeRefreshToken)) {
+		return nil
+	}
+	fence, _ := ctx.Value(phase0FenceKey{}).(*Phase0RefreshFence)
+	return fence
+}
+
+func phase0FenceError(ok bool, err error) error {
+	if err != nil {
+		return fosite.ErrServerError
+	}
+	if !ok {
+		return fosite.ErrInvalidGrant
+	}
+	return nil
+}
+
+// Phase0Routes exposes the pinned handlers to the test host.
+func Phase0Routes(registry InternalRegistry) http.Handler {
+	h := NewHandler(registry)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+WellKnownPath, h.discoverOidcConfiguration)
+	mux.HandleFunc("POST "+TokenPath, h.oauth2TokenExchange)
+	return mux
+}

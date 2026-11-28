@@ -1,0 +1,9 @@
+package oauth2
+
+import "net/http"
+
+// Phase0Authorization exposes the pinned public authorization handler to
+// MaPi's private Worker entrypoint.
+func Phase0Authorization(registry InternalRegistry) http.Handler {
+	return http.HandlerFunc(NewHandler(registry).oAuth2Authorize)
+}
