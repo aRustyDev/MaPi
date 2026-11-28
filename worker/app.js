@@ -7,7 +7,7 @@ import { canonicalOrigin, ProjectRegistry } from "./registry.js";
 import { renderLogin } from "./login-ui.js";
 import { handleFlowProxy } from "./flow-proxy.js";
 import { handleOAuthIngress, isOAuthRoute } from "./oauth-ingress.js";
-import { logOverload, logReactorLifecycle, observeWasmHighWater } from "./runtime-diagnostics.js";
+import { logOverload, logReactorLifecycle, logRuntimeDiagnostic, logRuntimeError, observeWasmHighWater } from "./runtime-diagnostics.js";
 import { classifyFlowSubmission } from "./flow-diagnostics.js";
 import { assertOwnerFence, createOwnerFenceTable, freezeOwnerFence, initializeOwnerFence, reserveMoveDestination, retireOwnerFence, withOwnerFence } from "./owner-fence.js";
 import { sourceIdentityMatches } from "./relocation-source-identity.js";
@@ -106,7 +106,7 @@ export class NextgenApplication extends DurableObject {
       const epochs = epochTable ? ctx.storage.sql.exec("SELECT epoch FROM mapi_recovery_epoch LIMIT 2").toArray() : [];
       if (epochs.length !== 1 || epochs[0].epoch !== this.#recoveryObjectEpoch) return;
     }
-    if (env.MAPI_RUNTIME_DIAGNOSTICS === "1") console.log(JSON.stringify({ event: "mapi.owner.boot", bootId: this.#bootId, objectId: ctx.id.toString() }));
+    if (env.MAPI_RUNTIME_DIAGNOSTICS === "1") logRuntimeDiagnostic({ event: "mapi.owner.boot", bootId: this.#bootId, objectId: ctx.id.toString() });
     const hasReservation = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_destination_reservation'").toArray().length > 0;
     if (hasReservation && ctx.storage.sql.exec("SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1").toArray().length) return;
     const hasImportMetadata = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_relocation_project'").toArray().length > 0;
@@ -655,7 +655,7 @@ export class NextgenApplication extends DurableObject {
                 result = withOwnerFence(this.ctx.storage, this.#authority, () => { this.#assertRecoveryObjectEpoch(); return execute(this.ctx.storage, query); });
               }
             } catch (error) {
-              if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite bridge:", query.statement, String(error));
+              if (this.env.MAPI_LOCAL_TEST === "1") logRuntimeError("SQLite bridge:", query.statement, String(error));
               result = { error: sqliteError(error) };
             }
             output = encoder.encode(stringifySQLResponse(result));
@@ -679,7 +679,7 @@ export class NextgenApplication extends DurableObject {
               return 0;
             } catch (error) {
               if (error === rejected) return 1;
-              if (this.env.MAPI_LOCAL_TEST === "1") console.error("SQLite commit:", String(error));
+              if (this.env.MAPI_LOCAL_TEST === "1") logRuntimeError("SQLite commit:", String(error));
               return 2;
             }
           },
@@ -738,9 +738,9 @@ export class NextgenApplication extends DurableObject {
     } catch (error) {
       this.#sampleWasmMemory();
       const fatal = this.#wasmDiagnostic.match(/(?:^|\n)fatal error: ([^\n]+)/)?.[1];
-      if (fatal) console.error("Go/Wasm runtime:", fatal);
+      if (fatal) logRuntimeError("Go/Wasm runtime:", fatal);
       if (this.env.MAPI_LOCAL_TEST === "1" && this.#wasmDiagnostic) {
-        console.error("Go/Wasm diagnostic:", this.#wasmDiagnostic.slice(0, 1400));
+        logRuntimeError("Go/Wasm diagnostic:", this.#wasmDiagnostic.slice(0, 1400));
       }
       this.#reactor = undefined;
       this.#memory = undefined;
@@ -776,7 +776,7 @@ export class NextgenApplication extends DurableObject {
       return this.#call("mapi_request", request);
     } catch (error) {
       this.#reactor = undefined;
-      if (this.env.MAPI_LOCAL_TEST === "1") console.error("Go reactor:", String(error));
+      if (this.env.MAPI_LOCAL_TEST === "1") logRuntimeError("Go reactor:", String(error));
       return { status: 503, headers: {}, body: null };
     }
   }
@@ -825,7 +825,7 @@ export class NextgenApplication extends DurableObject {
     if (this.env.MAPI_RUNTIME_DIAGNOSTICS === "1" && request.method === "POST" && /^\/api\/v1\/flows\/flow_[A-Za-z0-9_-]+\/submit$/.test(url.pathname)) {
       let kind = "other";
       try { kind = classifyFlowSubmission(url.pathname, decoder.decode(Uint8Array.fromBase64(request.body))) ?? "other"; } catch {}
-      console.log(JSON.stringify({ event: "mapi.flow.submit", kind, bootId: this.#bootId }));
+      logRuntimeDiagnostic({ event: "mapi.flow.submit", kind, bootId: this.#bootId });
     }
     return this.#call("mapi_request", request);
   }
@@ -1291,7 +1291,7 @@ export default {
         await registry.activate(origin, reserved.object_name, result.projectId);
         return Response.json({ projectId: result.projectId, origin }, { headers: noStore });
       } catch (error) {
-        console.error("Project initialization failed", error.code ?? "internal error");
+        logRuntimeError("Project initialization failed", error.code ?? "internal error");
         return new Response(null, { status: 503, headers: noStore });
       }
     }
@@ -1432,7 +1432,7 @@ export default {
           await registry.activate(route.origin, route.object_name, result.projectId);
           return Response.json(result, { headers: { "cache-control": "no-store" } });
         } catch (error) {
-          console.error("Project initialization failed", String(error));
+          logRuntimeError("Project initialization failed", String(error));
           return new Response(null, { status: 503, headers: { "cache-control": "no-store" } });
         }
       }
@@ -1448,7 +1448,7 @@ export default {
         } catch (error) {
           if (!(await ownerRouteStillAvailable(registry, object, route, ownerRoute))) return new Response(null, { status: 503, headers: noStore });
           if (error.code === "user.already_exists") return new Response(null, { status: 409, headers: noStore });
-          console.error("User creation failed", error.code ?? "internal error");
+          logRuntimeError("User creation failed", error.code ?? "internal error");
           return new Response(null, { status: 400, headers: noStore });
         }
       }
