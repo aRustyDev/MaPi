@@ -177,6 +177,15 @@ function validateImportCheckpoint(storage, id, checkpoint, project, tables) {
   if (fragment.row_offset !== checkpoint.row_offset || !Number.isSafeInteger(fragment.total) || fragment.total <= 0 || fragment.total > MAX_BYTES || !Number.isSafeInteger(fragment.next_offset) || fragment.next_offset <= 0 || fragment.next_offset >= fragment.total || !Number.isSafeInteger(pieces.chunk_index) || pieces.chunk_index !== checkpoint.next_chunk - 1 || !Number.isSafeInteger(pieces.size) || pieces.size <= 0 || pieces.size > FRAGMENT_BYTES || fragment.next_offset < pieces.size || !keys.length || !Array.isArray(cursor) || cursor.length !== keys.length || cursor.some(value => value === null)) throw Error('Import fragment checkpoint is inconsistent');
  }
 }
+// The owner can bind each storage transaction to its independently configured
+// recovery epoch. Never accept an async authority callback: it would return
+// before the guarded transaction completed.
+function checkAuthority(assertAuthority) {
+ if (typeof assertAuthority !== 'function') throw Error('Invalid relocation authority check');
+ const result = assertAuthority();
+ if (result !== null && (typeof result === 'object' || typeof result === 'function') && typeof result.then === 'function') throw Error('Relocation authority check must be synchronous');
+}
+
 function validFence(storage, id, generation, move) {
  const hasOwnerFence = one(storage, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'");
  const state = hasOwnerFence ? one(storage, 'SELECT project_id, generation, state, move_id, digest, object_name FROM mapi_owner_fence WHERE singleton = 1') : projectFenceStatus(storage, id);
@@ -185,9 +194,10 @@ function validFence(storage, id, generation, move) {
  if (state.project_id !== id) throw Error('Source project identity mismatch');
  return { ...state, ownerFence: Boolean(hasOwnerFence) };
 }
-export function beginChunkExport(storage, id, generation, move, tables) {
+export function beginChunkExport(storage, id, generation, move, tables, assertAuthority = () => {}) {
  validateTables(tables);
  return storage.transactionSync(() => {
+  checkAuthority(assertAuthority);
   schema(storage);
   validFence(storage, id, generation, move);
   const previous = exportCheckpoint(storage, id);
@@ -207,9 +217,10 @@ export function beginChunkExport(storage, id, generation, move, tables) {
 
 // At most one durable chunk is prepared without a digest at any time. A retry
 // computes the same digest over that persisted content before moving its cursor.
-export async function exportChunk(storage, id, generation, move, index, failAfterReserve = false) {
+export async function exportChunk(storage, id, generation, move, index, failAfterReserve = false, assertAuthority = () => {}) {
  if (!Number.isSafeInteger(index) || index < 0) throw Error('Invalid chunk index');
  const content = storage.transactionSync(() => {
+  checkAuthority(assertAuthority);
   validFence(storage, id, generation, move);
   const c = exportCheckpoint(storage, id);
   if (!c || c.generation !== generation || c.move_id !== move || index > c.next_chunk) throw Error('Export cursor mismatch');
@@ -294,6 +305,7 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
  if (failAfterReserve) throw Error('Injected export interruption');
  const digest = await hash(content);
  storage.transactionSync(() => {
+  checkAuthority(assertAuthority);
   const state = validFence(storage, id, generation, move), c = exportCheckpoint(storage, id);
   const entry = exportEntry(storage, id, index);
   if (!c || c.generation !== generation || c.move_id !== move || !Number.isSafeInteger(c.next_chunk) || c.next_chunk < 0) throw Error('Export cursor changed');
@@ -327,9 +339,10 @@ export async function exportChunk(storage, id, generation, move, index, failAfte
  return { content, digest };
 }
 
-export function beginChunkImport(storage, id, generation, move, destination, tables) {
+export function beginChunkImport(storage, id, generation, move, destination, tables, assertAuthority = () => {}) {
  validateTables(tables); if (typeof id !== 'string' || !id || typeof move !== 'string' || !move || typeof destination !== 'string' || !destination || !Number.isSafeInteger(generation) || generation < 1 || generation === Number.MAX_SAFE_INTEGER) throw Error('Invalid import');
  return storage.transactionSync(() => {
+  checkAuthority(assertAuthority);
   if (one(storage, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'")) throw Error('Destination owner is already fenced');
   const hasImport = one(storage, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_chunk_import'");
   const prior = hasImport ? importCheckpoint(storage, id) : null;
@@ -352,13 +365,14 @@ export function beginChunkImport(storage, id, generation, move, destination, tab
  });
 }
 
-export async function importChunk(storage, id, envelope, failAfterRows = 0) {
+export async function importChunk(storage, id, envelope, failAfterRows = 0, assertAuthority = () => {}) {
  // Hash, parse, replay-check and commit the same immutable values. A caller
  // in this isolate can otherwise mutate its envelope while digest awaits.
  const content = envelope?.content, digest = envelope?.digest;
  if (typeof content !== 'string' || content.length > MAX_BYTES || bytes(content) > MAX_BYTES || await hash(content) !== digest) throw Error('Invalid chunk digest or size');
  const p = parsePrivateJSON(content, 'Invalid relocation chunk');
  return storage.transactionSync(() => {
+  checkAuthority(assertAuthority);
   const c = importCheckpoint(storage, id);
   const project = projectFenceStatus(storage, id);
   if (!c || p.projectId !== id || p.generation !== c.generation || p.moveId !== c.move_id || !Number.isSafeInteger(p.index) || p.index < 0) throw Error('Import identity mismatch');

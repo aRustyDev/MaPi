@@ -10,6 +10,7 @@ import { projectFenceStatus } from "../worker/relocation.js";
 import { execute } from "../worker/sql.js";
 import { inspectRelocationDestination } from "../worker/relocation-manifest.js";
 import { assertNoTextPreflightMarkerAccess } from "../worker/relocation-text-marker.js";
+import { chunkImportStatus } from '../worker/relocation-chunks.js';
 const quote = (s) => `"${s.replaceAll('"', '""')}"`;
 const check = (condition, message) => { if (!condition) throw Error(message); };
 const rejects = async (fn) => { try { await fn(); } catch { return; } throw Error("Expected rejection"); };
@@ -67,6 +68,9 @@ export class RealOwner extends NextgenApplication {
   #malformedPageForTest = null;
   #heldRestore;
   #releaseRestore;
+  #holdExport = false;
+  #heldExport = false;
+  #releaseExport;
   legacyDigestForTest(value) { this.#legacyDigestForTest = value; }
   malformedPageForTest(value) { this.#malformedPageForTest = value; }
   async relocationReconcile(...args) {
@@ -78,8 +82,25 @@ export class RealOwner extends NextgenApplication {
   constructor(ctx, env) {
     const hasMetadata = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mapi_relocation_project'").toArray().length;
     const importing = hasMetadata && ctx.storage.sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing','staged')").toArray().length;
-    super(ctx, importing ? { ...env, MAPI_SCHEMA_TARGET: "2" } : env);
+    const hasEpoch = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mapi_recovery_epoch'").toArray().length;
+    const epoch = hasEpoch ? ctx.storage.sql.exec('SELECT epoch FROM mapi_recovery_epoch').toArray()[0]?.epoch : null;
+    const scoped = epoch === 'synthetic-current' || epoch === 'synthetic-stale';
+    const objectId = ctx.id.toString();
+    super(ctx, { ...env, ...(importing ? { MAPI_SCHEMA_TARGET: '2' } : {}), ...(scoped ? { MAPI_RECOVERY_TARGET_OBJECT: objectId, MAPI_RECOVERY_OBJECT_EPOCHS: JSON.stringify({ [objectId]: 'synthetic-current' }), MAPI_RECOVERY_EPOCH: 'synthetic-current' } : {}) });
   }
+  setStoredEpochForTest(epoch) {
+    if (this.env.MAPI_LOCAL_TEST !== '1' || !['synthetic-current', 'synthetic-stale'].includes(epoch)) throw Error('Invalid synthetic epoch');
+    this.ctx.storage.sql.exec('UPDATE mapi_recovery_epoch SET epoch = ?', epoch);
+  }
+  holdNextExportForTest() { if (this.env.MAPI_LOCAL_TEST !== '1') throw Error('Local testing required'); this.#holdExport = true; }
+  exportHeldForTest() { return this.#heldExport; }
+  releaseExportForTest() { if (!this.#releaseExport) throw Error('Export is not held'); this.#releaseExport(); this.#releaseExport = undefined; }
+  async exportRelocationChunk(...args) {
+    const chunk = await super.exportRelocationChunk(...args);
+    if (this.#holdExport) { this.#holdExport = false; this.#heldExport = true; await new Promise(resolve => { this.#releaseExport = resolve; }); this.#heldExport = false; }
+    return chunk;
+  }
+  rawImportStateForTest(projectId) { return { checkpoint: chunkImportStatus(this.ctx.storage, projectId), counts: this.testCounts(), history: this.ctx.storage.sql.exec('SELECT COUNT(*) AS n FROM mapi_chunk_import_data WHERE project_id = ?', projectId).one().n }; }
   schemaVersion() { return this.ctx.storage.sql.exec("SELECT version FROM mapi_schema_version").one().version; }
   async holdRestoreForTest(bookmark) {
     if (this.#heldRestore) throw Error("Restore already held");
@@ -231,6 +252,10 @@ export default {
       await rejectsWith(() => target.reserveMoveDestination("move-secret", reservedRoute, "move-1"), "Destination is not reserved by registry");
       const login = await source.login("source@example.test", "Example-password-123!", "192.0.2.1", route);
       check(login.status === 200 && login.cookie, "Source login failed");
+      // Simulate an independently deployed object-specific epoch after real
+      // Go/Wasm setup. The configured value is fixed across the next restart.
+      await source.setStoredEpochForTest('synthetic-current');
+      await rejects(() => source.evict()); source = env.OWNER.getByName('source');
       const liveRuntime = await source.status(true, route);
       check(liveRuntime.ready && liveRuntime.wasmMemoryBytes > 0 && liveRuntime.reactorInitializations > 0 && liveRuntime.reactorAttempts >= liveRuntime.reactorInitializations, 'Active Go/Wasm reactor was not initialized');
       await source.seedAdmissionFixture(projectId, user.userId);
@@ -325,6 +350,24 @@ export default {
       await rejects(() => coordinator.evict()); coordinator = env.COORDINATOR.getByName("coordinator");
       const concurrent = await Promise.allSettled([resume("secret", "chunk"), other.addUser("concurrent@example.test", "Concurrent-password-123!", otherRoute)]);
       check(concurrent[0].status === "rejected" && String(concurrent[0].reason).includes("Injected interruption after chunk") && concurrent[1].status === "fulfilled", "Concurrent traffic failed");
+      // Destination preparation requires its original epoch 0. Introduce the
+      // separately configured synthetic epoch only after import has begun.
+      await target.setStoredEpochForTest('synthetic-current');
+      await rejects(() => target.evict()); target = env.OWNER.getByName(targetName);
+      // In-flight source RPC reply arrives after a destination's independently
+      // configured epoch no longer matches restored storage. The actual owner
+      // import call must recheck it in the same transaction as its checkpoint.
+      const beforeEpochRace = await target.rawImportStateForTest(projectId);
+      await source.holdNextExportForTest();
+      const epochRace = target.importRelocationChunk('move-secret', projectId, 'move-1', beforeEpochRace.checkpoint.next_chunk)
+        .then(() => null, error => String(error));
+      for (let attempt = 0; !(await source.exportHeldForTest()); attempt++) { if (attempt > 1000) throw Error('Synthetic source reply was not held'); await new Promise(resolve => setTimeout(resolve, 5)); }
+      await target.setStoredEpochForTest('synthetic-stale');
+      await source.releaseExportForTest();
+      check((await epochRace)?.includes('Project recovery is not reconciled'), 'Stale destination epoch accepted an in-flight import');
+      check(JSON.stringify(await target.rawImportStateForTest(projectId)) === JSON.stringify(beforeEpochRace), 'Stale in-flight import changed destination rows or checkpoint');
+      await target.setStoredEpochForTest('synthetic-current');
+      await target.importRelocationChunk('move-secret', projectId, 'move-1', beforeEpochRace.checkpoint.next_chunk);
       const targetRoute = { ...route, objectName: targetName, generation: 2 };
       await rejectsWith(() => target.addUser("premature@example.test", "Premature-password-123!", targetRoute), "Owner import is not active");
       await rejects(() => target.provision("Premature", origin, targetRoute));

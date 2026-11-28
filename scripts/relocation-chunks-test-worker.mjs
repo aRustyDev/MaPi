@@ -44,6 +44,30 @@ export class ChunkProject extends DurableObject {
  chunk(id, gen, move, n, fail) { return exportChunk(this.s, id, gen, move, n, fail); }
  beginImport(id, gen, move, dest, order = tables) { beginChunkImport(this.s, id, gen, move, dest, order); }
  receive(id, env, fail) { return importChunk(this.s, id, env, fail); }
+ // Synthetic external recovery authority, deliberately changed while the
+ // chunk digest is pending. The actual owner uses its configured epoch.
+ setAuthorityEpoch(value) { this.s.sql.exec('CREATE TABLE IF NOT EXISTS mapi_test_authority (epoch TEXT NOT NULL)'); this.s.sql.exec('DELETE FROM mapi_test_authority'); this.s.sql.exec('INSERT INTO mapi_test_authority VALUES (?)', value); }
+ assertAuthorityEpoch() { if (this.s.sql.exec('SELECT epoch FROM mapi_test_authority').one().epoch !== 'current') throw Error('Stale synthetic recovery epoch'); }
+ beginGuardedExport(id, gen, move) { return beginChunkExport(this.s, id, gen, move, ['users'], () => this.assertAuthorityEpoch()); }
+ beginGuardedImport(id, gen, move, dest) { return beginChunkImport(this.s, id, gen, move, dest, ['users'], () => this.assertAuthorityEpoch()); }
+ beginAsyncGuardedExport(id, gen, move) { return beginChunkExport(this.s, id, gen, move, ['users'], () => Promise.resolve()); }
+ guardedExport(id, gen, move, invalidate = false) {
+  let scheduled = false;
+  return exportChunk(this.s, id, gen, move, 0, false, () => {
+   this.assertAuthorityEpoch();
+   if (invalidate && !scheduled) { scheduled = true; queueMicrotask(() => this.setAuthorityEpoch('stale')); }
+  });
+ }
+ guardedImport(id, chunk, invalidate = false) {
+  if (invalidate) queueMicrotask(() => this.setAuthorityEpoch('stale'));
+  return importChunk(this.s, id, chunk, 0, () => this.assertAuthorityEpoch());
+ }
+ guardedState(id, role) {
+  const table = role === 'source' ? 'mapi_chunk_export_data' : 'mapi_chunk_import_data';
+  const checkpoint = role === 'source' ? chunkExportStatus(this.s, id) : chunkImportStatus(this.s, id);
+  const row = this.s.sql.exec(`SELECT COUNT(*) AS n FROM ${table} WHERE project_id = ?`, id).one();
+  return { checkpoint, journalRows: row.n, users: this.s.sql.exec('SELECT COUNT(*) AS n FROM users').one().n };
+ }
  clearTextGuardForTest(role) {
   const table = role === 'source' ? 'mapi_chunk_export' : 'mapi_chunk_import';
   this.s.sql.exec(`ALTER TABLE ${table} DROP COLUMN text_guard`);
@@ -151,6 +175,42 @@ export class ChunkRegistry extends DurableObject {
 export default { async fetch(request, env) {
  try {
   const n = crypto.randomUUID(), a = `source-${n}`, b = `destination-${n}`, r = `registry-${n}`; let source = env.PROJECT.getByName(a), target = env.PROJECT.getByName(b); const registry = env.REGISTRY.getByName(r);
+  // A recovery epoch may change while asynchronous digesting yields. Verify
+  // reservations, finalization and replay all check it inside transactions.
+  let epochSource = env.PROJECT.getByName(`epoch-source-${n}`), epochTarget = env.PROJECT.getByName(`epoch-target-${n}`);
+  await epochSource.init('epoch', `epoch-source-${n}`); await epochSource.seedMany('epoch'); await epochSource.freeze('epoch', 1, 'epoch-move');
+  await epochSource.setAuthorityEpoch('stale');
+  const sourceSchema = await epochSource.controlSchema();
+  await rejectsWith(() => epochSource.beginGuardedExport('epoch', 1, 'epoch-move'), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochSource.controlSchema()) === JSON.stringify(sourceSchema), 'Rejected source initialization changed state');
+  await rejectsWith(() => epochSource.beginAsyncGuardedExport('epoch', 1, 'epoch-move'), 'Relocation authority check must be synchronous');
+  check(JSON.stringify(await epochSource.controlSchema()) === JSON.stringify(sourceSchema), 'Async authority check changed source control state');
+  await epochSource.setAuthorityEpoch('current'); await epochSource.beginGuardedExport('epoch', 1, 'epoch-move');
+  await rejectsWith(() => epochSource.guardedExport('epoch', 1, 'epoch-move', true), 'Stale synthetic recovery epoch');
+  const reserved = await epochSource.guardedState('epoch', 'source');
+  check(reserved.checkpoint.next_chunk === 0 && reserved.journalRows === 1, 'Rejected export finalized its reservation');
+  try { await epochSource.evict(); } catch {} epochSource = env.PROJECT.getByName(`epoch-source-${n}`);
+  await rejectsWith(() => epochSource.guardedExport('epoch', 1, 'epoch-move'), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochSource.guardedState('epoch', 'source')) === JSON.stringify(reserved), 'Stale source replay changed state');
+  await epochSource.setAuthorityEpoch('current'); const epochChunk = await epochSource.guardedExport('epoch', 1, 'epoch-move');
+  check(JSON.stringify(await epochSource.guardedExport('epoch', 1, 'epoch-move')) === JSON.stringify(epochChunk), 'Source reservation did not resume identically');
+  await epochTarget.setAuthorityEpoch('stale'); const targetSchema = await epochTarget.controlSchema();
+  await rejectsWith(() => epochTarget.beginGuardedImport('epoch', 1, 'epoch-move', `epoch-target-${n}`), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochTarget.controlSchema()) === JSON.stringify(targetSchema), 'Rejected destination initialization changed state');
+  await epochTarget.setAuthorityEpoch('current'); await epochTarget.beginGuardedImport('epoch', 1, 'epoch-move', `epoch-target-${n}`);
+  const emptyImport = await epochTarget.guardedState('epoch', 'destination');
+  await rejectsWith(() => epochTarget.guardedImport('epoch', epochChunk, true), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochTarget.guardedState('epoch', 'destination')) === JSON.stringify(emptyImport), 'Stale import changed checkpoint or rows');
+  try { await epochTarget.evict(); } catch {} epochTarget = env.PROJECT.getByName(`epoch-target-${n}`);
+  await rejectsWith(() => epochTarget.guardedImport('epoch', epochChunk), 'Stale synthetic recovery epoch');
+  await epochTarget.setAuthorityEpoch('current'); await epochTarget.guardedImport('epoch', epochChunk);
+  const imported = await epochTarget.guardedState('epoch', 'destination');
+  check(imported.checkpoint.next_chunk === 1 && imported.journalRows === 1 && imported.users > 0, 'Valid import did not resume');
+  await epochTarget.setAuthorityEpoch('stale');
+  await rejectsWith(() => epochTarget.guardedImport('epoch', epochChunk), 'Stale synthetic recovery epoch');
+  check(JSON.stringify(await epochTarget.guardedState('epoch', 'destination')) === JSON.stringify(imported), 'Stale import replay changed state');
+  await epochTarget.setAuthorityEpoch('current'); await epochTarget.guardedImport('epoch', epochChunk);
+  check(JSON.stringify(await epochTarget.guardedState('epoch', 'destination')) === JSON.stringify(imported), 'Valid import replay changed state');
   const stale = env.PROJECT.getByName(`stale-${n}`); await stale.init('stale', `stale-${n}`);
   const beforeStale = await stale.controlSchema(), beforeState = await stale.status('stale'), beforeRows = await stale.evidence();
   await rejects(() => stale.beginExport('stale', 1, 'not-frozen'), 'unfrozen export initialization succeeded');

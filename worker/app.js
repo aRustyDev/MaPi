@@ -591,12 +591,12 @@ export class NextgenApplication extends DurableObject {
 
   async beginRelocationExport(secret, projectId, moveId) {
     const manifest = await this.relocationManifest(secret, projectId, moveId);
-    return beginChunkExport(this.ctx.storage, projectId, manifest.generation, moveId, manifest.tables);
+    return beginChunkExport(this.ctx.storage, projectId, manifest.generation, moveId, manifest.tables, () => this.#assertRecoveryObjectEpoch());
   }
 
   async exportRelocationChunk(secret, projectId, moveId, index) {
     const manifest = await this.relocationManifest(secret, projectId, moveId);
-    const chunk = await exportChunk(this.ctx.storage, projectId, manifest.generation, moveId, index);
+    const chunk = await exportChunk(this.ctx.storage, projectId, manifest.generation, moveId, index, false, () => this.#assertRecoveryObjectEpoch());
     return { ...chunk, text_guard: RELOCATION_TEXT_GUARD_VERSION };
   }
 
@@ -626,7 +626,7 @@ export class NextgenApplication extends DurableObject {
     const { move, manifest } = await this.#relocationDestination(secret, projectId, moveId);
     const prepared = this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_relocation_prepared'").toArray().length;
     if (!prepared) throw new Error("Destination has not been prepared");
-    return beginChunkImport(this.ctx.storage, projectId, manifest.generation, moveId, move.destination_object, manifest.tables);
+    return beginChunkImport(this.ctx.storage, projectId, manifest.generation, moveId, move.destination_object, manifest.tables, () => this.#assertRecoveryObjectEpoch());
   }
 
   async relocationImportStatus(secret, projectId, moveId) {
@@ -641,7 +641,7 @@ export class NextgenApplication extends DurableObject {
     const { move } = await this.#relocationDestination(secret, projectId, moveId);
     const chunk = await this.env.NEXTGEN_APPLICATION.getByName(move.source_object).exportRelocationChunk(secret, projectId, moveId, index);
     assertRelocationTextGuard(chunk);
-    return importChunk(this.ctx.storage, projectId, chunk);
+    return importChunk(this.ctx.storage, projectId, chunk, 0, () => this.#assertRecoveryObjectEpoch());
   }
 
   async restoreRelocationMetadata(secret, projectId, moveId) {
