@@ -1,3 +1,4 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 import application, { NextgenApplication } from '../worker/generated/schema-migration-test-app.js';
 import { ProjectRegistry } from '../worker/registry.js';
 import { RelocationCoordinator } from '../worker/relocation-coordinator.js';
@@ -13,6 +14,8 @@ export class TestRegistry extends ProjectRegistry {
   }
 }
 export class SchemaOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+
   #holdApply = false; #applyHeld = false; #releaseApply;
   #holdActivate = false; #activateHeld = false; #releaseActivate;
   #holdBeforeActivate = false; #beforeActivateHeld = false; #releaseBeforeActivate;

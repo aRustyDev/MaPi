@@ -1,3 +1,4 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 import application, { NextgenApplication } from "../worker/generated/pending-owner-test-app.js";
 import { ProjectRegistry } from "../worker/registry.js";
 import { reserveMoveDestination } from "../worker/owner-fence.js";
@@ -15,6 +16,8 @@ export class PendingRegistry extends ProjectRegistry {
   }
 }
 export class PendingOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+
   #hold = false; #held = false; #release;
   #holdRecovery = false; #recoveryHeld = false; #releaseRecovery;
   #holdFreeze = false; #freezeHeld = false; #releaseFreeze;

@@ -1,3 +1,4 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 // Synthetic-only staging proof. Each request advances at most one scan,
 // transfer, history, or reconciliation page in fresh staging namespaces.
 import { NextgenApplication, ProjectRegistry as BaseRegistry } from '../worker/phase1-owner.js';
@@ -14,6 +15,8 @@ export class ProjectRegistry extends BaseRegistry {
 }
 
 export class RelocationTextStagingOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+
   proofBoot = crypto.randomUUID();
   proofBootId() { return this.proofBoot; }
   evictProof() { this.ctx.abort('synthetic preflight eviction'); }

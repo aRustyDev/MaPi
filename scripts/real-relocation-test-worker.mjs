@@ -1,3 +1,4 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 // Local-only rehearsal. Control methods trust bindings in this isolated harness.
 import { RelocationCoordinator } from "../worker/relocation-coordinator.js";
 import { NextgenApplication } from "../worker/app.js";
@@ -55,6 +56,13 @@ export class RealRegistry extends ProjectRegistry {
   evict() { this.ctx.abort("registry restart"); }
 }
 export class RealOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+  preFreezeProductionForTest(secret, route, moveId, marker) { return super.preFreezeRelocation(secret, route, moveId, marker); }
+  setFenceStateForTest(state, moveId) {
+    if (this.env.MAPI_LOCAL_TEST !== '1' || !['active', 'frozen'].includes(state)) throw Error('Local relocation test required');
+    this.ctx.storage.sql.exec('UPDATE mapi_owner_fence SET state = ?, move_id = ? WHERE singleton = 1', state, state === 'frozen' ? moveId : null);
+  }
+
   #legacyDigestForTest = false;
   #malformedPageForTest = null;
   #heldRestore;
@@ -240,6 +248,21 @@ export default {
       // would be present after deployment interrupted an earlier attempt.
       await registry.seedExistingIntentForTest(origin, projectId, 'move-1');
       await rejectsWith(() => registry.beginRelocation('move-secret', origin, projectId, 'different-move'), 'Conflicting relocation intent');
+      // A pre-existing intent may predate today's closed admission gate.
+      // Complete its preflight without yet using the historical-freeze fixture.
+      let priorCheckpoint;
+      for (let page = 0; page < 4096; page++) {
+        priorCheckpoint = await registry.relocationTextPreflightStatus('move-secret', projectId, 'move-1');
+        if (priorCheckpoint?.done) break;
+        const progress = await registry.beginRelocation('move-secret', origin, projectId, 'move-1');
+        check(progress.phase === 'preflighting', 'Existing intent froze before preflight completed');
+      }
+      check(priorCheckpoint?.done, 'Existing intent preflight did not complete');
+      const priorRoute = await registry.relocationStatus('move-secret', projectId), priorFence = await source.sourceFenceRows();
+      await rejectsWith(() => source.preFreezeProductionForTest('move-secret', route, 'move-1', priorCheckpoint.marker), 'Relocation admission unavailable');
+      check(JSON.stringify(await registry.relocationStatus('move-secret', projectId)) === JSON.stringify(priorRoute) &&
+        JSON.stringify(await source.sourceFenceRows()) === JSON.stringify(priorFence) &&
+        JSON.stringify(await source.admissionFixture(projectId, user.userId)) === JSON.stringify(fixtureBeforeAdmission), 'Rejected old intent changed source state');
       const restoreAttempt = source.holdRestoreForTest("old-bookmark").then(() => false, error => String(error).includes("Coordinated recovery is required"));
       while (!await source.restoreHeldForTest()) await new Promise(resolve => setTimeout(resolve, 0));
       let move;
@@ -248,6 +271,14 @@ export default {
         if (move.phase !== "preflighting") break;
       }
       check(move?.phase === "moving", "Bounded preflight did not finish");
+      // Simulate an old/restored active fence while the registry still says
+      // moving. A direct freeze RPC must leave the active source untouched.
+      await source.setFenceStateForTest('active', 'move-1');
+      const restoredActiveFence = await source.sourceFenceRows(), restoredActiveData = await source.admissionFixture(projectId, user.userId);
+      await rejectsWith(() => source.freezeRelocation('move-secret', route, 'move-1'), 'Relocation admission unavailable');
+      check(JSON.stringify(await source.sourceFenceRows()) === JSON.stringify(restoredActiveFence) &&
+        JSON.stringify(await source.admissionFixture(projectId, user.userId)) === JSON.stringify(restoredActiveData), 'Direct freeze changed restored active source');
+      await source.setFenceStateForTest('frozen', 'move-1');
       const frozenRuntime = await source.status(true, route);
       check(!frozenRuntime.ready && !frozenRuntime.fenceReady && frozenRuntime.wasmMemoryBytes === 0 && frozenRuntime.reactorInitializations === liveRuntime.reactorInitializations && frozenRuntime.reactorAttempts === liveRuntime.reactorAttempts, 'Frozen source retained or recreated its Go/Wasm reactor');
       const staleRequest = await source.handleRequest({ method: 'GET', url: `${origin}/readyz`, headers: {}, body: '', peer: '192.0.2.9' }, route);

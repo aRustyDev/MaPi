@@ -15,7 +15,7 @@ import { digestRelocationPage, inspectRelocationDestination, inspectRelocationSo
 import { beginChunkExport, beginChunkImport, chunkExportStatus, chunkImportStatus, exportChunk, importChunk } from "./relocation-chunks.js";
 import { destinationTransferHistory, sourceTransferHistory, transferHistoryStatus } from "./relocation-history.js";
 import { assertRelocationTextGuard, RELOCATION_TEXT_GUARD_VERSION } from "./relocation-values.js";
-import { assertNoTextPreflightMarkerAccess, invalidateTextPreflightMarker, hasTextPreflightMarker, readTextPreflightMarker, createTextPreflightMarker, writeTextPreflightSeal, assertTextPreflightSeal } from "./relocation-text-marker.js";
+import { assertNoTextPreflightMarkerAccess, invalidateTextPreflightMarker, hasTextPreflightMarker, readTextPreflightMarker, createTextPreflightMarker, assertTextPreflightSeal } from "./relocation-text-marker.js";
 import { advanceRelocationTextPreflight } from "./relocation-text-preflight.js";
 import { assertRecoveryEnvelope, readOwnerRecoveryScopes, recoveryPageDigest, validRecoveryStamp, validateRecoveryScope } from "./recovery-scopes.js";
 import { recoveryEpochConfiguration } from "./recovery-epochs.js";
@@ -326,10 +326,11 @@ export class NextgenApplication extends DurableObject {
       }
       if (readTextPreflightMarker(this.ctx.storage) !== marker) return 'stale';
       validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true });
-      initializeOwnerFence(this.ctx.storage, route);
-      writeTextPreflightSeal(this.ctx.storage, route, moveId, marker);
-      freezeOwnerFence(this.ctx.storage, route, moveId);
-      return 'frozen';
+      // A durable intent can predate the registry admission guard. Do not
+      // freeze its active source while every new cutover is known to fail at
+      // the independent archive gate. The exact already-frozen retry above
+      // stays available to recover a lost acknowledgement.
+      throw new Error('Relocation admission unavailable: independent archive proof is not configured');
     });
     if (outcome === 'stale') return { state: 'stale' };
     this.#fenceArmed = true;
@@ -353,6 +354,11 @@ export class NextgenApplication extends DurableObject {
         move.source_object !== route.objectName || move.generation !== route.generation) throw new Error("Source move is not reserved by registry");
     if (this.ctx.id.toString() !== this.env.NEXTGEN_APPLICATION.idFromName(route.objectName).toString()) throw new Error("Source object identity mismatch");
     this.#assertRecoveryObjectEpoch();
+    // A moving registry record can outlive an older or restored active owner.
+    // Do not create a new freeze while cutover cannot pass the archive gate;
+    // only an exact previously frozen owner can resume this operation.
+    const fence = this.ctx.storage.sql.exec("SELECT project_id, origin, object_name, generation, state, move_id FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
+    if (!fence || fence.state !== 'frozen' || fence.project_id !== route.projectId || fence.origin !== route.origin || fence.object_name !== route.objectName || fence.generation !== route.generation || fence.move_id !== moveId) throw new Error('Relocation admission unavailable: independent archive proof is not configured');
     const result = freezeOwnerFence(this.ctx.storage, route, moveId, true);
     this.#reactor = undefined;
     this.#memory = undefined;

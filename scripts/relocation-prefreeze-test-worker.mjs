@@ -1,3 +1,4 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 import app, { NextgenApplication } from "../worker/app.js";
 import { ProjectRegistry } from "../worker/registry.js";
 import { validateRelocationSourceSchema } from "../worker/relocation-manifest.js";
@@ -163,7 +164,7 @@ export class TestOwner extends NextgenApplication {
     return super.addUser(...args);
   }
   async preFreezeRelocation(secret, route, moveId, marker) {
-    const proof = await super.preFreezeRelocation(secret, route, moveId, marker);
+    const proof = await syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker);
     if (this.#hold) {
       this.#hold = false;
       this.#held = true;

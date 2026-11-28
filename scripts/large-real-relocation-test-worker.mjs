@@ -1,3 +1,4 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 // Local-only representative fixture. All setup/bulk writes are disposable and
 // happen before the real registry/owner move starts.
 import { NextgenApplication } from '../worker/generated/phase1-owner-app.js';
@@ -66,6 +67,8 @@ async function verifyMovedSigning(owner, route, sessionCookie, client, jwks, exp
 }
 
 export class LargeOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+
   async arm(route) { initializeOwnerFence(this.ctx.storage, route); await this.ctx.storage.sync(); }
   seedOverlap(projectId) {
     return this.ctx.storage.transactionSync(() => {

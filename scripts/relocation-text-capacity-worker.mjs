@@ -1,3 +1,4 @@
+import { syntheticHistoricalFreeze } from './synthetic-historical-freeze.mjs';
 // Synthetic capacity proof. Deploy only with fresh, isolated DO namespaces.
 // Each request performs one bounded seed batch or one relocation advance.
 import { NextgenApplication, ProjectRegistry as BaseRegistry } from '../worker/phase1-owner.js';
@@ -59,6 +60,9 @@ export class CapacityRegistry extends BaseRegistry {
 }
 
 export class CapacityOwner extends NextgenApplication {
+  preFreezeRelocation(secret, route, moveId, marker) { return syntheticHistoricalFreeze(this, () => super.preFreezeRelocation(secret, route, moveId, marker), route, moveId, marker); }
+  preFreezeProductionForTest(secret, route, moveId, marker) { return super.preFreezeRelocation(secret, route, moveId, marker); }
+
   textPreflightTableCount(route) { return validateRelocationSourceSchema(this.ctx.storage, route, { textGuard: true }).length; }
   #profileBoot = crypto.randomUUID();
   async holdForSyntheticMemorySample() {
@@ -202,8 +206,17 @@ export default {
             }
             const status = await registry.relocationStatus(secret, projectId);
             check(status.route?.state === 'active' && !status.move, 'Source was frozen before preflight completed');
+            if (checkpoint?.done && !state.existingIntentGuardChecked) {
+              const route = { projectId, origin, objectName, generation: 1 };
+              const beforeFence = await owner.fence(), beforeData = await owner.snapshot(projectId, userId);
+              await rejectsWith(() => owner.preFreezeProductionForTest(secret, route, moveId, checkpoint.marker), 'Relocation admission unavailable');
+              check(JSON.stringify(await owner.fence()) === JSON.stringify(beforeFence) &&
+                JSON.stringify(await owner.snapshot(projectId, userId)) === JSON.stringify(beforeData) &&
+                JSON.stringify(await registry.relocationStatus(secret, projectId)) === JSON.stringify(status), 'Existing-intent rejection changed source');
+              state.existingIntentGuardChecked = true;
+            }
           } else {
-            check(move.phase === 'moving' && state.largePages >= 2, 'Large TEXT did not span scan pages');
+            check(move.phase === 'moving' && state.largePages >= 2 && state.existingIntentGuardChecked, 'Large TEXT scan or admission guard did not complete');
             const fence = await owner.fence();
             check(fence.length === 1 && fence[0].state === 'frozen' && fence[0].move_id === moveId, 'Source fence differs');
             state.destination = move.destination_object;
