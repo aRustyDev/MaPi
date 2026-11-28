@@ -7,7 +7,7 @@ const result = await build({
   bundle: true,
   format: 'esm',
   platform: 'browser',
-  external: ['cloudflare:workers'],
+  external: ['cloudflare:workers', 'node:crypto'],
   write: false,
 });
 const mf = new Miniflare(convertV4MiniflareOptions({

@@ -5,7 +5,7 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 const bundle = await build({
   entryPoints: ['scripts/relocation-cursor-sizing-test-worker.mjs'],
   bundle: true, format: 'esm', platform: 'neutral', write: false,
-  external: ['cloudflare:workers'],
+  external: ['cloudflare:workers', 'node:crypto'],
 });
 const mf = new Miniflare(convertV4MiniflareOptions({
   workers: [{ name: 'synthetic-cursor-sizing', compatibilityDate: '2026-11-19',

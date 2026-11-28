@@ -44,7 +44,8 @@ export function validReconciliationCursor(cursor) {
   return cursor.offset !== 0 || cursor.remaining === 0;
 }
 export function consumeReconciliationUtf8(state, bytes) {
-  for (const byte of bytes) {
+  for (let index = 0; index < bytes.length; index++) {
+    const byte = bytes[index];
     if (state.remaining) {
       if (byte < state.minimum || byte > state.maximum) throw Error('Invalid UTF-8 TEXT in relocation row');
       state.remaining--; state.minimum = 128; state.maximum = 191;

@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { initializeProjectFence, assertProjectWritable, freezeProject, activateProject, retireProject, initializeRouteGeneration, registerRouteGeneration, readRouteGeneration, beginRelocation, commitRelocation, projectFenceStatus } from '../worker/relocation.js';
-import { beginChunkExport, exportChunk, beginChunkImport, importChunk, chunkExportStatus, chunkImportStatus } from '../worker/relocation-chunks.js';
+import { beginChunkExport, exportChunk, beginChunkImport, importChunk, chunkExportStatus, chunkImportStatus, MAX_ROW_VALUE_BYTES } from '../worker/relocation-chunks.js';
 import { execute } from '../worker/sql.js';
 import { initializeOwnerFence } from '../worker/owner-fence.js';
 const tables = ['users', 'sessions', 'events'];
@@ -137,6 +137,15 @@ export class ChunkProject extends DurableObject {
  setHistoryForTest(id, index, digest) { this.s.sql.exec('INSERT INTO mapi_chunk_import_data VALUES (?, ?, ?)', id, index, digest); }
  removeHistoryForTest(id, index) { this.s.sql.exec('DELETE FROM mapi_chunk_import_data WHERE project_id = ? AND chunk_index = ?', id, index); }
  setImportDigestForTest(id, index, value) { if (value === 'invalid-utf8') this.s.sql.exec("UPDATE mapi_chunk_import_data SET digest = CAST(X'80' AS TEXT) WHERE project_id = ? AND chunk_index = ?", id, index); else this.s.sql.exec('UPDATE mapi_chunk_import_data SET digest = ? WHERE project_id = ? AND chunk_index = ?', value, id, index); }
+ streamPieceForTest(id, column, offset) {
+  return this.s.sql.exec('SELECT data FROM mapi_chunk_import_stream_data WHERE project_id = ? AND column_index = ? AND piece_offset = ?', id, column, offset).one().data;
+ }
+ setStreamPieceForTest(id, column, offset, data) {
+  this.s.sql.exec('UPDATE mapi_chunk_import_stream_data SET data = ? WHERE project_id = ? AND column_index = ? AND piece_offset = ?', data, id, column, offset);
+ }
+ streamPieceCountForTest(id) {
+  return this.s.sql.exec('SELECT COUNT(*) AS n FROM mapi_chunk_import_stream_data WHERE project_id = ?', id).one().n;
+ }
  streamForTest(id) { return this.s.sql.exec('SELECT * FROM mapi_chunk_import_stream WHERE project_id = ?', id).one(); }
  setStreamForTest(id, field, value) { if (!['table_name', 'row_offset', 'last_chunk'].includes(field)) throw Error('Invalid local stream field'); this.s.sql.exec(`UPDATE mapi_chunk_import_stream SET ${field} = ? WHERE project_id = ?`, value, id); }
  fragmentForTest(id) { return this.s.sql.exec('SELECT * FROM mapi_chunk_import_fragment WHERE project_id = ?', id).one(); }
@@ -563,10 +572,12 @@ export default { async fetch(request, env) {
      firstFragment = part;
      const future = await huge.chunk('huge', 1, 'big-move', 1, false);
      await rejects(() => hugeTarget.receive('huge', future, 0), 'out-of-order stream accepted');
-     const changed = { ...payload, stream: { ...payload.stream, total: 12 * 1024 * 1024 + 1 } };
+     const descriptors = payload.stream.types.map(type => type.kind === 'blob' ? { ...type, length: 8_388_609 } : type);
+     const changed = { ...payload, stream: { ...payload.stream, types: descriptors } };
      const content = JSON.stringify(changed);
+     const beforeOversized = { status: await hugeTarget.importStatus('huge'), rows: await hugeTarget.evidence(), controls: await hugeTarget.importControlCounts() };
      await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'oversized stream accepted');
-     check((await hugeTarget.importStatus('huge')).next_chunk === 0, 'oversized stream advanced checkpoint');
+     check(JSON.stringify(beforeOversized) === JSON.stringify({ status: await hugeTarget.importStatus('huge'), rows: await hugeTarget.evidence(), controls: await hugeTarget.importControlCounts() }), 'oversized stream changed state');
     }
     if (fragments === 1) {
      const changed = { ...payload, stream: { ...payload.stream, cursor: ['wrong-key'] } };
@@ -574,6 +585,27 @@ export default { async fetch(request, env) {
      await rejects(async () => hugeTarget.receive('huge', { content, digest: await hash(content) }, 0), 'conflicting stream cursor accepted');
     }
     if (payload.stream.rowDone) {
+     // Corrupt an already committed BLOB slice without changing its size.
+     // The final frame must preserve the checkpoint and all durable pieces.
+     const saved = await hugeTarget.streamPieceForTest('huge', 2, 0);
+     const changed = new Uint8Array(saved.slice(0));
+     changed[0] ^= 1;
+     await hugeTarget.setStreamPieceForTest('huge', 2, 0, changed.buffer);
+     const before = {
+      checkpoint: await hugeTarget.importStatus('huge'),
+      stream: await hugeTarget.streamForTest('huge'),
+      pieces: await hugeTarget.streamPieceCountForTest('huge'),
+      rows: await hugeTarget.evidence(),
+     };
+     await rejects(() => hugeTarget.receive('huge', part, 0), 'same-size corrupted stream piece accepted');
+     const after = {
+      checkpoint: await hugeTarget.importStatus('huge'),
+      stream: await hugeTarget.streamForTest('huge'),
+      pieces: await hugeTarget.streamPieceCountForTest('huge'),
+      rows: await hugeTarget.evidence(),
+     };
+     check(JSON.stringify(before) === JSON.stringify(after), 'corrupted stream piece changed checkpoint or business rows');
+     await hugeTarget.setStreamPieceForTest('huge', 2, 0, saved);
      await rejects(() => hugeTarget.receive('huge', part, 1), 'final stream rollback was not injected');
      check((await hugeTarget.importStatus('huge')).next_chunk === fragments && (await hugeTarget.evidence()).users.length === 0, 'failed final stream persisted row or checkpoint');
     }
@@ -652,8 +684,14 @@ export default { async fetch(request, env) {
   const tooLarge = env.PROJECT.getByName(`too-large-${n}`);
   await tooLarge.init('too-large', `too-large-${n}`); await tooLarge.beyondRowLimit('too-large'); await tooLarge.freeze('too-large', 1, 'too-large-move');
   await tooLarge.beginExport('too-large', 1, 'too-large-move', ['users']);
-  await rejects(() => tooLarge.chunk('too-large', 1, 'too-large-move', 0, false), 'row exceeding conservative limit accepted');
-  check((await tooLarge.exportStatus('too-large')).next_chunk === 0, 'oversized row advanced export checkpoint');
+  if (MAX_ROW_VALUE_BYTES < 8_385_013) {
+   await rejects(() => tooLarge.chunk('too-large', 1, 'too-large-move', 0, false), 'row beyond configured limit accepted');
+   check((await tooLarge.exportStatus('too-large')).next_chunk === 0, 'rejected row advanced export checkpoint');
+  } else {
+   const formerlyOversized = await tooLarge.chunk('too-large', 1, 'too-large-move', 0, false);
+   check(JSON.parse(formerlyOversized.content).stream?.types.some(type => type.kind === 'blob' && type.length === 8_385_000), 'platform-valid row did not enter streamed export');
+   check((await tooLarge.exportStatus('too-large')).next_chunk === 1, 'streamed row did not advance export checkpoint');
+  }
   const badSource = env.PROJECT.getByName(`bad-source-${n}`), badTarget = env.PROJECT.getByName(`bad-target-${n}`); await badSource.init('bad', `bad-source-${n}`); await badSource.seed('bad'); await badSource.freeze('bad', 1, 'bad-move');
   const reverse = ['events', 'sessions', 'users']; await badSource.beginExport('bad', 1, 'bad-move', reverse); await badTarget.beginImport('bad', 1, 'bad-move', `bad-target-${n}`, reverse);
   const invalidOrder = await badSource.chunk('bad', 1, 'bad-move', 0, false); await rejects(() => badTarget.receive('bad', invalidOrder, 0), 'foreign-key dependency violation accepted');

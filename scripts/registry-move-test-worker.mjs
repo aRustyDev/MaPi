@@ -2,6 +2,7 @@ import { ProjectRegistry, validNewRelocationMoveId } from "../worker/registry.js
 import { beginRegistryMove, commitRegistryMove } from "../worker/registry-move.js";
 import { initializeHistoryCheckpoint, advanceHistoryCheckpoint } from '../worker/registry-history.js';
 import { RELOCATION_RECONCILIATION_VERSION } from '../worker/relocation-values.js';
+import { RELOCATION_TEXT_PREFLIGHT_VERSION } from '../worker/relocation-text-preflight.js';
 import { DurableObject } from "cloudflare:workers";
 
 export class RegistryMoveOwner extends DurableObject {
@@ -21,7 +22,7 @@ export class RegistryMoveOwner extends DurableObject {
     return { projectId, origin, objectName, generation, objectId: this.ctx.id.toString() };
   }
   activateProvisioning() {}
-  advanceRelocationTextPreflight() { return { marker: 'a'.repeat(32), checkpoint: { version: 4, table: 0, after: null, row: null, column: 0, rowBytes: 0, cursorBytes: 2, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done: true }, done: true }; }
+  advanceRelocationTextPreflight() { return { marker: 'a'.repeat(32), checkpoint: { version: RELOCATION_TEXT_PREFLIGHT_VERSION, table: 0, after: null, row: null, column: 0, rowBytes: 0, recordBytes: 0, recordHeader: 0, cursorBytes: 2, length: null, offset: 0, remaining: 0, minimum: 128, maximum: 191, done: true }, done: true }; }
   preFreezeRelocation(_secret, route, moveId) { this.#freezeCalls++; return { ...route, moveId, state: "frozen", objectId: this.ctx.id.toString() }; }
   freezeCalls() { return this.#freezeCalls; }
 }

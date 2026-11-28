@@ -2,7 +2,7 @@
 // baseline. Control calls that use it must be private and authenticated.
 import baseline from './generated/baseline.json';
 import issuerSchema from './relocation-issuer-schema.json';
-import { assertRelocationTableText, execute, readRelocationRow } from './sql.js';
+import { assertRelocationTableText, execute, readRelocationRow, readRelocationBlobSlice, readRelocationDescriptors } from './sql.js';
 import { assertNoForeignKeyViolations } from './foreign-keys.js';
 import { sourceIdentityMatches } from './relocation-source-identity.js';
 import { assertRelocationValuesRepresentable, RELOCATION_RECONCILIATION_VERSION } from './relocation-values.js';
@@ -413,7 +413,7 @@ export async function digestRelocationPage(storage, manifest, role, table, curso
       // One bounded descriptor per column; avoid pulling any complete TEXT or
       // BLOB across the JS bridge merely to decide whether the row is large.
       const descriptor = names.map(name => `json_array(typeof(${quote(name)}),CASE WHEN typeof(${quote(name)}) IN ('text','blob') THEN octet_length(${quote(name)}) ELSE 8 END)`).join(', ');
-      const result = execute(storage, { statement: `SELECT ${descriptor} ${source}`, args, query: true }).rows;
+      const result = readRelocationDescriptors(storage, `SELECT ${descriptor} ${source}`, args);
       if (!result.length) { if (isSlice) throw Error('Reconciliation row changed'); done = true; break; }
       const kinds = result[0].map(value => {
         let data; try { data = JSON.parse(value); } catch { throw Error('Invalid reconciliation descriptor'); }
@@ -434,12 +434,10 @@ export async function digestRelocationPage(storage, manifest, role, table, curso
         let value, end;
         if (kind === 'text' || kind === 'blob') {
           const amount = Math.min(64 * 1024, total - state.offset);
-          const slice = execute(storage, { statement: `SELECT substr(CAST(${column} AS BLOB), ${state.offset + 1}, ${amount}) ${source}`, args, query: true }).rows;
-          if (slice.length !== 1 || !slice[0][0] || typeof slice[0][0].blob !== 'string') throw Error('Invalid reconciliation slice');
-          value = slice[0][0].blob;
-          let raw; try { raw = Uint8Array.fromBase64(value); } catch { throw Error('Invalid reconciliation slice'); }
+          const raw = readRelocationBlobSlice(storage, `SELECT substr(CAST(${column} AS BLOB), ${state.offset + 1}, ${amount}) ${source}`, args);
           if (raw.length !== amount) throw Error('Invalid reconciliation slice');
           if (kind === 'text') consumeReconciliationUtf8(state, raw);
+          value = raw.toBase64();
           end = state.offset + amount;
           if (end === total && state.remaining) throw Error('Invalid UTF-8 TEXT in relocation row');
         } else {

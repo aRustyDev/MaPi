@@ -302,7 +302,7 @@ export class ProjectRegistry extends DurableObject {
   legacyRelocationTextPreflightStatus(secret, projectId, moveId) {
     const checkpoint = this.#readRelocationTextPreflight(secret, projectId, moveId);
     if (!checkpoint || checkpoint.cursor.version === RELOCATION_TEXT_PREFLIGHT_VERSION) return null;
-    if (![1, 2, 3].includes(checkpoint.cursor.version) || !/^[0-9a-f]{32}$/.test(checkpoint.marker)) throw new Error('Invalid legacy TEXT preflight checkpoint');
+    if (![1, 2, 3, 4].includes(checkpoint.cursor.version) || !/^[0-9a-f]{32}$/.test(checkpoint.marker)) throw new Error('Invalid legacy TEXT preflight checkpoint');
     return { marker: checkpoint.marker, version: checkpoint.cursor.version, done: checkpoint.done, revision: checkpoint.revision };
   }
 

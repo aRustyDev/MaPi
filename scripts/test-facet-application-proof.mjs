@@ -40,8 +40,8 @@ export class Facet extends NextgenApplication {
  crossOwnerProbe() { return this.env.NEXTGEN_APPLICATION.getByName('synthetic-foreign'); }
 }`,
     resolveDir: process.cwd(), sourcefile: 'synthetic-application-facet.mjs', loader: 'js',
-  }, bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers', './generated/nextgen.wasm'] });
-  const supervisor = await build({ entryPoints: ['scripts/facet-application-proof-worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers', './dynamic.txt', './engine.bin'] });
+  }, bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers', 'node:crypto', './generated/nextgen.wasm'] });
+  const supervisor = await build({ entryPoints: ['scripts/facet-application-proof-worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers', 'node:crypto', './dynamic.txt', './engine.bin'] });
   assert.equal(dynamic.outputFiles.length, 1); assert.equal(supervisor.outputFiles.length, 1);
   await Promise.all([
     writeFile(resolve(dir, 'dynamic.txt'), dynamic.outputFiles[0].contents, { mode: 0o600 }),

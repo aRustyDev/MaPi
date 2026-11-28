@@ -246,8 +246,12 @@ export default {
       await other.addUser("other@example.test", "Other-password-123!", otherRoute);
       await other.arm(otherRoute);
       let reservedRoute = { ...route, objectName: "target", generation: 2 };
+      const beforeRejectedFreeze = await source.status(false, route);
+      check(beforeRejectedFreeze.wasmMemoryBytes > 0, 'Source reactor was not initialized');
       await rejectsWith(() => source.freezeRelocation("wrong", route, "move-1"), "Relocation control denied");
       await rejectsWith(() => source.freezeRelocation("move-secret", route, "move-1"), "Source move is not reserved by registry");
+      const afterRejectedFreeze = await source.status(false, route);
+      check(afterRejectedFreeze.wasmMemoryBytes === beforeRejectedFreeze.wasmMemoryBytes && afterRejectedFreeze.reactorInitializations === beforeRejectedFreeze.reactorInitializations, 'Rejected freeze changed the source reactor');
       await rejectsWith(() => target.reserveMoveDestination("wrong", reservedRoute, "move-1"), "Relocation control denied");
       await rejectsWith(() => target.reserveMoveDestination("move-secret", reservedRoute, "move-1"), "Destination is not reserved by registry");
       const login = await source.login("source@example.test", "Example-password-123!", "192.0.2.1", route);
@@ -305,6 +309,7 @@ export default {
         JSON.stringify(await source.admissionFixture(projectId, user.userId)) === JSON.stringify(restoredActiveData), 'Direct freeze changed restored active source');
       await source.setFenceStateForTest('frozen', 'move-1');
       const frozenRuntime = await source.status(true, route);
+      check(frozenRuntime.wasmHighWaterBytes >= beforeRejectedFreeze.wasmMemoryBytes, 'Frozen source lost its Wasm high-water observation');
       check(!frozenRuntime.ready && !frozenRuntime.fenceReady && frozenRuntime.wasmMemoryBytes === 0 && frozenRuntime.reactorInitializations === liveRuntime.reactorInitializations && frozenRuntime.reactorAttempts === liveRuntime.reactorAttempts, 'Frozen source retained or recreated its Go/Wasm reactor');
       const staleRequest = await source.handleRequest({ method: 'GET', url: `${origin}/readyz`, headers: {}, body: '', peer: '192.0.2.9' }, route);
       check(staleRequest.status === 503, 'Frozen source accepted stale ingress');
@@ -346,6 +351,9 @@ export default {
       await rejects(() => source.addUser("stale@example.test", "Stale-password-123!", route));
       await rejects(() => source.evict()); source = env.OWNER.getByName("source");
       check(await source.caseSensitiveLike(), "Frozen source lost case-sensitive LIKE after restart");
+      await rejectsWith(() => source.addUser('restart-frozen@example.test', 'Synthetic-password-123!', route), 'Owner is fenced or route is stale');
+      const restartedRuntime = await source.status(false, route);
+      check(restartedRuntime.wasmMemoryBytes === 0 && restartedRuntime.reactorInitializations === 0, 'Frozen restart initialized the Go reactor');
       await rejectsWith(() => source.restore("old-bookmark"), "Coordinated recovery is required");
       await rejects(() => coordinator.evict()); coordinator = env.COORDINATOR.getByName("coordinator");
       const concurrent = await Promise.allSettled([resume("secret", "chunk"), other.addUser("concurrent@example.test", "Concurrent-password-123!", otherRoute)]);

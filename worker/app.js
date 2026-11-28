@@ -714,6 +714,14 @@ export class NextgenApplication extends DurableObject {
   }
 
   #initialize() {
+    // Reject stale or frozen route calls before instantiating Go, including
+    // after relocation has released the frozen owner's prior reactor.
+    if (this.#fenceArmed && !this.#recoveryAuthority && !this.#pendingAuthority) {
+      this.ctx.storage.transactionSync(() => {
+        this.#assertRecoveryObjectEpoch();
+        assertOwnerFence(this.ctx.storage, this.#authority);
+      });
+    }
     if (this.#reactor) return;
     // Check the same authority used by #call before allocating a Go/Wasm
     // reactor. A stale request to a frozen owner must not allocate an entire

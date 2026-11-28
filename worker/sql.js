@@ -395,15 +395,38 @@ export function assertRelocationTableText(storage, table) {
   assertRelocationTextRows(storage.sql.exec(`SELECT ${relocationTextProjection(columns)} FROM ${target}`).raw());
 }
 
-// Both projections read the same row inside a synchronous storage transaction.
-// Check stored bytes before Workerd can replace malformed bytes with U+FFFD.
+// Callers limit keys and ordinary rows before reading them. Both projections
+// read the same row inside a synchronous storage transaction. Check stored
+// bytes before Workerd can replace malformed bytes with U+FFFD.
 export function readRelocationRow(storage, names, source, args) {
   const columns = names.map(name => '"' + name.replaceAll('"', '""') + '"');
   const { sql, values } = bind(`SELECT ${relocationTextProjection(columns)} ${source}`, args);
   const rows = storage.sql.exec(sql, ...values).raw().toArray();
   if (!rows.length) return undefined;
   assertRelocationTextRows(rows);
-  return execute(storage, { statement: `SELECT ${columns.join(', ')} ${source}`, args, query: true }).rows[0];
+  const projection = columns.map(packedColumn).join(', ');
+  const bound = bind(`SELECT ${projection} ${source}`, args);
+  const packed = storage.sql.exec(bound.sql, ...bound.values).raw().toArray();
+  if (packed.length !== 1 || packed[0].length !== columns.length) throw new Error("Invalid relocation row");
+  return packed[0].map(decodePacked);
+}
+
+// Read a single row of small descriptor values using the SQL bridge's typed
+// parameter binding. The caller supplies a bounded projection and LIMIT 1.
+export function readRelocationDescriptors(storage, statement, args) {
+  const { sql, values } = bind(statement, args);
+  return storage.sql.exec(sql, ...values).raw().toArray();
+}
+
+// Read a bounded BLOB slice with the same typed parameter binding as the SQL
+// bridge. The caller chooses the projection and validates its expected size.
+export function readRelocationBlobSlice(storage, statement, args) {
+  const { sql, values } = bind(statement, args);
+  const rows = storage.sql.exec(sql, ...values).raw().toArray();
+  if (rows.length !== 1 || rows[0].length !== 1 || !(rows[0][0] instanceof ArrayBuffer)) {
+    throw new Error("Invalid reconciliation slice");
+  }
+  return new Uint8Array(rows[0][0]);
 }
 
 export function sqliteError(error) {

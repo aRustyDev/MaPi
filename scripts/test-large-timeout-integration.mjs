@@ -28,15 +28,16 @@ try {
   const attempts = events.filter(event => event.event === 'local.timeout.test.attempt');
   const acknowledgements = events.filter(event => event.event === 'local.timeout.test.ack');
   const probes = events.filter(event => event.event === 'local.move.timeout.checkpoints');
-  assert.deepEqual(attempts.map(event => event.attempt), [1, 2], 'The runner must not automatically retry advance');
-  assert.equal(acknowledgements.length, 1, 'The delayed advance must not be acknowledged');
+  assert.deepEqual(attempts.map(event => event.attempt), attempts.map((_, index) => index + 1), 'Advance attempts must be sequential');
+  assert.equal(attempts.length, acknowledgements.length + 1, 'The delayed advance must not be acknowledged or retried');
+  assert.equal(acknowledgements.at(-1).phase, 'importing', 'The timeout must follow preflight');
   assert.ok(stderr.includes('LOCAL_TIMEOUT_TEST_DELAY_REACHED'), 'The delay must begin after both local RPCs completed');
   assert.equal(probes.length, 1, 'A timeout must produce one checkpoint probe');
   const [registry, source, destination] = probes[0].observations;
   assert.equal(registry.outcome, 'read'); assert.equal(registry.phase, 'moving');
   assert.equal(source.outcome, 'read'); assert.equal(destination.outcome, 'read');
-  assert.equal(source.nextChunk, acknowledgements[0].nextChunk + 1);
-  assert.equal(destination.nextChunk, acknowledgements[0].nextChunk + 1);
+  assert.equal(source.nextChunk, acknowledgements.at(-1).nextChunk + 1);
+  assert.equal(destination.nextChunk, acknowledgements.at(-1).nextChunk + 1);
   assert.match(stderr, /advance: local request failed \(TimeoutError\)/);
   console.log('Local timeout path observed committed source and destination checkpoints after a delayed acknowledgement without retry.');
 } finally {

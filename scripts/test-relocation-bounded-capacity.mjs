@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
@@ -7,7 +7,7 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 const wasm = await readFile('worker/generated/phase1-owner.wasm');
 const bundle = await build({
   entryPoints: ['scripts/relocation-bounded-capacity-worker.mjs'], bundle: true,
-  format: 'esm', platform: 'neutral', write: false, external: ['cloudflare:workers'],
+  format: 'esm', platform: 'neutral', write: false, external: ['cloudflare:workers', 'node:crypto'],
   plugins: [{ name: 'wasm-binding', setup(build) {
     build.onResolve({ filter: /phase1-owner\.wasm$/ }, () => ({ path: './phase1-owner.wasm', external: true }));
   } }],
@@ -16,6 +16,17 @@ const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, private
 const master = Buffer.from(JSON.stringify({ id: 'synthetic-master', pem: privateKey })).toString('base64');
 const secret = randomBytes(32).toString('base64url');
 const token = randomBytes(32).toString('base64url');
+function syntheticDigest(bytes) {
+  const pieces = [];
+  for (let offset = 0; offset < bytes.length; offset += 65536) pieces.push(createHash('sha256').update(bytes.subarray(offset, offset + 65536)).digest());
+  return createHash('sha256').update(Buffer.concat(pieces)).digest('hex');
+}
+const expectedBlob = Buffer.alloc(8_380_000);
+expectedBlob.set([0, 128, 255]);
+const expectedBlobDigest = syntheticDigest(expectedBlob);
+const expectedText = Buffer.from('z' + '😀'.repeat(2094998) + 'xyzab');
+const expectedTextDigest = syntheticDigest(Buffer.concat([Buffer.from('"'), expectedText, Buffer.from('"')]));
+const expectedHandlerDigest = createHash('sha256').update(expectedText).digest('hex');
 const mf = new Miniflare(convertV4MiniflareOptions({
   workers: [{ name: 'synthetic-text-capacity', compatibilityDate: '2026-11-19',
     modules: [{ type: 'ESModule', path: 'worker.js', contents: bundle.outputFiles[0].text }, { type: 'CompiledWasm', path: 'phase1-owner.wasm', contents: wasm }],
@@ -30,6 +41,12 @@ try {
     assert.equal(response.status, 200, `Capacity proof failed during ${value.stage}`);
     if (value.done) {
       assert.equal(value.seeded, 2000);
+      assert.equal(value.sourceRuntimeReleased, true, 'Frozen source must release its Go reactor');
+      assert.equal(value.blobDigest, expectedBlobDigest, 'Large BLOB source and destination must match the native digest');
+      assert.equal(value.nearTextDigest, expectedTextDigest, 'Large TEXT source and destination must match the native digest');
+      assert.equal(value.importedHandler?.status, 200, 'Imported synthetic user must be readable through the Go handler');
+      assert.equal(value.importedHandler.bytes, expectedText.length);
+      assert.equal(value.importedHandler.digest, expectedHandlerDigest);
       assert.equal(value.syntheticEvictions, 3, 'Source and destination must resume three times during the large stream');
       assert.ok(value.largePages >= 2);
       assert.equal(value.oversizedRejected, true, 'Oversized row must be rejected before freeze');
