@@ -2,7 +2,7 @@ const requests = globalThis.mapiHydraRequests ??= new Map();
 let isolateId;
 let isolateInvocation = 0;
 
-export async function runHydra({ module, input, dsn, issuer, systemSecret, dial, fence }) {
+export async function runHydra({ module, input, dsn, issuer, systemSecret, dial, fence, verifiedBindings = false }) {
   isolateId ??= crypto.randomUUID();
   const invocation = ++isolateInvocation;
   const grantType = input.path.split("?")[0] === "/oauth2/token"
@@ -26,6 +26,7 @@ export async function runHydra({ module, input, dsn, issuer, systemSecret, dial,
     dsn,
     issuer,
     systemSecret,
+    verifiedBindings,
     sqlOperations: 0,
     pgConnections: 0,
     pgSync: 0,

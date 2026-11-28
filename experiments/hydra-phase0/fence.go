@@ -19,19 +19,42 @@ import (
 var opaqueID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 func refreshFence(registry *hydra.RegistrySQL, host js.Value) *oauth2.Phase0RefreshFence {
-	var grantID, sessionID, attemptID, refreshSignature string
+	var grantID, sessionID, attemptID, credentialSignature, grantType string
+	var fenceIdentity js.Value
 
 	return &oauth2.Phase0RefreshFence{
-		Begin: func(ctx context.Context, grant, refreshToken string) (bool, error) {
+		BoundAuthorizationCodes: host.Get("verifiedBindings").Bool(),
+		Begin: func(ctx context.Context, grant, credential, kind string) (bool, error) {
 			// The pinned Hydra HMAC strategy uses the second component as
 			// the stored signature. NewAccessRequest already verified it.
-			_, signature, ok := strings.Cut(refreshToken, ".")
+			_, signature, ok := strings.Cut(credential, ".")
 			if !ok || signature == "" {
 				return false, nil
 			}
-			refreshSignature = signature
-			err := registry.BasePersister().Connection(ctx).Store.GetContext(
-				ctx, &sessionID, "SELECT session_id FROM mapi_hydra_grant WHERE grant_id = $1", grant)
+			credentialSignature = signature
+			grantType = kind
+			store := registry.BasePersister().Connection(ctx).Store
+			var err error
+			if host.Get("verifiedBindings").Bool() {
+				var identity boundIdentity
+				err = store.GetContext(ctx, &identity, `SELECT i.project_id, i.user_id, i.session_id, i.issuer
+					FROM mapi_hydra_identity i JOIN mapi_hydra_grant g
+					ON g.grant_id = i.grant_id AND g.session_id = i.session_id WHERE i.grant_id = $1`, grant)
+				if err == nil {
+					if !opaqueID.MatchString(identity.ProjectID) || !opaqueID.MatchString(identity.UserID) ||
+						!opaqueID.MatchString(identity.SessionID) || identity.Issuer != host.Get("issuer").String() {
+						return false, nil
+					}
+					sessionID = identity.SessionID
+					fenceIdentity = js.ValueOf(map[string]any{
+						"projectId": identity.ProjectID, "userId": identity.UserID,
+						"sessionId": identity.SessionID, "issuer": identity.Issuer,
+					})
+				}
+			} else {
+				err = store.GetContext(ctx, &sessionID, "SELECT session_id FROM mapi_hydra_grant WHERE grant_id = $1", grant)
+				fenceIdentity = js.ValueOf(sessionID)
+			}
 			if errors.Is(err, sql.ErrNoRows) {
 				return false, nil
 			}
@@ -39,8 +62,8 @@ func refreshFence(registry *hydra.RegistrySQL, host js.Value) *oauth2.Phase0Refr
 				return false, err
 			}
 			grantID = grant
-			value, err := wait(host.Call("admit", sessionID, grantID))
-			if err != nil || value.IsNull() {
+			value, err := wait(host.Call("admit", fenceIdentity, grantID))
+			if err != nil || value.Type() != js.TypeString {
 				return false, err
 			}
 			attemptID = value.String()
@@ -65,26 +88,31 @@ func refreshFence(registry *hydra.RegistrySQL, host js.Value) *oauth2.Phase0Refr
 			// Two callers can both get past NewAccessRequest. Recheck this
 			// specific token under lock before Hydra rotates the chain.
 			var active bool
-			err = store.GetContext(ctx, &active, `SELECT active FROM hydra_oauth2_refresh
-				WHERE signature = $1 AND request_id = $2 AND nid = $3 FOR UPDATE`,
-				refreshSignature, grantID, persister.NetworkID(ctx))
+			query := `SELECT active FROM hydra_oauth2_refresh
+				WHERE signature = $1 AND request_id = $2 AND nid = $3 FOR UPDATE`
+			if grantType == "authorization_code" {
+				query = `SELECT active FROM hydra_oauth2_code
+					WHERE signature = $1 AND request_id = $2 AND nid = $3 FOR UPDATE`
+			}
+			err = store.GetContext(ctx, &active, query,
+				credentialSignature, grantID, persister.NetworkID(ctx))
 			if errors.Is(err, sql.ErrNoRows) {
 				return false, nil
 			}
 			return active, err
 		},
 		BeforeCommit: func() error {
-			value, err := wait(host.Call("checkpoint", sessionID, "before_commit"))
+			value, err := wait(host.Call("checkpoint", fenceIdentity, "before_commit"))
 			if err == nil && value.Type() == js.TypeBoolean && value.Bool() {
 				host.Set("dropCommitAck", true)
 			}
 			return err
 		},
 		Release: func(context.Context) (bool, error) {
-			if _, err := wait(host.Call("checkpoint", sessionID, "after_commit")); err != nil {
+			if _, err := wait(host.Call("checkpoint", fenceIdentity, "after_commit")); err != nil {
 				return false, err
 			}
-			value, err := wait(host.Call("release", sessionID, attemptID))
+			value, err := wait(host.Call("release", fenceIdentity, attemptID))
 			if err != nil {
 				return false, err
 			}

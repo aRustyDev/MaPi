@@ -47,6 +47,51 @@ func (s *testSessions) GetSessionByID(_ context.Context, p, id string) (*domain.
 	return s.session, nil
 }
 
+func TestValidateBoundSession(t *testing.T) {
+	now := time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC)
+	user := "user_1"
+	sessions := &testSessions{session: &domain.Session{
+		ProjectID: "project_1", ID: "sess_1", UserID: &user,
+		ExpiresAt: now.Add(time.Hour),
+		Factors:   []domain.AuthFactor{domain.SetAuthFactorPassword(now.Add(-time.Minute))},
+	}}
+	issuer := TokenIssuer{
+		Keys: SigningKeys{ProjectID: "project_1"}, Sessions: sessions,
+		Store: Store{Now: func() time.Time { return now }},
+	}
+	ctx := context.Background()
+	if !issuer.ValidateBoundSession(ctx, "project_1", user, "sess_1") {
+		t.Fatal("valid session rejected")
+	}
+	for _, identity := range [][3]string{
+		{"project_2", user, "sess_1"},
+		{"project_1", "user_2", "sess_1"},
+		{"project_1", user, "sess_2"},
+		{"project_1", "", "sess_1"},
+	} {
+		if issuer.ValidateBoundSession(ctx, identity[0], identity[1], identity[2]) {
+			t.Fatalf("mismatched identity accepted: %v", identity)
+		}
+	}
+	sessions.session.ExpiresAt = now
+	if issuer.ValidateBoundSession(ctx, "project_1", user, "sess_1") {
+		t.Fatal("expired session accepted")
+	}
+	sessions.session.ExpiresAt = now.Add(time.Hour)
+	sessions.session.Factors = []domain.AuthFactor{domain.SetAuthFactorUser(now.Add(-time.Minute))}
+	if issuer.ValidateBoundSession(ctx, "project_1", user, "sess_1") {
+		t.Fatal("session without a verified credential accepted")
+	}
+	sessions.session = nil
+	if issuer.ValidateBoundSession(ctx, "project_1", user, "sess_1") {
+		t.Fatal("revoked session accepted")
+	}
+	issuer.Sessions = nil
+	if issuer.ValidateBoundSession(ctx, "project_1", user, "sess_1") {
+		t.Fatal("unavailable session reader accepted")
+	}
+}
+
 func TestSigningKeyRotationAndSignedTokens(t *testing.T) {
 	ctx := context.Background()
 	store, grant := fixture(t)

@@ -25,6 +25,31 @@ import (
 // allocating a new validator on every issuer request.
 var oauthSchemas service.BuiltinSchemaProvider
 
+//go:wasmexport mapi_hydra_session_valid
+func hydraSessionValid() uint64 {
+	var args struct {
+		ProjectID string `json:"projectId"`
+		UserID    string `json:"userId"`
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(input, &args) != nil || runtimePool == nil {
+		return marshal(false)
+	}
+	ctx := context.Background()
+	db := cloudflarewasm.Open()
+	defer db.Close()
+	var project string
+	if db.QueryRowContext(ctx, "SELECT project_id FROM mapi_project").Scan(&project) != nil || project != args.ProjectID {
+		return marshal(false)
+	}
+	issuer := mapioauth.TokenIssuer{
+		Keys:     mapioauth.SigningKeys{ProjectID: project},
+		Sessions: runtimePool.Statements(),
+		Store:    mapioauth.Store{Now: time.Now},
+	}
+	return marshal(issuer.ValidateBoundSession(ctx, project, args.UserID, args.SessionID))
+}
+
 // oauthComposition is a host-only opt-in. The host must authenticate admin
 // calls, enforce ingress limits and origin routing, and may not publicly expose
 // provider endpoints before discovery, userinfo, revocation, logout and the

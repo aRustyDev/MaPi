@@ -12,7 +12,7 @@ async function port() { const s=createServer().listen(0,"127.0.0.1");await once(
 const dir=await mkdtemp(resolve(tmpdir(),"mapi-app-owner-fence-")), address=await port(), inspector=await port(), envFile=resolve(dir,"worker.env");
 const {privateKey}=generateKeyPairSync("rsa",{modulusLength:2048,privateKeyEncoding:{type:"pkcs8",format:"pem"},publicKeyEncoding:{type:"spki",format:"pem"}});
 const master=Buffer.from(JSON.stringify({id:"master-test",pem:privateKey})).toString("base64");
-await writeFile(envFile,`MAPI_MASTER_KEY=${master}\n`,{mode:0o600});
+await writeFile(envFile,`MAPI_MASTER_KEY=${master}\n${process.env.MAPI_TEST_HYDRA === "1" ? "MAPI_HYDRA_ENABLED=1\n" : ""}`,{mode:0o600});
 const server=spawn(process.execPath,[resolve("node_modules/wrangler/bin/wrangler.js"),"dev","--local","--config","scripts/app-owner-fence-test.wrangler.jsonc","--env-file",envFile,"--ip","127.0.0.1","--port",String(address),"--inspector-port",String(inspector),"--persist-to",dir],{stdio:["ignore","ignore","inherit"],env:{...process.env,WRANGLER_LOG_PATH:resolve(dir,"wrangler.log"),WRANGLER_SEND_METRICS:"false"}});
 try {
   let response;

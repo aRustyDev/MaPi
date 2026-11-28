@@ -12,7 +12,8 @@ type phase0FenceKey struct{}
 // Phase0RefreshFence wraps only a refresh request after Hydra has authenticated
 // its client and recovered the original grant ID from the refresh token.
 type Phase0RefreshFence struct {
-	Begin        func(context.Context, string, string) (bool, error)
+	BoundAuthorizationCodes bool
+	Begin        func(context.Context, string, string, string) (bool, error)
 	Receipt      func(context.Context) (bool, error)
 	BeforeCommit func() error
 	Release      func(context.Context) (bool, error)
@@ -23,10 +24,11 @@ func WithPhase0RefreshFence(ctx context.Context, fence *Phase0RefreshFence) cont
 }
 
 func phase0RefreshFence(ctx context.Context, request fosite.AccessRequester) *Phase0RefreshFence {
-	if !request.GetGrantTypes().ExactOne(string(fosite.GrantTypeRefreshToken)) {
+	fence, _ := ctx.Value(phase0FenceKey{}).(*Phase0RefreshFence)
+	if fence == nil || (!request.GetGrantTypes().ExactOne(string(fosite.GrantTypeRefreshToken)) &&
+		!(fence.BoundAuthorizationCodes && request.GetGrantTypes().ExactOne(string(fosite.GrantTypeAuthorizationCode)))) {
 		return nil
 	}
-	fence, _ := ctx.Value(phase0FenceKey{}).(*Phase0RefreshFence)
 	return fence
 }
 

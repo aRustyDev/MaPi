@@ -96,6 +96,11 @@ export class OAuthCompositionTest extends DurableObject {
   }
   if(!flow.handoff_token)throw new Error('password flow did not produce a handoff');
   const session=upstream('POST',`/sessions/exchange?project_id=${encodeURIComponent(project)}`,{handoff_token:flow.handoff_token},true);
+  const boundSession={projectId:project,userId:session.data.session.user_id,sessionId:session.data.session.session_id};
+  if(call('mapi_hydra_session_valid',boundSession)!==true)throw new Error('live Hydra-bound session rejected');
+  if(call('mapi_hydra_session_valid',{...boundSession,projectId:'project_other'})!==false)throw new Error('foreign Hydra project accepted');
+  if(call('mapi_hydra_session_valid',{...boundSession,userId:'user_other'})!==false)throw new Error('foreign Hydra subject accepted');
+  if(call('mapi_hydra_session_valid',{...boundSession,sessionId:'sess_other'})!==false)throw new Error('unknown Hydra session accepted');
   const sessionCookie=session.headers['Set-Cookie'][0].split(';')[0];
   const cookie=`${sessionCookie}; ${binding}`;
   const continuation=oauth('GET',`/oauth/continue?request=${encodeURIComponent(handle)}`,{cookie:[cookie]});
@@ -172,6 +177,7 @@ export class OAuthCompositionTest extends DurableObject {
   const logout=oauth('POST',logoutURL,logoutHeaders,logoutForm.toString());
   const destination=new URL(logout.headers.Location?.[0]??'https://invalid.example/');
   if(logout.status!==303||destination.origin!=='https://shop.example'||destination.pathname!=='/signed-out'||destination.searchParams.get('from')!=='mapi'||destination.searchParams.get('state')!=='logout-state'||userinfo(secondBody.access_token).status!==401)throw new Error(`logout failed or session remains active: ${logout.status}`);
+  if(call('mapi_hydra_session_valid',boundSession)!==false)throw new Error('revoked Hydra-bound session accepted');
   const events=this.ctx.storage.sql.exec("SELECT event_type FROM events WHERE project_id = ?",project).toArray().map(x=>x.event_type);
   if(events.filter(e=>e==='mapi.oauth.signing_key.rotated').length!==2||!events.includes('application.created')||!events.includes('mapi.oauth.refresh.reuse')||!events.includes('mapi.oauth.code.issued')||!events.includes('auth.token.issued')||events.filter(e=>e==='mapi.oauth.logout_uri.registered').length!==1||events.filter(e=>e==='auth.token.revoked').length<2)throw new Error('transactional audit missing');
   return {ok:true,keys:jwks.keys.length,events:events.length,journey:true,memoryBytes:memory().byteLength,elapsedMs:Date.now()-start};

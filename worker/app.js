@@ -7,6 +7,7 @@ import { canonicalOrigin, ProjectRegistry } from "./registry.js";
 import { renderLogin } from "./login-ui.js";
 import { handleFlowProxy } from "./flow-proxy.js";
 import { handleOAuthIngress, isOAuthRoute } from "./oauth-ingress.js";
+import { handleHydraIngress, isHydraRoute } from "./hydra-ingress.js";
 import { logOverload, logReactorLifecycle, observeWasmHighWater } from "./runtime-diagnostics.js";
 import { classifyFlowSubmission } from "./flow-diagnostics.js";
 import { assertOwnerFence, createOwnerFenceTable, freezeOwnerFence, initializeOwnerFence, reserveMoveDestination, retireOwnerFence, withOwnerFence } from "./owner-fence.js";
@@ -23,6 +24,7 @@ import { readBoundedText as readLimited } from "./request-body.js";
 
 export { ProjectRegistry };
 export { RelocationCoordinator } from "./relocation-coordinator.js";
+export { HydraSessionAuthority } from "./hydra-session-authority.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -830,6 +832,25 @@ export class NextgenApplication extends DurableObject {
     return this.#call("mapi_request", request);
   }
 
+  // Called only by the private Hydra integration with verified grant metadata.
+  async hydraSessionValid(identity, route) {
+    try {
+      return await this.#withRoute(route, () => {
+        if (this.env.MAPI_HYDRA_ENABLED !== "1" || !this.#admitRoute(route)) return false;
+        if (typeof identity?.userId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(identity.userId) ||
+            typeof identity?.sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(identity.sessionId)) return false;
+        this.#initialize();
+        return this.#call("mapi_hydra_session_valid", {
+          projectId: route.projectId,
+          userId: identity.userId,
+          sessionId: identity.sessionId,
+        }) === true;
+      });
+    } catch {
+      return false;
+    }
+  }
+
   oauthRequest(request, route) {
     return this.#withRoute(route, () => this.#oauthRequest(request, route));
   }
@@ -1305,6 +1326,13 @@ export default {
     const ownerRoute = { projectId: route.project_id, origin: route.origin, objectName: route.object_name, generation: route.generation };
     // Hot-path admission, rate limiting and execution happen together inside
     // the owning object. The registry must still resolve an active route first.
+    if (route.state === "active" && env.MAPI_HYDRA_ENABLED === "1" && isHydraRoute(request.method, url.pathname, route.project_id)) {
+      if (env.MAPI_MAINTENANCE === "1") return new Response(null, { status: 503, headers: noStore });
+      return handleHydraIngress(request, env, object, ownerRoute);
+    }
+    if (env.MAPI_HYDRA_ENABLED === "1" && url.pathname.startsWith(`/oauth/${route.project_id}/`)) {
+      return new Response(null, { status: 404, headers: noStore });
+    }
     if (route.state === "active" && env.MAPI_OIDC_EXPERIMENTAL === "1" && isOAuthRoute(request.method, url.pathname, route.project_id)) {
       if (env.MAPI_MAINTENANCE === "1") return new Response(null, { status: 503, headers: noStore });
       try { return await handleOAuthIngress(request, object, route.project_id, route.origin, ownerRoute); }
@@ -1466,6 +1494,21 @@ export default {
         let text;
         try { text = await readLimited(request, 4096); } catch { return new Response(null, { status: 413, headers: noStore }); }
         const csrfToken = new URLSearchParams(text).get("csrf") ?? "";
+        if (env.MAPI_HYDRA_ENABLED === "1") {
+          try {
+            const cookie = request.headers.get("cookie") ?? "";
+            const session = await object.session(cookie, "read", "", ownerRoute);
+            const csrf = await object.session(cookie, "csrf", "", ownerRoute);
+            if (session.status !== 200 || csrf.status !== 200 ||
+                !sameKey(csrfToken, csrf.data?.csrf_token)) return new Response(null, { status: 403, headers: noStore });
+            const issuer = route.origin + `/oauth/${route.project_id}`;
+            if (env.HYDRA_ISSUER !== issuer) return new Response(null, { status: 503, headers: noStore });
+            await env.HYDRA_ISSUER_WORKER.closeSession({
+              projectId: route.project_id, userId: session.data.user_id,
+              sessionId: session.data.session_id, issuer,
+            });
+          } catch { return new Response(null, { status: 503, headers: noStore }); }
+        }
         let result;
         try { result = await object.session(request.headers.get("cookie") ?? "", "logout", csrfToken, ownerRoute); }
         catch (error) { logOverload(error, "application"); return new Response(null, { status: 503, headers: noStore }); }

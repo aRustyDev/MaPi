@@ -1,0 +1,18 @@
+{
+  // Replace placeholders and deploy only to an isolated staging environment.
+  "name": "<private-hydra-worker-name>",
+  "main": "../../worker/hydra.js",
+  "compatibility_date": "2026-11-25",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": { "HYDRA_ISSUER": "https://<staging-host>/oauth/<project-id>" },
+  "services": [{
+    "binding": "HYDRA_SESSION_AUTHORITY",
+    "service": "<nextgen-staging-worker-name>",
+    "entrypoint": "HydraSessionAuthority"
+  }],
+  "hyperdrive": [{ "binding": "HYDRA_DATABASE", "id": "<hyperdrive-id>" }],
+  "durable_objects": { "bindings": [{ "name": "HYDRA_FENCES", "class_name": "HydraSessionFence" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HydraSessionFence"] }]
+  // Provide HYDRA_SYSTEM_SECRET as a Worker secret, never as a var.
+}
