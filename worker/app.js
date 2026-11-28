@@ -29,6 +29,14 @@ const decoder = new TextDecoder();
 const rejected = Symbol("transaction rejected");
 const noStore = { "cache-control": "no-store" };
 
+// SQLite resolves ASCII table names case-insensitively. Use the same identity
+// for the control tables that decide whether an owner may serve requests.
+function ownerControlTables(sql) {
+  const tables = sql.exec(`SELECT lower(name) AS name FROM sqlite_schema WHERE type = 'table'
+    AND name COLLATE NOCASE IN ('mapi_owner_fence', 'mapi_relocation_project', 'mapi_destination_reservation', 'mapi_pending_owner')`);
+  return new Set(tables.toArray().map(row => row.name));
+}
+
 // Different upstream stages depend on whether the identifier exists. Keep
 // their failures indistinguishable until an equal-work admission design is
 // available; the separate IP/global admission check still returns 429.
@@ -107,12 +115,10 @@ export class NextgenApplication extends DurableObject {
       if (epochs.length !== 1 || epochs[0].epoch !== this.#recoveryObjectEpoch) return;
     }
     if (env.MAPI_RUNTIME_DIAGNOSTICS === "1") console.log(JSON.stringify({ event: "mapi.owner.boot", bootId: this.#bootId, objectId: ctx.id.toString() }));
-    const hasReservation = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_destination_reservation'").toArray().length > 0;
-    if (hasReservation && ctx.storage.sql.exec("SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1").toArray().length) return;
-    const hasImportMetadata = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_relocation_project'").toArray().length > 0;
-    if (hasImportMetadata && ctx.storage.sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing', 'staged')").toArray().length) return;
-    const hasFence = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_owner_fence'").toArray().length > 0;
-    if (hasFence) {
+    const control = ownerControlTables(ctx.storage.sql);
+    if (control.has("mapi_destination_reservation") && ctx.storage.sql.exec("SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1").toArray().length) return;
+    if (control.has("mapi_relocation_project") && ctx.storage.sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing', 'staged')").toArray().length) return;
+    if (control.has("mapi_owner_fence")) {
       const fence = ctx.storage.sql.exec("SELECT state FROM mapi_owner_fence WHERE singleton = 1").toArray()[0];
       if (!fence || !["pending", "active", "frozen", "retired"].includes(fence.state)) throw new Error("Invalid owner fence");
       this.#fenceArmed = true;
@@ -125,8 +131,7 @@ export class NextgenApplication extends DurableObject {
     // Empty and interrupted pending owners must not create schema in a
     // constructor, which has no registry reservation authority.
     const hasSchema = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version'").toArray().length;
-    const hasPending = ctx.storage.sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner'").toArray().length;
-    if (!hasSchema || hasPending) return;
+    if (!hasSchema || control.has("mapi_pending_owner")) return;
     // A legacy owner has no route authority during construction. Check its
     // existing schema without applying missing setup or a target migration.
     const required = ["mapi_project", "mapi_project_origin", "mapi_login_limits", "mapi_recovery_epoch"];
@@ -164,18 +169,17 @@ export class NextgenApplication extends DurableObject {
   #detectFence() {
     this.#assertRecoveryObjectEpoch();
     const sql = this.ctx.storage.sql;
-    const pending = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_pending_owner'").toArray().length;
+    const control = ownerControlTables(sql);
     const schema = sql.exec("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'mapi_schema_version'").toArray().length;
-    if ((!schema || pending) && !this.#pendingAuthority) throw new Error("Owner provisioning is not active");
+    if ((!schema || control.has("mapi_pending_owner")) && !this.#pendingAuthority) throw new Error("Owner provisioning is not active");
     if (this.#pendingAuthority) this.#assertPendingAuthority();
-    const metadata = this.ctx.storage.sql.exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('mapi_owner_fence', 'mapi_relocation_project', 'mapi_destination_reservation')").toArray().map((row) => row.name);
-    if (metadata.includes("mapi_destination_reservation") && this.ctx.storage.sql.exec("SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1").toArray().length) {
+    if (control.has("mapi_destination_reservation") && this.ctx.storage.sql.exec("SELECT 1 FROM mapi_destination_reservation WHERE singleton = 1").toArray().length) {
       throw new Error("Owner import is not active");
     }
-    if (metadata.includes("mapi_relocation_project") && this.ctx.storage.sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing', 'staged')").toArray().length) {
+    if (control.has("mapi_relocation_project") && this.ctx.storage.sql.exec("SELECT 1 FROM mapi_relocation_project WHERE state IN ('importing', 'staged')").toArray().length) {
       throw new Error("Owner import is not active");
     }
-    if (metadata.includes("mapi_owner_fence")) this.#fenceArmed = true;
+    if (control.has("mapi_owner_fence")) this.#fenceArmed = true;
   }
 
   #assertPendingAuthority() {

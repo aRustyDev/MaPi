@@ -9,6 +9,13 @@ export class MaintenanceRegistry extends ProjectRegistry {
 export class AppOwnerFenceTest extends NextgenApplication {
   async arm(route) { initializeOwnerFence(this.ctx.storage, route); await this.ctx.storage.sync(); }
   freeze(route) { freezeOwnerFence(this.ctx.storage, route, "test-move"); }
+  changeFenceTableCase() {
+    this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      sql.exec("ALTER TABLE mapi_owner_fence RENAME TO test_fence_tmp");
+      sql.exec("ALTER TABLE test_fence_tmp RENAME TO MAPI_OWNER_FENCE");
+    });
+  }
   throttleCount() { return this.ctx.storage.sql.exec("SELECT COALESCE(SUM(count), 0) AS count FROM mapi_login_limits").one().count; }
   fenceSideEffects() {
     const sql = this.ctx.storage.sql;
@@ -79,7 +86,11 @@ export default {
       await reject(() => owner.evict());
       owner = env.OWNER.getByName("application");
       await reject(() => owner.addUser("restart@example.com", "Password-restart-123!", route));
-      if (JSON.stringify(await owner.testCounts()) !== JSON.stringify(after)) throw Error("Frozen owner state changed after restart");
+      await owner.changeFenceTableCase();
+      await reject(() => owner.evict());
+      owner = env.OWNER.getByName("application");
+      await reject(() => owner.addUser("mixed-case@example.com", "Password-restart-123!", route));
+      if (JSON.stringify(await owner.testCounts()) !== JSON.stringify(after) || JSON.stringify(await owner.fenceSideEffects()) !== frozenEffects) throw Error("Frozen owner effects changed after case-varied restart");
       const recovery = env.MAINTENANCE_OWNER.getByName("recovery");
       const maintenanceRegistry = env.MAINTENANCE_REGISTRY.getByName("projects");
       await maintenanceRegistry.reserve(origin, "recovery");
