@@ -29,6 +29,8 @@ export class DigestFixture extends DurableObject {
     sql.exec("INSERT INTO blob_key_probe VALUES (X'0080FF', X'AA00')");
     sql.exec('CREATE TABLE malformed_fixture (id TEXT PRIMARY KEY, value TEXT)');
     sql.exec("INSERT INTO malformed_fixture VALUES ('bad', CAST(zeroblob(65535) || X'80' AS TEXT))");
+    sql.exec('CREATE TABLE malformed_small (id TEXT PRIMARY KEY, value TEXT)');
+    sql.exec("INSERT INTO malformed_small VALUES ('bad', CAST(X'80' AS TEXT))");
   }
   digest(role, table, cursor) { return digestRelocationPage(this.ctx.storage, manifest, role, table, cursor); }
   keySlices() {
@@ -37,6 +39,11 @@ export class DigestFixture extends DurableObject {
     return { integer: integer.toBase64(), blob: blob.toBase64() };
   }
   async rejectMalformed() {
+    const smallManifest = { ...manifest, tables: ['malformed_small'] };
+    let rejectedSmall = false;
+    try { await digestRelocationPage(this.ctx.storage, smallManifest, 'source', 'malformed_small', null); }
+    catch (error) { if (!String(error).includes('Invalid UTF-8 TEXT in relocation row')) throw error; rejectedSmall = true; }
+    if (!rejectedSmall) return false;
     const badManifest = { ...manifest, tables: ['malformed_fixture'] };
     const first = await digestRelocationPage(this.ctx.storage, badManifest, 'source', 'malformed_fixture', null);
     try { await digestRelocationPage(this.ctx.storage, badManifest, 'source', 'malformed_fixture', first.cursor); }
