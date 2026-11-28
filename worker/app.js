@@ -830,6 +830,25 @@ export class NextgenApplication extends DurableObject {
     return this.#call("mapi_request", request);
   }
 
+  // Called only by the private Hydra integration with verified grant metadata.
+  async hydraSessionValid(identity, route) {
+    try {
+      return await this.#withRoute(route, () => {
+        if (this.env.MAPI_HYDRA_ENABLED !== "1" || !this.#admitRoute(route)) return false;
+        if (typeof identity?.userId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(identity.userId) ||
+            typeof identity?.sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(identity.sessionId)) return false;
+        this.#initialize();
+        return this.#call("mapi_hydra_session_valid", {
+          projectId: route.projectId,
+          userId: identity.userId,
+          sessionId: identity.sessionId,
+        }) === true;
+      });
+    } catch {
+      return false;
+    }
+  }
+
   oauthRequest(request, route) {
     return this.#withRoute(route, () => this.#oauthRequest(request, route));
   }

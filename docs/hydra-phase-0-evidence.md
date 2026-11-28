@@ -1,6 +1,6 @@
 # Hydra Phase 0 evidence and issuer comparison
 
-The isolated November 25, 2026 spike passed its hosted functional gates with Hydra OSS v26.2.0 and a real PostgreSQL service. The evidence supports continuing the Hydra investigation and a proposed go decision. It does not establish production readiness or a measured engineering-time saving. [Proposed decision](hydra-adoption-decision.md) · [Tracking issue #136](https://github.com/aRustyDev/MaPi/issues/136)
+The isolated November 25, 2026 spike passed its hosted functional gates with Hydra OSS v26.2.0 and a real PostgreSQL service. The evidence informed the decision to adopt Hydra. It does not establish production readiness or a measured engineering-time saving. [Adoption decision](hydra-adoption-decision.md) · [Tracking issue #136](https://github.com/aRustyDev/MaPi/issues/136)
 
 ## Configuration and provenance
 
@@ -43,7 +43,7 @@ Several RPC events were labeled canceled despite correlated successful caller re
 | Runtime and recovery | Qualify the exact candidate against #49, key rollover, recovery, operational safeguards and pilot sign-off. | Reduce and measure the complete Worker composition against the same gates, repeat the race matrix and recovery, and rehearse credential-aware cutover and rollback. |
 | Maintenance | Own MaPi's issuer extension and protocol updates. | Own Hydra version and security updates, patch rebases, the Go/Wasm and Postgres bridge, and their regression qualification. |
 
-The current issuer's sign-off gates remain open in [#50](https://github.com/aRustyDev/MaPi/issues/50). Hydra work is decomposed in [#128](https://github.com/aRustyDev/MaPi/issues/128). The functional evidence has moderate confidence for the recorded schedules, low confidence for capacity and cold-start generalization, and no quantified confidence in comparative delivery estimates. A proposed recommendation and explicit ownership needs are recorded in [the decision draft](hydra-adoption-decision.md).
+The current issuer's sign-off gates remain open in [#50](https://github.com/aRustyDev/MaPi/issues/50). Hydra work is decomposed in [#128](https://github.com/aRustyDev/MaPi/issues/128). The functional evidence has moderate confidence for the recorded schedules, low confidence for capacity and cold-start generalization, and no quantified confidence in comparative delivery estimates. The decision and patch ownership are recorded in [the adoption decision](hydra-adoption-decision.md).
 
 ## Reproducer verification
 

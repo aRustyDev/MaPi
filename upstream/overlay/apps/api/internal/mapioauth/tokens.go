@@ -79,6 +79,17 @@ func (i TokenIssuer) session(ctx context.Context, project, user, id string) (*do
 	}
 	return s, last, nil
 }
+
+// ValidateBoundSession checks a previously authenticated grant's project, user
+// and session against current authoritative Nextgen state. The caller must
+// obtain these identifiers from verified grant metadata.
+func (i TokenIssuer) ValidateBoundSession(ctx context.Context, project, user, id string) bool {
+	if i.Sessions == nil || i.Store.Now == nil || i.Keys.ProjectID == "" {
+		return false
+	}
+	_, _, err := i.session(ctx, project, user, id)
+	return err == nil
+}
 func randomID() (string, error) {
 	var id [32]byte
 	if _, err := rand.Read(id[:]); err != nil {

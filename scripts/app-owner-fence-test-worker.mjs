@@ -61,15 +61,29 @@ export default {
       if (await owner.throttleCount() !== beforeLoginThrottle + 2) throw Error("Authorized login did not persist both throttle buckets");
       const session = await owner.session(signedIn.cookie, "read", "", route);
       if (session.status !== 200) throw Error("Authorized session read failed");
+      const identity = { userId: session.data.user_id, sessionId: session.data.session_id };
+      if (env.MAPI_HYDRA_ENABLED === "1") {
+        if (!await owner.hydraSessionValid(identity, route)) throw Error("Live Hydra session rejected");
+        if (await owner.hydraSessionValid({ ...identity, userId: "user_other" }, route)) throw Error("Foreign Hydra subject accepted");
+        if (await owner.hydraSessionValid(identity, { ...route, projectId: "project_other" })) throw Error("Foreign Hydra project accepted");
+        if (await owner.hydraSessionValid(identity, { ...route, generation: 2 })) throw Error("Stale Hydra owner route accepted");
+        if (await owner.hydraSessionValid({ ...identity, sessionId: "" }, route)) throw Error("Invalid Hydra session accepted");
+      } else if (await owner.hydraSessionValid(identity, route)) throw Error("Disabled Hydra session check accepted");
       const beforeStaleAuth = await owner.testCounts();
       const beforeStaleEffects = JSON.stringify(await owner.fenceSideEffects());
       await reject(() => owner.login("before@example.com", "Password-before-123!", "192.0.2.1", { ...route, generation: 2 }));
       await reject(() => owner.session(signedIn.cookie, "read", "", { ...route, generation: 2 }));
       await reject(() => owner.allowLogin("192.0.2.18"));
       if (JSON.stringify(await owner.testCounts()) !== JSON.stringify(beforeStaleAuth) || JSON.stringify(await owner.fenceSideEffects()) !== beforeStaleEffects) throw Error("Stale auth changed data, audit, or throttle");
+      if (env.MAPI_HYDRA_ENABLED === "1") {
+        const csrf = await owner.session(signedIn.cookie, "csrf", "", route);
+        if (csrf.status !== 200 || (await owner.session(signedIn.cookie, "logout", csrf.data.csrf_token, route)).status !== 204) throw Error("Session logout failed");
+        if (await owner.hydraSessionValid(identity, route)) throw Error("Revoked Hydra session accepted");
+      }
       const after = await owner.testCounts();
       if (after.users !== before.users + 1 || after.events <= before.events) throw Error("Authorized Go mutation did not write user and audit");
       await owner.freeze(route);
+      if (await owner.hydraSessionValid(identity, route)) throw Error("Frozen Hydra owner accepted");
       const frozenEffects = JSON.stringify(await owner.fenceSideEffects());
       await reject(() => owner.addUser("frozen@example.com", "Password-frozen-123!", route));
       await reject(() => owner.login("before@example.com", "Password-before-123!", "192.0.2.1", route));
